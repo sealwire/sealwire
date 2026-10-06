@@ -391,6 +391,7 @@ impl RelayState {
         broker_room_id: &str,
         pairing_join_ticket: &str,
         relay_peer_id: &str,
+        relay_verify_key: &str,
     ) -> PairingTicketView {
         let pairing_payload = pairing_payload(
             &prepared.pairing_id,
@@ -400,6 +401,7 @@ impl RelayState {
             broker_room_id,
             pairing_join_ticket,
             relay_peer_id,
+            relay_verify_key,
             self.security.mode(),
             &prepared.path_scope,
         );
@@ -781,6 +783,8 @@ impl RelayState {
         // Same for live transcript deltas — a revoked device must stop being a
         // publish target immediately, not merely fail to decrypt.
         self.clear_watched_threads_for_device(device_id);
+        // Its request sessions go with it, so further requests cannot be accepted.
+        self.forget_remote_requests_for_device(device_id);
         self.record_revoked_device(&device, now);
         if self.active_controller_device_id.as_deref() == Some(device_id) {
             self.active_controller_device_id = None;
@@ -881,7 +885,7 @@ impl RelayState {
         now: u64,
     ) -> Result<IssuedClaimChallenge, String> {
         self.prune_expired_claim_challenges(now);
-        self.prune_claim_challenges_for_device(device_id, "");
+        self.prune_claim_challenges_for_peer(device_id, peer_id);
         let challenge_id = format!("claim-{}", random_token(10).to_ascii_lowercase());
         let challenge = random_token(40);
         let expires_at = now.saturating_add(CLAIM_CHALLENGE_TTL_SECS);
@@ -937,7 +941,7 @@ impl RelayState {
         peer_id: &str,
         now: u64,
     ) -> Result<CompletedRemoteClaim, String> {
-        let challenge = self.claim_challenge(device_id, challenge_id, peer_id, now)?;
+        self.claim_challenge(device_id, challenge_id, peer_id, now)?;
         self.pending_claim_challenges.remove(challenge_id);
         let device = self
             .paired_devices
@@ -952,7 +956,7 @@ impl RelayState {
             .ok_or_else(|| "device is not paired".to_string())?;
         self.bind_surface_peer_to_device(device_id, peer_id);
         self.sync_device_record_from_approved_device(&approved_device, now);
-        self.prune_claim_challenges_for_device(device_id, &challenge.challenge_id);
+        self.prune_claim_challenges_for_peer(device_id, peer_id);
 
         Ok(CompletedRemoteClaim)
     }
@@ -1186,11 +1190,10 @@ impl RelayState {
         record.broker_join_ticket_expires_at = device.broker_join_ticket_expires_at;
     }
 
-    fn prune_claim_challenges_for_device(&mut self, device_id: &str, except_challenge_id: &str) {
-        self.pending_claim_challenges
-            .retain(|challenge_id, challenge| {
-                challenge.device_id != device_id || challenge_id == except_challenge_id
-            });
+    fn prune_claim_challenges_for_peer(&mut self, device_id: &str, peer_id: &str) {
+        self.pending_claim_challenges.retain(|_, challenge| {
+            challenge.device_id != device_id || challenge.peer_id != peer_id
+        });
     }
 }
 
@@ -1316,6 +1319,7 @@ fn pairing_payload(
     broker_channel_id: &str,
     pairing_join_ticket: &str,
     relay_peer_id: &str,
+    relay_verify_key: &str,
     security_mode: crate::protocol::SecurityMode,
     path_scope: &[String],
 ) -> String {
@@ -1328,6 +1332,7 @@ fn pairing_payload(
         "broker_channel_id": broker_channel_id,
         "pairing_join_ticket": pairing_join_ticket,
         "relay_peer_id": relay_peer_id,
+        "relay_verify_key": relay_verify_key,
         "security_mode": security_mode,
         "path_scope": path_scope,
     });

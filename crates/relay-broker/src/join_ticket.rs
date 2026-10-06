@@ -43,6 +43,10 @@ pub struct JoinTicketClaims {
     pub device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
+    /// HMAC-authenticated relay identity. Required for relay joins. The socket
+    /// cannot substitute a different key at proof time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_verify_key: Option<String>,
     pub nonce: String,
 }
 
@@ -133,13 +137,14 @@ impl JoinTicketKey {
 }
 
 impl JoinTicketClaims {
-    pub fn relay_join(channel_id: &str, peer_id: &str) -> Self {
-        Self::relay_join_with_expiry(channel_id, peer_id, None)
+    pub fn relay_join(channel_id: &str, peer_id: &str, relay_verify_key: &str) -> Self {
+        Self::relay_join_with_expiry(channel_id, peer_id, relay_verify_key, None)
     }
 
     pub fn relay_join_with_expiry(
         channel_id: &str,
         peer_id: &str,
+        relay_verify_key: &str,
         expires_at: Option<u64>,
     ) -> Self {
         Self {
@@ -150,6 +155,7 @@ impl JoinTicketClaims {
             peer_id: Some(peer_id.to_string()),
             pairing_id: None,
             device_id: None,
+            relay_verify_key: Some(relay_verify_key.to_string()),
             expires_at,
             nonce: random_nonce(),
         }
@@ -164,6 +170,7 @@ impl JoinTicketClaims {
             peer_id: None,
             pairing_id: Some(pairing_id.to_string()),
             device_id: None,
+            relay_verify_key: None,
             expires_at: Some(expires_at),
             nonce: random_nonce(),
         }
@@ -178,6 +185,7 @@ impl JoinTicketClaims {
             peer_id: None,
             pairing_id: None,
             device_id: Some(device_id.to_string()),
+            relay_verify_key: None,
             expires_at,
             nonce: random_nonce(),
         }
@@ -213,6 +221,13 @@ impl JoinTicketClaims {
                         "relay join_ticket cannot include pairing_id or device_id".to_string()
                     );
                 }
+                let verify_key = self
+                    .relay_verify_key
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("");
+                crate::public_control::validate_relay_verify_key(verify_key)
+                    .map_err(|_| "relay join_ticket relay_verify_key is required".to_string())?;
             }
             JoinTicketKind::PairingSurfaceJoin => {
                 if self.role != PeerRole::Surface {
@@ -227,8 +242,11 @@ impl JoinTicketClaims {
                 {
                     return Err("pairing surface join_ticket pairing_id is required".to_string());
                 }
-                if self.device_id.is_some() {
-                    return Err("pairing surface join_ticket cannot include device_id".to_string());
+                if self.device_id.is_some() || self.relay_verify_key.is_some() {
+                    return Err(
+                        "pairing surface join_ticket cannot include device_id or relay_verify_key"
+                            .to_string(),
+                    );
                 }
                 if self.expires_at.is_none() {
                     return Err("pairing surface join_ticket expires_at is required".to_string());
@@ -247,8 +265,11 @@ impl JoinTicketClaims {
                 {
                     return Err("device surface join_ticket device_id is required".to_string());
                 }
-                if self.pairing_id.is_some() {
-                    return Err("device surface join_ticket cannot include pairing_id".to_string());
+                if self.pairing_id.is_some() || self.relay_verify_key.is_some() {
+                    return Err(
+                        "device surface join_ticket cannot include pairing_id or relay_verify_key"
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -301,7 +322,12 @@ mod tests {
         let mut secret = [0_u8; 48];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
         let key = JoinTicketKey::from_secret(secret).expect("random key");
-        let claims = JoinTicketClaims::relay_join("room", "relay");
+        let verify_key = base64::engine::general_purpose::STANDARD.encode(
+            ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let claims = JoinTicketClaims::relay_join("room", "relay", &verify_key);
         let ticket = key.mint(&claims).expect("ticket");
         assert_eq!(key.verify(&ticket).expect("verified"), claims);
     }

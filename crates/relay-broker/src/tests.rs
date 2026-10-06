@@ -22,15 +22,18 @@ use crate::auth::BrokerAuthMode;
 use crate::join_ticket::{JoinTicketClaims, JoinTicketKey};
 
 use crate::public_control::{
-    client_claim_message, AccessReleaseRequest, AccessReleaseResponse, ClientClaimRequest,
+    client_claim_message, relay_control_message, relay_control_request_sha256, relay_join_message,
+    relay_ws_ticket_message, AccessReleaseRequest, AccessReleaseResponse, ClientClaimRequest,
     ClientClaimResponse, ClientGrantRequest, ClientGrantResponse, ClientIdentityRevokeResponse,
     ClientIdentityRotateResponse, ClientRelaysResponse, ClientSessionResponse,
     DeviceGrantBulkRevokeRequest, DeviceGrantBulkRevokeResponse, DeviceGrantRequest,
     DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
     DeviceSessionResponse, DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse,
-    PublicControlPlane, RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
-    RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayWsTokenRequest,
-    RelayWsTokenResponse,
+    PublicControlPlane, RelayControlChallengeRequest, RelayControlChallengeResponse,
+    RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
+    RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayWsTokenChallengeRequest,
+    RelayWsTokenChallengeResponse, RelayWsTokenRequest, RelayWsTokenResponse,
+    RELAY_CONTROL_CHALLENGE_HEADER, RELAY_CONTROL_SIGNATURE_HEADER,
 };
 
 #[tokio::test(start_paused = true)]
@@ -45,6 +48,105 @@ async fn stalled_socket_writes_time_out() {
         .await
         .expect_err("a stalled writer must time out");
     assert!(error.contains("timed out"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn surface_batch_flood_is_rejected_without_disconnecting_recipients() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let address = spawn_app().await;
+        let relay_url = websocket_url(
+            address,
+            "room-a",
+            protocol::PeerRole::Relay,
+            Some("relay-1"),
+            JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
+        );
+        let (mut relay, _) = connect_async(&relay_url).await.unwrap();
+        next_server_message(&mut relay).await;
+        let surface_url = websocket_url(
+            address,
+            "room-a",
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::pairing_surface_join("room-a", "pairing-flood", u64::MAX),
+        );
+        let (mut surface, _) = connect_async(&surface_url).await.unwrap();
+        next_server_message(&mut surface).await;
+        next_server_message(&mut relay).await;
+        let other_url = websocket_url(
+            address,
+            "room-a",
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::pairing_surface_join("room-a", "pairing-other", u64::MAX),
+        );
+        let (mut other, _) = connect_async(&other_url).await.unwrap();
+        let other_id = match next_server_message(&mut other).await {
+            ServerMessage::Welcome { peer_id, .. } => peer_id,
+            message => panic!("expected welcome, got {message:?}"),
+        };
+        next_server_message(&mut relay).await;
+        next_server_message(&mut surface).await;
+        let batch = vec![json!({"target_peer_id":"relay-1", "payload":{"kind":"probe"}}); 400];
+        for payload in [
+            json!({"kind":"targeted_messages", "messages":batch}),
+            json!({"kind":"probe", "target_peer_id":other_id}),
+        ] {
+            surface
+                .send(Message::Text(
+                    serde_json::to_string(&ClientMessage::Publish {
+                        protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+                        payload,
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+            match next_server_message(&mut surface).await {
+                ServerMessage::Error { code, .. } => assert_eq!(code, "invalid_publish"),
+                message => panic!("expected rejected publish, got {message:?}"),
+            }
+        }
+        surface
+            .send(Message::Text(
+                serde_json::to_string(&ClientMessage::Publish {
+                    protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+                    payload: json!({"target_peer_id":"relay-1", "kind":"valid-probe"}),
+                })
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        match next_server_message(&mut relay).await {
+            ServerMessage::Message {
+                payload, from_role, ..
+            } => {
+                assert_eq!(from_role, protocol::PeerRole::Surface);
+                assert_eq!(payload["kind"], "valid-probe");
+            }
+            message => {
+                panic!("relay must stay connected with no queued attack prefix: {message:?}")
+            }
+        }
+        relay
+            .send(Message::Text(
+                serde_json::to_string(&ClientMessage::Publish {
+                    protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+                    payload: json!({"target_peer_id":other_id, "kind":"valid-reply"}),
+                })
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        match next_server_message(&mut other).await {
+            ServerMessage::Message { payload, .. } => assert_eq!(payload["kind"], "valid-reply"),
+            message => panic!(
+                "other surface must stay connected without receiving the attack: {message:?}"
+            ),
+        }
+    })
+    .await
+    .expect("flood rejection must not stall or close any recipient");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -67,7 +169,7 @@ async fn an_overflowing_peer_disconnects_and_releases_its_seat_without_disruptin
             "overflow-room",
             protocol::PeerRole::Relay,
             Some("relay-1"),
-            JoinTicketClaims::relay_join("overflow-room", "relay-1"),
+            JoinTicketClaims::relay_join("overflow-room", "relay-1", &seeded_relay_verify_key()),
         );
         let slow_url = websocket_url(
             address,
@@ -154,7 +256,7 @@ async fn an_overflowing_peer_disconnects_and_releases_its_seat_without_disruptin
             .send(Message::Text(
                 serde_json::to_string(&ClientMessage::Publish {
                     protocol_version: protocol::BROKER_PROTOCOL_VERSION,
-                    payload: json!({"kind": "probe", "healthy": true}),
+                    payload: json!({"kind": "probe", "target_peer_id": "relay-1", "healthy": true}),
                 })
                 .unwrap(),
             ))
@@ -259,7 +361,7 @@ async fn spawn_public_mode_app_with(
     address
 }
 
-async fn next_server_message(
+async fn read_server_message(
     stream: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
@@ -271,6 +373,61 @@ async fn next_server_message(
         .expect("frame should decode");
     let text = frame.into_text().expect("frame should be text");
     serde_json::from_str(&text).expect("server message should parse")
+}
+
+async fn next_server_message(
+    stream: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> ServerMessage {
+    let message = read_server_message(stream).await;
+    let ServerMessage::RelayJoinChallenge {
+        challenge_id,
+        challenge,
+        broker_origin,
+        relay_id,
+        broker_room_id,
+        relay_peer_id,
+        ticket_sha256,
+        relay_verify_key,
+    } = &message
+    else {
+        return message;
+    };
+    let Some(signing_key) = signing_key_for_verify_key(relay_verify_key) else {
+        return message;
+    };
+    let bytes = relay_join_message(
+        broker_origin,
+        challenge_id,
+        challenge,
+        ticket_sha256,
+        relay_id,
+        broker_room_id,
+        relay_peer_id,
+    )
+    .expect("relay join message should encode");
+    let signature = STANDARD.encode(signing_key.sign(&bytes).to_bytes());
+    stream
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::RelayJoinProof {
+                challenge_id: challenge_id.clone(),
+                signature,
+            })
+            .expect("relay join proof should encode"),
+        ))
+        .await
+        .expect("relay join proof should send");
+    read_server_message(stream).await
+}
+
+fn signing_key_for_verify_key(verify_key: &str) -> Option<SigningKey> {
+    relay_signing_keys()
+        .lock()
+        .expect("relay signing keys")
+        .values()
+        .find(|key| STANDARD.encode(key.verifying_key().to_bytes()) == verify_key)
+        .cloned()
 }
 
 async fn assert_ws_closed_after_access_released(
@@ -329,6 +486,128 @@ async fn http_get_with_headers(
     response
 }
 
+fn remember_relay_signing_key(refresh_token: &str, signing_key: &SigningKey) {
+    relay_signing_keys()
+        .lock()
+        .expect("relay signing keys")
+        .insert(refresh_token.to_string(), signing_key.clone());
+}
+
+fn relay_signing_keys() -> &'static std::sync::Mutex<std::collections::HashMap<String, SigningKey>>
+{
+    static KEYS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, SigningKey>>,
+    > = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        let mut keys = std::collections::HashMap::new();
+        keys.insert("relay-refresh-1".to_string(), seeded_relay_signing_key());
+        std::sync::Mutex::new(keys)
+    })
+}
+
+fn signing_key_for_bearer(bearer_token: &str) -> Option<SigningKey> {
+    relay_signing_keys()
+        .lock()
+        .expect("relay signing keys")
+        .get(bearer_token)
+        .cloned()
+}
+
+fn privileged_control_path(path: &str) -> bool {
+    path == "/api/public/devices"
+        || path == "/api/public/clients/grants"
+        || path == "/api/public/pairing/ws-token"
+        || path == "/api/public/devices/revoke-others"
+        || path == "/api/public/relay/access/release"
+        || (path.starts_with("/api/public/devices/") && path.ends_with("/revoke"))
+}
+
+async fn send_public_post<TReq>(
+    address: SocketAddr,
+    path: &str,
+    bearer_token: &str,
+    request: &TReq,
+) -> reqwest::Response
+where
+    TReq: serde::Serialize + ?Sized,
+{
+    let url = format!("http://{address}{path}");
+    let client = reqwest::Client::new();
+    if privileged_control_path(path) {
+        if let Some(signing_key) = signing_key_for_bearer(bearer_token) {
+            let body = serde_json::to_vec(request).expect("control body should encode");
+            let request_sha256 = relay_control_request_sha256(&body);
+            let operation = format!("POST {path}");
+            let challenge = client
+                .post(format!(
+                    "http://{address}/api/public/relay/control/challenge"
+                ))
+                .bearer_auth(bearer_token)
+                .json(&RelayControlChallengeRequest {
+                    operation: operation.clone(),
+                    relay_id: serde_json::to_value(request)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("relay_id")
+                                .and_then(|item| item.as_str())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_default(),
+                    broker_room_id: serde_json::to_value(request)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("broker_room_id")
+                                .and_then(|item| item.as_str())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_default(),
+                    request_sha256: request_sha256.clone(),
+                })
+                .send()
+                .await
+                .expect("control challenge should send");
+            if !challenge.status().is_success() {
+                return challenge;
+            }
+            let challenge: RelayControlChallengeResponse = challenge
+                .json()
+                .await
+                .expect("control challenge should decode");
+            let message = relay_control_message(
+                &challenge.broker_origin,
+                &challenge.challenge_id,
+                &challenge.challenge,
+                &challenge.operation,
+                &challenge.relay_id,
+                &challenge.broker_room_id,
+                &challenge.refresh_token_hash,
+                &challenge.request_sha256,
+            )
+            .expect("control message");
+            let signature = STANDARD.encode(signing_key.sign(&message).to_bytes());
+            return client
+                .post(url)
+                .bearer_auth(bearer_token)
+                .header(RELAY_CONTROL_CHALLENGE_HEADER, challenge.challenge_id)
+                .header(RELAY_CONTROL_SIGNATURE_HEADER, signature)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .send()
+                .await
+                .expect("signed control request should send");
+        }
+    }
+    client
+        .post(url)
+        .bearer_auth(bearer_token)
+        .json(request)
+        .send()
+        .await
+        .expect("request should succeed")
+}
+
 async fn public_post<TReq, TResp>(
     address: SocketAddr,
     path: &str,
@@ -339,13 +618,8 @@ where
     TReq: serde::Serialize + ?Sized,
     TResp: serde::de::DeserializeOwned,
 {
-    reqwest::Client::new()
-        .post(format!("http://{address}{path}"))
-        .bearer_auth(bearer_token)
-        .json(request)
-        .send()
+    send_public_post(address, path, bearer_token, request)
         .await
-        .expect("request should succeed")
         .error_for_status()
         .expect("response should be successful")
         .json::<TResp>()
@@ -394,13 +668,7 @@ async fn public_post_response<TReq>(
 where
     TReq: serde::Serialize + ?Sized,
 {
-    reqwest::Client::new()
-        .post(format!("http://{address}{path}"))
-        .bearer_auth(bearer_token)
-        .json(request)
-        .send()
-        .await
-        .expect("request should succeed")
+    send_public_post(address, path, bearer_token, request).await
 }
 
 async fn public_post_with_cookie<TReq, TResp>(
@@ -579,6 +847,105 @@ fn test_join_ticket_key() -> JoinTicketKey {
         .expect("test join-ticket key should construct")
 }
 
+fn seeded_relay_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[7_u8; 32])
+}
+
+fn seeded_relay_verify_key() -> String {
+    STANDARD.encode(seeded_relay_signing_key().verifying_key().to_bytes())
+}
+
+fn signing_key_for_seed_label(seed_label: &str) -> SigningKey {
+    let bytes = seed_label.as_bytes();
+    let mut seed = [0xABu8; 32];
+    for (index, byte) in bytes.iter().take(32).enumerate() {
+        seed[index] = *byte;
+    }
+    SigningKey::from_bytes(&seed)
+}
+
+fn sign_relay_ws_ticket(
+    signing_key: &SigningKey,
+    challenge: &RelayWsTokenChallengeResponse,
+    refresh_token: &str,
+) -> String {
+    let refresh_token_hash = relay_util::sha256_hex(refresh_token.trim());
+    let message = relay_ws_ticket_message(
+        &challenge.broker_origin,
+        &challenge.challenge_id,
+        &challenge.challenge,
+        &challenge.relay_id,
+        &challenge.broker_room_id,
+        &challenge.relay_peer_id,
+        &refresh_token_hash,
+    )
+    .expect("ticket message should encode");
+    STANDARD.encode(signing_key.sign(&message).to_bytes())
+}
+
+async fn post_signed_relay_ws_token_response(
+    address: SocketAddr,
+    refresh_token: impl AsRef<str>,
+    relay_id: impl AsRef<str>,
+    broker_room_id: impl AsRef<str>,
+    relay_peer_id: impl AsRef<str>,
+    signing_key: &SigningKey,
+) -> reqwest::Response {
+    let refresh_token = refresh_token.as_ref();
+    let relay_id = relay_id.as_ref();
+    let broker_room_id = broker_room_id.as_ref();
+    let relay_peer_id = relay_peer_id.as_ref();
+    let challenge: RelayWsTokenChallengeResponse = public_post(
+        address,
+        "/api/public/relay/ws-token/challenge",
+        refresh_token,
+        &RelayWsTokenChallengeRequest {
+            relay_id: relay_id.to_string(),
+            broker_room_id: broker_room_id.to_string(),
+            relay_peer_id: relay_peer_id.to_string(),
+        },
+    )
+    .await;
+    let challenge_signature = sign_relay_ws_ticket(signing_key, &challenge, refresh_token);
+    public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        refresh_token,
+        &RelayWsTokenRequest {
+            relay_id: relay_id.to_string(),
+            broker_room_id: broker_room_id.to_string(),
+            relay_peer_id: relay_peer_id.to_string(),
+            challenge_id: challenge.challenge_id,
+            challenge_signature,
+        },
+    )
+    .await
+}
+
+async fn post_signed_relay_ws_token(
+    address: SocketAddr,
+    refresh_token: impl AsRef<str>,
+    relay_id: impl AsRef<str>,
+    broker_room_id: impl AsRef<str>,
+    relay_peer_id: impl AsRef<str>,
+    signing_key: &SigningKey,
+) -> RelayWsTokenResponse {
+    post_signed_relay_ws_token_response(
+        address,
+        refresh_token,
+        relay_id,
+        broker_room_id,
+        relay_peer_id,
+        signing_key,
+    )
+    .await
+    .error_for_status()
+    .expect("signed relay ws token should succeed")
+    .json()
+    .await
+    .expect("signed relay ws token should decode")
+}
+
 async fn test_public_control_plane() -> PublicControlPlane {
     test_public_control_plane_with_parts(None, Some("300"), Some("300")).await
 }
@@ -590,7 +957,8 @@ async fn test_public_control_plane_with_room(room: &str) -> PublicControlPlane {
             serde_json::to_string(&vec![serde_json::json!({
                 "relay_id": "relay-1",
                 "broker_room_id": room,
-                "refresh_token": "relay-refresh-1"
+                "refresh_token": "relay-refresh-1",
+                "relay_verify_key": seeded_relay_verify_key()
             })])
             .expect("relay registrations should encode"),
         ),
@@ -613,7 +981,8 @@ async fn test_public_control_plane_with_parts(
             serde_json::to_string(&vec![serde_json::json!({
                 "relay_id": "relay-1",
                 "broker_room_id": "room-a",
-                "refresh_token": "relay-refresh-1"
+                "refresh_token": "relay-refresh-1",
+                "relay_verify_key": seeded_relay_verify_key()
             })])
             .expect("relay registrations should encode"),
         ),
@@ -757,7 +1126,7 @@ async fn websocket_relays_messages_between_peers() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
     // Surfaces do not name themselves — the broker assigns the id (see
     // `a_surface_cannot_squat_the_relays_peer_id`), so read it back out of Welcome.
@@ -810,7 +1179,7 @@ async fn websocket_relays_messages_between_peers() {
         .send(Message::Text(
             serde_json::to_string(&ClientMessage::Publish {
                 protocol_version: protocol::BROKER_PROTOCOL_VERSION,
-                payload: json!({"ciphertext":"abc"}),
+                payload: json!({"target_peer_id":surface_peer_id, "ciphertext":"abc"}),
             })
             .expect("client frame should serialize"),
         ))
@@ -827,7 +1196,10 @@ async fn websocket_relays_messages_between_peers() {
         } => {
             assert_eq!(from_peer_id, "relay-1");
             assert_eq!(from_role, protocol::PeerRole::Relay);
-            assert_eq!(payload, json!({"ciphertext":"abc"}));
+            assert_eq!(
+                payload,
+                json!({"target_peer_id":surface_peer_id, "ciphertext":"abc"})
+            );
         }
         other => panic!("unexpected relayed frame: {other:?}"),
     }
@@ -853,7 +1225,7 @@ async fn a_surface_cannot_squat_the_relays_peer_id() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
 
     let squatter = connect_async(&squatter_url).await;
@@ -876,119 +1248,110 @@ async fn a_surface_cannot_squat_the_relays_peer_id() {
 }
 
 #[tokio::test]
-async fn a_bare_pairing_result_is_refused_while_other_directed_payloads_still_flow() {
-    // SECURITY: `encrypted_pairing_result` carries the new device's payload_secret
-    // and refresh tokens, sealed with the pairing_secret from the QR. It shipped
-    // for a while with a `target_peer_id` field but WITHOUT the
-    // `targeted_messages` wrapper, and the broker's fanout routes on the wrapper
-    // alone — so it went to the whole room, handing the sealed credentials to any
-    // bystander replaying the same QR join ticket. The wrapper must be the only
-    // way to address one peer: a bare payload that names a recipient is refused
-    // outright, so the next one that forgets it fails loudly instead of leaking.
+async fn websocket_requests_and_replies_never_reach_room_bystanders() {
+    tokio::time::timeout(Duration::from_secs(5), async {
     let address = spawn_app().await;
     let relay_url = websocket_url(
         address,
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
     let intended_url = websocket_url(
         address,
         "room-a",
         protocol::PeerRole::Surface,
-        Some("phone-intended"),
+        None,
         JoinTicketClaims::pairing_surface_join("room-a", "pair-target", u64::MAX),
     );
-    // A distinct pairing id, so the two surfaces stay seated together — one ticket
-    // holds only one seat (see `a_second_join_on_one_pairing_ticket_supersedes_the_first`),
-    // and this test is about the fanout, not the seat.
     let bystander_url = websocket_url(
         address,
         "room-a",
         protocol::PeerRole::Surface,
-        Some("phone-bystander"),
+        None,
         JoinTicketClaims::pairing_surface_join("room-a", "pair-bystander", u64::MAX),
     );
+    let other_relay_url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Relay,
+        Some("relay-other"),
+        JoinTicketClaims::relay_join("room-a", "relay-other", &seeded_relay_verify_key()),
+    );
+    let (mut relay, _) = connect_async(&relay_url).await.unwrap();
+    next_server_message(&mut relay).await;
+    let (mut intended, _) = connect_async(&intended_url).await.unwrap();
+    let intended_peer = match next_server_message(&mut intended).await {
+        ServerMessage::Welcome { peer_id, .. } => peer_id,
+        other => panic!("expected welcome, got {other:?}"),
+    };
+    next_server_message(&mut relay).await;
+    let (mut bystander, _) = connect_async(&bystander_url).await.unwrap();
+    next_server_message(&mut bystander).await;
+    next_server_message(&mut relay).await;
+    next_server_message(&mut intended).await;
+    let (mut other_relay, _) = connect_async(&other_relay_url).await.unwrap();
+    next_server_message(&mut other_relay).await;
+    next_server_message(&mut relay).await;
+    next_server_message(&mut intended).await;
+    next_server_message(&mut bystander).await;
 
-    let (mut relay, _) = connect_async(&relay_url)
-        .await
-        .expect("relay should connect");
-    let _ = next_server_message(&mut relay).await;
-    let (mut intended, _) = connect_async(&intended_url)
-        .await
-        .expect("intended surface should connect");
-    let _ = next_server_message(&mut intended).await;
-    let (mut bystander, _) = connect_async(&bystander_url)
-        .await
-        .expect("bystander surface should connect");
-    let _ = next_server_message(&mut bystander).await;
-    // The bystander's arrival notifies everyone already seated; drain it so the
-    // only frame that could still show up is the publish under test.
-    let _ = next_server_message(&mut intended).await;
-
-    relay
-        .send(Message::Text(
-            serde_json::to_string(&ClientMessage::Publish {
-                protocol_version: protocol::BROKER_PROTOCOL_VERSION,
-                payload: json!({
-                    "kind": "encrypted_pairing_result",
-                    "pairing_id": "pair-target",
-                    "target_peer_id": "phone-intended",
-                    "envelope": {"nonce": "n", "ciphertext": "c"},
-                }),
-            })
-            .expect("client frame should serialize"),
-        ))
-        .await
-        .expect("publish should send");
-
-    // Every OTHER directed payload keeps its existing broadcast + client-side
-    // filter behaviour. Treating `target_peer_id` itself as a routing directive
-    // would silently drop every remote action response, so pin that here: this
-    // frame must still be delivered.
-    relay
-        .send(Message::Text(
-            serde_json::to_string(&ClientMessage::Publish {
-                protocol_version: protocol::BROKER_PROTOCOL_VERSION,
-                payload: json!({
-                    "kind": "encrypted_remote_action_result",
-                    "action_id": "action-1",
-                    "target_peer_id": "phone-intended",
-                    "device_id": "device-1",
-                    "envelope": {"nonce": "n", "ciphertext": "c"},
-                }),
-            })
-            .expect("client frame should serialize"),
-        ))
-        .await
-        .expect("publish should send");
-
-    match next_server_message(&mut intended).await {
-        ServerMessage::Message { payload, .. } => assert_eq!(
-            payload["kind"], "encrypted_remote_action_result",
-            "a remote action result must still reach the room; the pairing-result \
-             guard must not generalise to every payload naming a peer"
-        ),
-        other => panic!("remote action result should be delivered: {other:?}"),
+    for kind in ["pairing_request", "encrypted_remote_action"] {
+        intended.send(Message::Text(serde_json::to_string(&ClientMessage::Publish {
+            protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+            payload: json!({"kind":kind, "target_peer_id":"relay-1", "envelope":{"nonce":"n", "ciphertext":"c"}}),
+        }).unwrap())).await.unwrap();
+        match next_server_message(&mut relay).await {
+            ServerMessage::Message {
+                from_peer_id,
+                payload,
+                ..
+            } => {
+                assert_eq!(from_peer_id, intended_peer);
+                assert_eq!(payload["kind"], kind);
+            }
+            other => panic!("expected request, got {other:?}"),
+        }
     }
-    let _ = next_server_message(&mut bystander).await;
-
-    for (label, socket) in [
-        ("the named target", &mut intended),
-        ("a bystander", &mut bystander),
+    for kind in [
+        "encrypted_pairing_result",
+        "encrypted_remote_action_result",
+        "encrypted_remote_action_result_chunk",
+        "remote_action_pending",
+        "encrypted_session_snapshot",
+        "encrypted_transcript_delta",
+        "encrypted_transcript_event",
     ] {
-        let received = tokio::time::timeout(
-            std::time::Duration::from_millis(250),
-            next_server_message(socket),
-        )
-        .await;
+        relay.send(Message::Text(serde_json::to_string(&ClientMessage::Publish {
+            protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+            payload: json!({"kind":kind, "target_peer_id":intended_peer, "envelope":{"nonce":"n", "ciphertext":"c"}}),
+        }).unwrap())).await.unwrap();
+        match next_server_message(&mut intended).await {
+            ServerMessage::Message { payload, .. } => assert_eq!(payload["kind"], kind),
+            other => panic!("expected reply, got {other:?}"),
+        }
+    }
+    relay.send(Message::Text(serde_json::to_string(&ClientMessage::Publish {
+        protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+        payload: json!({"kind":"encrypted_remote_action_result", "envelope":{"nonce":"n", "ciphertext":"c"}}),
+    }).unwrap())).await.unwrap();
+    match next_server_message(&mut relay).await {
+        ServerMessage::Error { code, message } => {
+            assert_eq!(code, "invalid_publish");
+            assert!(message.contains("target_peer_id is required"))
+        }
+        other => panic!("expected rejection, got {other:?}"),
+    }
+    for socket in [&mut intended, &mut bystander, &mut other_relay] {
         assert!(
-            received.is_err(),
-            "a payload naming one peer but published without the \
-             `targeted_messages` wrapper must reach nobody; {label} got {received:?}"
+            tokio::time::timeout(Duration::from_millis(100), next_server_message(socket))
+                .await
+                .is_err(),
+            "a bystander or unaddressed recipient must receive no ciphertext"
         );
     }
+    }).await.expect("directed WebSocket delivery must complete");
 }
 
 #[tokio::test]
@@ -1017,7 +1380,7 @@ async fn a_second_join_on_one_pairing_ticket_supersedes_the_first() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
     let (mut relay, _) = connect_async(&relay_url)
         .await
@@ -1131,7 +1494,7 @@ async fn surface_connections_can_use_broker_assigned_peer_ids() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
     let surface_url = websocket_url(
         address,
@@ -1231,7 +1594,7 @@ async fn duplicate_relay_connection_replaces_stale_socket() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
     let surface_url = websocket_url(
         address,
@@ -1270,21 +1633,22 @@ async fn duplicate_relay_connection_replaces_stale_socket() {
     let (mut surface, _) = connect_async(&surface_url)
         .await
         .expect("surface should connect after relay replacement");
-    match next_server_message(&mut surface).await {
-        ServerMessage::Welcome { peers, .. } => {
+    let surface_peer_id = match next_server_message(&mut surface).await {
+        ServerMessage::Welcome { peers, peer_id, .. } => {
             assert_eq!(peers.len(), 1);
             assert_eq!(peers[0].peer_id, "relay-1");
             assert_eq!(peers[0].role, protocol::PeerRole::Relay);
+            peer_id
         }
         other => panic!("surface should see replacement relay, got: {other:?}"),
-    }
+    };
 
     let _presence = next_server_message(&mut replacement_relay).await;
     replacement_relay
         .send(Message::Text(
             serde_json::to_string(&ClientMessage::Publish {
                 protocol_version: protocol::BROKER_PROTOCOL_VERSION,
-                payload: json!({"kind":"session_snapshot"}),
+                payload: json!({"kind":"session_snapshot", "target_peer_id":surface_peer_id}),
             })
             .expect("client frame should serialize"),
         ))
@@ -1297,7 +1661,10 @@ async fn duplicate_relay_connection_replaces_stale_socket() {
             ..
         } => {
             assert_eq!(from_peer_id, "relay-1");
-            assert_eq!(payload, json!({"kind":"session_snapshot"}));
+            assert_eq!(
+                payload,
+                json!({"kind":"session_snapshot", "target_peer_id":surface_peer_id})
+            );
         }
         other => panic!("surface should receive replacement relay publish, got: {other:?}"),
     }
@@ -1349,7 +1716,7 @@ async fn device_join_ticket_can_reconnect() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
     let surface_url = websocket_url(
         address,
@@ -1462,7 +1829,8 @@ async fn health_route_reports_ok() {
 #[tokio::test]
 async fn relay_socket_rejects_missing_or_old_client_version_before_join() {
     let address = spawn_app().await;
-    let claims = JoinTicketClaims::relay_join("room-a", "relay-version");
+    let claims =
+        JoinTicketClaims::relay_join("room-a", "relay-version", &seeded_relay_verify_key());
     let base_url = websocket_url(
         address,
         "room-a",
@@ -1954,15 +2322,14 @@ async fn public_relay_challenge_enrollment_can_issue_registration_and_relay_toke
         .await
         .expect("complete response should decode");
 
-    let relay_token: RelayWsTokenResponse = public_post(
+    remember_relay_signing_key(&enrollment.relay_refresh_token, &signing_key);
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &enrollment.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: enrollment.relay_id.clone(),
-            broker_room_id: enrollment.broker_room_id.clone(),
-            relay_peer_id: "relay-challenge".to_string(),
-        },
+        enrollment.relay_id.clone(),
+        enrollment.broker_room_id.clone(),
+        "relay-challenge".to_string(),
+        &signing_key,
     )
     .await;
 
@@ -1983,15 +2350,13 @@ async fn public_relay_challenge_enrollment_can_issue_registration_and_relay_toke
 #[tokio::test]
 async fn public_relay_ws_token_can_join_broker() {
     let address = spawn_public_mode_app().await;
-    let relay_token: RelayWsTokenResponse = public_post(
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         "relay-refresh-1",
-        &RelayWsTokenRequest {
-            relay_id: "relay-1".to_string(),
-            broker_room_id: "room-a".to_string(),
-            relay_peer_id: "relay-1".to_string(),
-        },
+        "relay-1".to_string(),
+        "room-a".to_string(),
+        "relay-1".to_string(),
+        &seeded_relay_signing_key(),
     )
     .await;
 
@@ -2008,6 +2373,1224 @@ async fn public_relay_ws_token_can_join_broker() {
         ServerMessage::Welcome { peer_id, .. } => assert_eq!(peer_id, "relay-1"),
         other => panic!("unexpected response: {other:?}"),
     }
+}
+
+fn assert_no_relay_ticket(status: reqwest::StatusCode, body: &str) {
+    assert_ne!(
+        status,
+        reqwest::StatusCode::OK,
+        "refresh bearer alone must not mint a relay ws ticket: {body}"
+    );
+    assert!(
+        !body.contains("eyJ"),
+        "rejected ticket response must not carry a join ticket: {body}"
+    );
+}
+
+async fn relay_ws_challenge(
+    address: SocketAddr,
+    refresh_token: &str,
+    relay_id: &str,
+    broker_room_id: &str,
+    relay_peer_id: &str,
+) -> RelayWsTokenChallengeResponse {
+    public_post(
+        address,
+        "/api/public/relay/ws-token/challenge",
+        refresh_token,
+        &RelayWsTokenChallengeRequest {
+            relay_id: relay_id.to_string(),
+            broker_room_id: broker_room_id.to_string(),
+            relay_peer_id: relay_peer_id.to_string(),
+        },
+    )
+    .await
+}
+
+/// A leaked refresh bearer, even with the real relay peer id, must not mint a
+/// relay websocket ticket or replace the seated relay.
+#[tokio::test]
+async fn stolen_refresh_bearer_cannot_mint_a_relay_ws_ticket_or_take_the_seat() {
+    let address = spawn_public_mode_app().await;
+    let relay_token = post_signed_relay_ws_token(
+        address,
+        "relay-refresh-1",
+        "relay-1",
+        "room-a",
+        "relay-1",
+        &seeded_relay_signing_key(),
+    )
+    .await;
+    let url = format!(
+        "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id=relay-1&join_ticket={}",
+        relay_token.relay_ws_token
+    );
+    let (mut seated, _) = connect_async(&url)
+        .await
+        .expect("real relay should connect");
+    match next_server_message(&mut seated).await {
+        ServerMessage::Welcome { peer_id, .. } => assert_eq!(peer_id, "relay-1"),
+        other => panic!("unexpected welcome: {other:?}"),
+    }
+
+    let unsigned = public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &RelayWsTokenRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            relay_peer_id: "relay-1".to_string(),
+            challenge_id: String::new(),
+            challenge_signature: String::new(),
+        },
+    )
+    .await;
+    let status = unsigned.status();
+    let body = unsigned.text().await.expect("attack body");
+    assert_no_relay_ticket(status, &body);
+
+    let challenge =
+        relay_ws_challenge(address, "relay-refresh-1", "relay-1", "room-a", "relay-1").await;
+    let wrong_key = SigningKey::from_bytes(&[9_u8; 32]);
+    let wrong = public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &RelayWsTokenRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            relay_peer_id: "relay-1".to_string(),
+            challenge_id: challenge.challenge_id.clone(),
+            challenge_signature: sign_relay_ws_ticket(&wrong_key, &challenge, "relay-refresh-1"),
+        },
+    )
+    .await;
+    let status = wrong.status();
+    let body = wrong.text().await.expect("wrong-key body");
+    assert_no_relay_ticket(status, &body);
+
+    let ping = b"seat-still-live".to_vec();
+    seated
+        .send(Message::Ping(ping.clone()))
+        .await
+        .expect("seated relay must stay writable after the rejected mint");
+    let frame = tokio::time::timeout(Duration::from_secs(2), seated.next())
+        .await
+        .expect("seated relay must still receive a pong")
+        .expect("seated socket should stay open")
+        .expect("pong frame should decode");
+    match frame {
+        Message::Pong(payload) => assert_eq!(payload, ping),
+        other => panic!("expected a matching pong on the seated socket, got {other:?}"),
+    }
+}
+
+/// A copied relay websocket ticket cannot take or replace the seat without the
+/// enrolled private key. Replaying another socket's proof fails. A second
+/// connect that holds the key is still welcomed.
+#[tokio::test]
+async fn stolen_relay_ws_ticket_cannot_take_or_replace_the_seat() {
+    let address = spawn_public_mode_app().await;
+    let relay_token = post_signed_relay_ws_token(
+        address,
+        "relay-refresh-1",
+        "relay-1",
+        "room-a",
+        "relay-1",
+        &seeded_relay_signing_key(),
+    )
+    .await;
+    let url = format!(
+        "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id=relay-1&join_ticket={}",
+        relay_token.relay_ws_token
+    );
+    let (mut seated, _) = connect_async(&url)
+        .await
+        .expect("real relay should connect");
+    let seated_challenge = read_server_message(&mut seated).await;
+    let ServerMessage::RelayJoinChallenge {
+        challenge_id,
+        challenge,
+        broker_origin,
+        relay_id,
+        broker_room_id,
+        relay_peer_id,
+        ticket_sha256,
+        relay_verify_key,
+    } = &seated_challenge
+    else {
+        panic!("public relay join must challenge before seating, got {seated_challenge:?}");
+    };
+    assert_eq!(relay_verify_key, &seeded_relay_verify_key());
+    let seated_message = relay_join_message(
+        broker_origin,
+        challenge_id,
+        challenge,
+        ticket_sha256,
+        relay_id,
+        broker_room_id,
+        relay_peer_id,
+    )
+    .expect("seated join message");
+    let seated_signature =
+        STANDARD.encode(seeded_relay_signing_key().sign(&seated_message).to_bytes());
+    seated
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::RelayJoinProof {
+                challenge_id: challenge_id.clone(),
+                signature: seated_signature.clone(),
+            })
+            .expect("proof"),
+        ))
+        .await
+        .expect("proof should send");
+    match read_server_message(&mut seated).await {
+        ServerMessage::Welcome { peer_id, .. } => assert_eq!(peer_id, "relay-1"),
+        other => panic!("expected welcome after a real proof, got {other:?}"),
+    }
+
+    let (mut thief, _) = connect_async(&url)
+        .await
+        .expect("stolen ticket should still open a socket");
+    let thief_challenge = read_server_message(&mut thief).await;
+    let ServerMessage::RelayJoinChallenge {
+        challenge_id: thief_challenge_id,
+        ..
+    } = &thief_challenge
+    else {
+        panic!("stolen ticket must be challenged before any seat, got {thief_challenge:?}");
+    };
+    thief
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::RelayJoinProof {
+                challenge_id: thief_challenge_id.clone(),
+                signature: seated_signature,
+            })
+            .expect("replayed proof"),
+        ))
+        .await
+        .expect("replay should send");
+    let rejected = tokio::time::timeout(Duration::from_secs(2), thief.next())
+        .await
+        .expect("rejected join should answer")
+        .expect("rejected socket should produce a frame")
+        .expect("rejected frame should decode");
+    match rejected {
+        Message::Close(_) => {}
+        Message::Text(text) => {
+            assert!(
+                !text.contains("\"type\":\"welcome\"") && !text.contains("\"Welcome\""),
+                "replayed proof must not welcome the thief: {text}"
+            );
+            let parsed: ServerMessage = serde_json::from_str(&text).expect("error frame");
+            assert!(
+                !matches!(parsed, ServerMessage::Welcome { .. }),
+                "replayed proof must not welcome the thief: {parsed:?}"
+            );
+        }
+        other => panic!("replayed proof must not deliver room content, got {other:?}"),
+    }
+
+    let ping = b"seat-still-live".to_vec();
+    seated
+        .send(Message::Ping(ping.clone()))
+        .await
+        .expect("original relay must stay writable");
+    let frame = tokio::time::timeout(Duration::from_secs(2), seated.next())
+        .await
+        .expect("original relay must still receive a pong")
+        .expect("seated socket should stay open")
+        .expect("pong frame should decode");
+    match frame {
+        Message::Pong(payload) => assert_eq!(payload, ping),
+        other => panic!("expected a matching pong on the original socket, got {other:?}"),
+    }
+
+    let reconnect = post_signed_relay_ws_token(
+        address,
+        "relay-refresh-1",
+        "relay-1",
+        "room-a",
+        "relay-1",
+        &seeded_relay_signing_key(),
+    )
+    .await;
+    let reconnect_url = format!(
+        "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id=relay-1&join_ticket={}",
+        reconnect.relay_ws_token
+    );
+    let (mut again, _) = connect_async(&reconnect_url)
+        .await
+        .expect("legitimate reconnect should connect");
+    match next_server_message(&mut again).await {
+        ServerMessage::Welcome { peer_id, .. } => assert_eq!(peer_id, "relay-1"),
+        other => panic!("legitimate reconnect should be welcomed, got {other:?}"),
+    }
+}
+
+/// A refresh bearer without the relay seed cannot grant, revoke, release, or
+/// mint a pairing ticket. The real key still can, and a mismatched body or a
+/// second use of the same proof does not.
+#[tokio::test]
+async fn stolen_refresh_bearer_cannot_drive_privileged_relay_control() {
+    let address = spawn_public_mode_app().await;
+    let bearer = "relay-refresh-1";
+    let device = DeviceGrantRequest {
+        relay_id: "relay-1".to_string(),
+        broker_room_id: "room-a".to_string(),
+        device_id: "stolen-device".to_string(),
+    };
+    let unsigned = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/devices"))
+        .bearer_auth(bearer)
+        .json(&device)
+        .send()
+        .await
+        .expect("unsigned grant should send");
+    assert_ne!(unsigned.status(), reqwest::StatusCode::OK);
+    let body = unsigned.text().await.expect("unsigned body");
+    assert!(!body.contains("device_ws_token"), "{body}");
+
+    let granted: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        bearer,
+        &DeviceGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "kept-device".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(granted.device_id, "kept-device");
+
+    let pairing_body = serde_json::to_vec(&PairingWsTokenRequest {
+        relay_id: "relay-1".to_string(),
+        broker_room_id: "room-a".to_string(),
+        pairing_id: "pair-stolen".to_string(),
+        expires_at: crate::join_ticket::unix_now().saturating_add(60),
+    })
+    .expect("pairing body");
+    let operation = "POST /api/public/pairing/ws-token";
+    let request_sha256 = relay_control_request_sha256(&pairing_body);
+    let challenge: RelayControlChallengeResponse = public_post(
+        address,
+        "/api/public/relay/control/challenge",
+        bearer,
+        &RelayControlChallengeRequest {
+            operation: operation.to_string(),
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            request_sha256: request_sha256.clone(),
+        },
+    )
+    .await;
+    let wrong_key = SigningKey::from_bytes(&[9_u8; 32]);
+    let wrong_signature = STANDARD.encode(
+        wrong_key
+            .sign(
+                &relay_control_message(
+                    &challenge.broker_origin,
+                    &challenge.challenge_id,
+                    &challenge.challenge,
+                    &challenge.operation,
+                    &challenge.relay_id,
+                    &challenge.broker_room_id,
+                    &challenge.refresh_token_hash,
+                    &challenge.request_sha256,
+                )
+                .expect("message"),
+            )
+            .to_bytes(),
+    );
+    let wrong = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/pairing/ws-token"))
+        .bearer_auth(bearer)
+        .header(RELAY_CONTROL_CHALLENGE_HEADER, &challenge.challenge_id)
+        .header(RELAY_CONTROL_SIGNATURE_HEADER, wrong_signature)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(pairing_body.clone())
+        .send()
+        .await
+        .expect("wrong-key pairing should send");
+    assert_ne!(wrong.status(), reqwest::StatusCode::OK);
+
+    let signature = STANDARD.encode(
+        seeded_relay_signing_key()
+            .sign(
+                &relay_control_message(
+                    &challenge.broker_origin,
+                    &challenge.challenge_id,
+                    &challenge.challenge,
+                    &challenge.operation,
+                    &challenge.relay_id,
+                    &challenge.broker_room_id,
+                    &challenge.refresh_token_hash,
+                    &challenge.request_sha256,
+                )
+                .expect("message"),
+            )
+            .to_bytes(),
+    );
+    let rewritten = String::from_utf8(pairing_body.clone())
+        .expect("pairing body")
+        .replace("pair-stolen", "pair-rewritten");
+    let rewritten_status = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/pairing/ws-token"))
+        .bearer_auth(bearer)
+        .header(RELAY_CONTROL_CHALLENGE_HEADER, &challenge.challenge_id)
+        .header(RELAY_CONTROL_SIGNATURE_HEADER, &signature)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(rewritten)
+        .send()
+        .await
+        .expect("rewritten body should send")
+        .status();
+    assert_ne!(rewritten_status, reqwest::StatusCode::OK);
+
+    let first = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/pairing/ws-token"))
+        .bearer_auth(bearer)
+        .header(RELAY_CONTROL_CHALLENGE_HEADER, &challenge.challenge_id)
+        .header(RELAY_CONTROL_SIGNATURE_HEADER, &signature)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(pairing_body.clone())
+        .send()
+        .await
+        .expect("first pairing proof should send");
+    let second = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/pairing/ws-token"))
+        .bearer_auth(bearer)
+        .header(RELAY_CONTROL_CHALLENGE_HEADER, &challenge.challenge_id)
+        .header(RELAY_CONTROL_SIGNATURE_HEADER, signature)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(pairing_body)
+        .send()
+        .await
+        .expect("replayed pairing proof should send");
+    let statuses = [first.status(), second.status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::OK)
+            .count(),
+        1,
+        "one proof must mint one pairing ticket: {statuses:?}"
+    );
+
+    let release = reqwest::Client::new()
+        .post(format!("http://{address}/api/public/relay/access/release"))
+        .bearer_auth(bearer)
+        .json(&AccessReleaseRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+        })
+        .send()
+        .await
+        .expect("unsigned release should send");
+    assert_ne!(release.status(), reqwest::StatusCode::OK);
+    let listed: DeviceGrantRevokeResponse = public_post(
+        address,
+        "/api/public/devices/kept-device/revoke",
+        bearer,
+        &DeviceGrantRevokeRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+        },
+    )
+    .await;
+    assert!(listed.revoked);
+}
+
+/// Wrong path, room, device, body, and key must not consume a control
+/// challenge. An expired or replayed proof does not run twice, and a bad
+/// signature leaves the legitimate proof usable.
+#[tokio::test]
+async fn relay_control_proof_rejects_wrong_binding_expiry_and_keeps_a_bad_signature() {
+    let address = spawn_public_mode_app().await;
+    let bearer = "relay-refresh-1";
+    let device_body = serde_json::to_vec(&DeviceGrantRequest {
+        relay_id: "relay-1".to_string(),
+        broker_room_id: "room-a".to_string(),
+        device_id: "bound-device".to_string(),
+    })
+    .expect("device body");
+    let operation = "POST /api/public/devices";
+    let challenge: RelayControlChallengeResponse = public_post(
+        address,
+        "/api/public/relay/control/challenge",
+        bearer,
+        &RelayControlChallengeRequest {
+            operation: operation.to_string(),
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            request_sha256: relay_control_request_sha256(&device_body),
+        },
+    )
+    .await;
+    let sign = |room: &str| {
+        let message = relay_control_message(
+            &challenge.broker_origin,
+            &challenge.challenge_id,
+            &challenge.challenge,
+            &challenge.operation,
+            &challenge.relay_id,
+            room,
+            &challenge.refresh_token_hash,
+            &challenge.request_sha256,
+        )
+        .expect("control message");
+        STANDARD.encode(seeded_relay_signing_key().sign(&message).to_bytes())
+    };
+    let signature = sign("room-a");
+    let challenge_id = challenge.challenge_id.clone();
+    let post_raw = |path: &str, body: Vec<u8>, signature: String| {
+        let path = path.to_string();
+        let challenge_id = challenge_id.clone();
+        async move {
+            reqwest::Client::new()
+                .post(format!("http://{address}{path}"))
+                .bearer_auth(bearer)
+                .header(RELAY_CONTROL_CHALLENGE_HEADER, challenge_id)
+                .header(RELAY_CONTROL_SIGNATURE_HEADER, signature)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .send()
+                .await
+                .expect("control post should send")
+        }
+    };
+    let pairing_body = serde_json::to_vec(&PairingWsTokenRequest {
+        relay_id: "relay-1".to_string(),
+        broker_room_id: "room-a".to_string(),
+        pairing_id: "pair-wrong-op".to_string(),
+        expires_at: crate::join_ticket::unix_now().saturating_add(60),
+    })
+    .expect("pairing body");
+    let wrong_op = post_raw(
+        "/api/public/pairing/ws-token",
+        pairing_body,
+        signature.clone(),
+    )
+    .await;
+    assert_ne!(wrong_op.status(), reqwest::StatusCode::OK);
+    let wrong_room = post_raw("/api/public/devices", device_body.clone(), sign("room-b")).await;
+    assert_ne!(wrong_room.status(), reqwest::StatusCode::OK);
+    let wrong_key = post_raw(
+        "/api/public/devices",
+        device_body.clone(),
+        STANDARD.encode(
+            SigningKey::from_bytes(&[9_u8; 32])
+                .sign(&[1_u8; 32])
+                .to_bytes(),
+        ),
+    )
+    .await;
+    assert_ne!(wrong_key.status(), reqwest::StatusCode::OK);
+    let granted = post_raw("/api/public/devices", device_body, signature).await;
+    assert_eq!(granted.status(), reqwest::StatusCode::OK);
+
+    let revoke_body = serde_json::to_vec(&DeviceGrantRevokeRequest {
+        relay_id: "relay-1".to_string(),
+        broker_room_id: "room-a".to_string(),
+    })
+    .expect("revoke body");
+    let revoke_operation = "POST /api/public/devices/bound-device/revoke";
+    let revoke_challenge: RelayControlChallengeResponse = public_post(
+        address,
+        "/api/public/relay/control/challenge",
+        bearer,
+        &RelayControlChallengeRequest {
+            operation: revoke_operation.to_string(),
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            request_sha256: relay_control_request_sha256(&revoke_body),
+        },
+    )
+    .await;
+    let revoke_signature = STANDARD.encode(
+        seeded_relay_signing_key()
+            .sign(
+                &relay_control_message(
+                    &revoke_challenge.broker_origin,
+                    &revoke_challenge.challenge_id,
+                    &revoke_challenge.challenge,
+                    &revoke_challenge.operation,
+                    &revoke_challenge.relay_id,
+                    &revoke_challenge.broker_room_id,
+                    &revoke_challenge.refresh_token_hash,
+                    &revoke_challenge.request_sha256,
+                )
+                .expect("revoke message"),
+            )
+            .to_bytes(),
+    );
+    let wrong_device = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/public/devices/other-device/revoke"
+        ))
+        .bearer_auth(bearer)
+        .header(
+            RELAY_CONTROL_CHALLENGE_HEADER,
+            &revoke_challenge.challenge_id,
+        )
+        .header(RELAY_CONTROL_SIGNATURE_HEADER, &revoke_signature)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(revoke_body.clone())
+        .send()
+        .await
+        .expect("wrong device should send");
+    assert_ne!(wrong_device.status(), reqwest::StatusCode::OK);
+    let revoked = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/public/devices/bound-device/revoke"
+        ))
+        .bearer_auth(bearer)
+        .header(
+            RELAY_CONTROL_CHALLENGE_HEADER,
+            &revoke_challenge.challenge_id,
+        )
+        .header(RELAY_CONTROL_SIGNATURE_HEADER, revoke_signature)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(revoke_body)
+        .send()
+        .await
+        .expect("revoke should send");
+    assert_eq!(revoked.status(), reqwest::StatusCode::OK);
+
+    let mut plane = test_public_control_plane().await;
+    plane.set_relay_ws_ticket_challenge_ttl_for_test(0);
+    let expired_address = spawn_public_mode_app_with(
+        plane,
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+    )
+    .await;
+    let expired_body = serde_json::to_vec(&DeviceGrantRequest {
+        relay_id: "relay-1".to_string(),
+        broker_room_id: "room-a".to_string(),
+        device_id: "expired-device".to_string(),
+    })
+    .expect("expired body");
+    let expired: RelayControlChallengeResponse = public_post(
+        expired_address,
+        "/api/public/relay/control/challenge",
+        bearer,
+        &RelayControlChallengeRequest {
+            operation: operation.to_string(),
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            request_sha256: relay_control_request_sha256(&expired_body),
+        },
+    )
+    .await;
+    let expired_signature = STANDARD.encode(
+        seeded_relay_signing_key()
+            .sign(
+                &relay_control_message(
+                    &expired.broker_origin,
+                    &expired.challenge_id,
+                    &expired.challenge,
+                    &expired.operation,
+                    &expired.relay_id,
+                    &expired.broker_room_id,
+                    &expired.refresh_token_hash,
+                    &expired.request_sha256,
+                )
+                .expect("expired message"),
+            )
+            .to_bytes(),
+    );
+    let expired_post = reqwest::Client::new()
+        .post(format!("http://{expired_address}/api/public/devices"))
+        .bearer_auth(bearer)
+        .header(RELAY_CONTROL_CHALLENGE_HEADER, expired.challenge_id)
+        .header(RELAY_CONTROL_SIGNATURE_HEADER, expired_signature)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(expired_body)
+        .send()
+        .await
+        .expect("expired control should send");
+    assert_ne!(expired_post.status(), reqwest::StatusCode::OK);
+
+    let pairing_body = serde_json::to_vec(&PairingWsTokenRequest {
+        relay_id: "relay-1".to_string(),
+        broker_room_id: "room-a".to_string(),
+        pairing_id: "pair-once".to_string(),
+        expires_at: crate::join_ticket::unix_now().saturating_add(60),
+    })
+    .expect("pairing body");
+    let once: RelayControlChallengeResponse = public_post(
+        address,
+        "/api/public/relay/control/challenge",
+        bearer,
+        &RelayControlChallengeRequest {
+            operation: "POST /api/public/pairing/ws-token".to_string(),
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            request_sha256: relay_control_request_sha256(&pairing_body),
+        },
+    )
+    .await;
+    let once_signature = STANDARD.encode(
+        seeded_relay_signing_key()
+            .sign(
+                &relay_control_message(
+                    &once.broker_origin,
+                    &once.challenge_id,
+                    &once.challenge,
+                    &once.operation,
+                    &once.relay_id,
+                    &once.broker_room_id,
+                    &once.refresh_token_hash,
+                    &once.request_sha256,
+                )
+                .expect("pairing message"),
+            )
+            .to_bytes(),
+    );
+    let send_once = || {
+        let body = pairing_body.clone();
+        let signature = once_signature.clone();
+        let challenge_id = once.challenge_id.clone();
+        async move {
+            reqwest::Client::new()
+                .post(format!("http://{address}/api/public/pairing/ws-token"))
+                .bearer_auth(bearer)
+                .header(RELAY_CONTROL_CHALLENGE_HEADER, challenge_id)
+                .header(RELAY_CONTROL_SIGNATURE_HEADER, signature)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .send()
+                .await
+                .expect("concurrent pairing should send")
+                .status()
+        }
+    };
+    let (left, right) = tokio::join!(send_once(), send_once());
+    assert_eq!(
+        [left, right]
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::OK)
+            .count(),
+        1,
+        "one control proof must mint one pairing ticket"
+    );
+}
+
+#[tokio::test]
+async fn stolen_self_hosted_relay_ticket_cannot_take_the_seat() {
+    use hmac::Mac;
+    let address = spawn_app().await;
+    let mut keyless = JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key());
+    keyless.relay_verify_key = None;
+    assert!(
+        test_join_ticket_key().mint(&keyless).is_err(),
+        "a relay ticket without a verify key must not mint"
+    );
+    let payload = serde_json::to_vec(&keyless).expect("keyless claims");
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(
+        b"broker-test-secret-a3f76b4c2089d15e6b0fa873c4e9521d",
+    )
+    .expect("test hmac key");
+    mac.update(payload_b64.as_bytes());
+    let keyless_ticket = format!(
+        "{payload_b64}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    );
+    let keyless_url = format!(
+        "ws://{address}/ws/room-a?role=relay&client_version={}&peer_id=relay-1&join_ticket={keyless_ticket}",
+        client_version::DEFAULT_MIN_RELAY_VERSION
+    );
+    let (mut keyless_socket, _) = connect_async(&keyless_url)
+        .await
+        .expect("old ticket should still open a socket");
+    let keyless_frame = tokio::time::timeout(Duration::from_secs(2), keyless_socket.next())
+        .await
+        .expect("keyless ticket should be answered")
+        .expect("keyless socket should produce a frame")
+        .expect("keyless frame should decode");
+    let keyless_text = match keyless_frame {
+        Message::Text(text) => text,
+        Message::Close(_) => String::new(),
+        other => panic!("keyless ticket must not be seated, got {other:?}"),
+    };
+    assert!(
+        !keyless_text.contains("\"type\":\"welcome\""),
+        "a keyless relay ticket must not be welcomed: {keyless_text}"
+    );
+
+    let url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Relay,
+        Some("relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
+    );
+    let (mut seated, _) = connect_async(&url)
+        .await
+        .expect("ticket holder should connect");
+    let seated_challenge = read_server_message(&mut seated).await;
+    let ServerMessage::RelayJoinChallenge {
+        challenge_id,
+        challenge,
+        broker_origin,
+        relay_id,
+        broker_room_id,
+        relay_peer_id,
+        ticket_sha256,
+        relay_verify_key,
+    } = &seated_challenge
+    else {
+        panic!("self-hosted relay join must challenge before seating, got {seated_challenge:?}");
+    };
+    assert_eq!(relay_verify_key, &seeded_relay_verify_key());
+    assert_eq!(broker_origin, "self-hosted");
+    let seated_message = relay_join_message(
+        broker_origin,
+        challenge_id,
+        challenge,
+        ticket_sha256,
+        relay_id,
+        broker_room_id,
+        relay_peer_id,
+    )
+    .expect("join message");
+    let seated_signature =
+        STANDARD.encode(seeded_relay_signing_key().sign(&seated_message).to_bytes());
+    seated
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::RelayJoinProof {
+                challenge_id: challenge_id.clone(),
+                signature: seated_signature.clone(),
+            })
+            .expect("proof"),
+        ))
+        .await
+        .expect("proof should send");
+    match read_server_message(&mut seated).await {
+        ServerMessage::Welcome { peer_id, .. } => assert_eq!(peer_id, "relay-1"),
+        other => panic!("expected welcome after possession, got {other:?}"),
+    }
+
+    let (mut thief, _) = connect_async(&url)
+        .await
+        .expect("copied ticket should open a socket");
+    let thief_challenge = read_server_message(&mut thief).await;
+    let ServerMessage::RelayJoinChallenge {
+        challenge_id: thief_challenge_id,
+        challenge: thief_challenge_bytes,
+        broker_origin: thief_origin,
+        relay_id: thief_relay,
+        broker_room_id: thief_room,
+        relay_peer_id: thief_peer,
+        ticket_sha256: thief_ticket,
+        ..
+    } = &thief_challenge
+    else {
+        panic!("copied ticket must be challenged, got {thief_challenge:?}");
+    };
+    let wrong_key = SigningKey::from_bytes(&[9_u8; 32]);
+    let wrong_message = relay_join_message(
+        thief_origin,
+        thief_challenge_id,
+        thief_challenge_bytes,
+        thief_ticket,
+        thief_relay,
+        thief_room,
+        thief_peer,
+    )
+    .expect("thief message");
+    thief
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::RelayJoinProof {
+                challenge_id: thief_challenge_id.clone(),
+                signature: STANDARD.encode(wrong_key.sign(&wrong_message).to_bytes()),
+            })
+            .expect("wrong proof"),
+        ))
+        .await
+        .expect("wrong proof should send");
+    let rejected = tokio::time::timeout(Duration::from_secs(2), thief.next())
+        .await
+        .expect("wrong key should be answered")
+        .expect("wrong-key socket should produce a frame")
+        .expect("wrong-key frame should decode");
+    match rejected {
+        Message::Close(_) => {}
+        Message::Text(text) => assert!(
+            !text.contains("\"type\":\"welcome\""),
+            "a copied ticket without the relay key must not be welcomed: {text}"
+        ),
+        other => panic!("copied ticket must not deliver room content, got {other:?}"),
+    }
+
+    let ping = b"self-hosted-seat".to_vec();
+    seated
+        .send(Message::Ping(ping.clone()))
+        .await
+        .expect("original relay must stay writable");
+    let frame = tokio::time::timeout(Duration::from_secs(2), seated.next())
+        .await
+        .expect("original relay must still receive a pong")
+        .expect("seated socket should stay open")
+        .expect("pong frame should decode");
+    match frame {
+        Message::Pong(payload) => assert_eq!(payload, ping),
+        other => panic!("expected a matching pong on the original socket, got {other:?}"),
+    }
+
+    let again = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Relay,
+        Some("relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
+    );
+    let (mut reconnect, _) = connect_async(&again)
+        .await
+        .expect("legitimate reconnect should connect");
+    match next_server_message(&mut reconnect).await {
+        ServerMessage::Welcome { peer_id, .. } => assert_eq!(peer_id, "relay-1"),
+        other => panic!("legitimate reconnect should be welcomed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn legitimate_relay_can_refresh_its_ticket_and_reconnect() {
+    let address = spawn_public_mode_app().await;
+    let first = post_signed_relay_ws_token(
+        address,
+        "relay-refresh-1",
+        "relay-1",
+        "room-a",
+        "relay-1",
+        &seeded_relay_signing_key(),
+    )
+    .await;
+    let second = post_signed_relay_ws_token(
+        address,
+        "relay-refresh-1",
+        "relay-1",
+        "room-a",
+        "relay-1",
+        &seeded_relay_signing_key(),
+    )
+    .await;
+    assert_ne!(first.relay_ws_token, second.relay_ws_token);
+    for token in [&first.relay_ws_token, &second.relay_ws_token] {
+        let url = format!(
+            "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id=relay-1&join_ticket={token}"
+        );
+        let (mut socket, _) = connect_async(&url).await.expect("relay should reconnect");
+        match next_server_message(&mut socket).await {
+            ServerMessage::Welcome { peer_id, .. } => assert_eq!(peer_id, "relay-1"),
+            other => panic!("unexpected welcome: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn relay_ws_ticket_proof_rejects_the_wrong_peer_room_relay_and_origin() {
+    let address = spawn_public_mode_app().await;
+    let other = spawn_public_mode_app().await;
+    let challenge =
+        relay_ws_challenge(address, "relay-refresh-1", "relay-1", "room-a", "relay-1").await;
+    let signature =
+        sign_relay_ws_ticket(&seeded_relay_signing_key(), &challenge, "relay-refresh-1");
+    let refresh_token_hash = relay_util::sha256_hex("relay-refresh-1");
+    let wrong_origin = relay_ws_ticket_message(
+        "https://evil.example",
+        &challenge.challenge_id,
+        &challenge.challenge,
+        &challenge.relay_id,
+        &challenge.broker_room_id,
+        &challenge.relay_peer_id,
+        &refresh_token_hash,
+    )
+    .expect("message");
+    let wrong_origin_signature =
+        STANDARD.encode(seeded_relay_signing_key().sign(&wrong_origin).to_bytes());
+
+    for (relay_id, room, peer, signature) in [
+        ("relay-1", "room-a", "other-peer", signature.clone()),
+        ("relay-1", "room-b", "relay-1", signature.clone()),
+        ("relay-2", "room-a", "relay-1", signature.clone()),
+        ("relay-1", "room-a", "relay-1", wrong_origin_signature),
+    ] {
+        let response = public_post_response(
+            address,
+            "/api/public/relay/ws-token",
+            "relay-refresh-1",
+            &RelayWsTokenRequest {
+                relay_id: relay_id.to_string(),
+                broker_room_id: room.to_string(),
+                relay_peer_id: peer.to_string(),
+                challenge_id: challenge.challenge_id.clone(),
+                challenge_signature: signature,
+            },
+        )
+        .await;
+        let status = response.status();
+        let body = response.text().await.expect("body");
+        assert_no_relay_ticket(status, &body);
+    }
+
+    let elsewhere = public_post_response(
+        other,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &RelayWsTokenRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            relay_peer_id: "relay-1".to_string(),
+            challenge_id: challenge.challenge_id.clone(),
+            challenge_signature: signature.clone(),
+        },
+    )
+    .await;
+    let status = elsewhere.status();
+    let body = elsewhere.text().await.expect("body");
+    assert_no_relay_ticket(status, &body);
+
+    let minted = public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &RelayWsTokenRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            relay_peer_id: "relay-1".to_string(),
+            challenge_id: challenge.challenge_id,
+            challenge_signature: signature,
+        },
+    )
+    .await;
+    assert_eq!(minted.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn invalid_relay_ws_ticket_proof_leaves_the_challenge_usable() {
+    let address = spawn_public_mode_app().await;
+    let challenge =
+        relay_ws_challenge(address, "relay-refresh-1", "relay-1", "room-a", "relay-1").await;
+    let rejected = public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &RelayWsTokenRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            relay_peer_id: "relay-1".to_string(),
+            challenge_id: challenge.challenge_id.clone(),
+            challenge_signature: STANDARD.encode([7_u8; 64]),
+        },
+    )
+    .await;
+    assert_ne!(rejected.status(), reqwest::StatusCode::OK);
+    let minted: RelayWsTokenResponse = public_post(
+        address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &RelayWsTokenRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            relay_peer_id: "relay-1".to_string(),
+            challenge_id: challenge.challenge_id.clone(),
+            challenge_signature: sign_relay_ws_ticket(
+                &seeded_relay_signing_key(),
+                &challenge,
+                "relay-refresh-1",
+            ),
+        },
+    )
+    .await;
+    let url = format!(
+        "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id=relay-1&join_ticket={}",
+        minted.relay_ws_token
+    );
+    let (mut socket, _) = connect_async(&url).await.expect("relay should connect");
+    assert!(matches!(
+        next_server_message(&mut socket).await,
+        ServerMessage::Welcome { .. }
+    ));
+}
+
+#[tokio::test]
+async fn relay_ws_ticket_challenge_rejects_expiry_replay_and_double_complete() {
+    let mut plane = test_public_control_plane().await;
+    plane.set_relay_ws_ticket_challenge_ttl_for_test(0);
+    let expired_address = spawn_public_mode_app_with(
+        plane,
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+    )
+    .await;
+    let expired = relay_ws_challenge(
+        expired_address,
+        "relay-refresh-1",
+        "relay-1",
+        "room-a",
+        "relay-1",
+    )
+    .await;
+    let expired_complete = public_post_response(
+        expired_address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &RelayWsTokenRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            relay_peer_id: "relay-1".to_string(),
+            challenge_id: expired.challenge_id.clone(),
+            challenge_signature: sign_relay_ws_ticket(
+                &seeded_relay_signing_key(),
+                &expired,
+                "relay-refresh-1",
+            ),
+        },
+    )
+    .await;
+    assert_eq!(expired_complete.status(), reqwest::StatusCode::BAD_REQUEST);
+    let expired_body = expired_complete.text().await.expect("body");
+    assert!(expired_body.contains("expired"), "{expired_body}");
+
+    let address = spawn_public_mode_app().await;
+    let challenge =
+        relay_ws_challenge(address, "relay-refresh-1", "relay-1", "room-a", "relay-1").await;
+    let request = RelayWsTokenRequest {
+        relay_id: "relay-1".to_string(),
+        broker_room_id: "room-a".to_string(),
+        relay_peer_id: "relay-1".to_string(),
+        challenge_id: challenge.challenge_id.clone(),
+        challenge_signature: sign_relay_ws_ticket(
+            &seeded_relay_signing_key(),
+            &challenge,
+            "relay-refresh-1",
+        ),
+    };
+    let first = public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &request,
+    )
+    .await;
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    let replay = public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &request,
+    )
+    .await;
+    assert_ne!(replay.status(), reqwest::StatusCode::OK);
+
+    let again =
+        relay_ws_challenge(address, "relay-refresh-1", "relay-1", "room-a", "relay-1").await;
+    let raced = RelayWsTokenRequest {
+        challenge_id: again.challenge_id.clone(),
+        challenge_signature: sign_relay_ws_ticket(
+            &seeded_relay_signing_key(),
+            &again,
+            "relay-refresh-1",
+        ),
+        ..request
+    };
+    let left = public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &raced,
+    );
+    let right = public_post_response(
+        address,
+        "/api/public/relay/ws-token",
+        "relay-refresh-1",
+        &raced,
+    );
+    let (left, right) = tokio::join!(left, right);
+    let statuses = [left.status(), right.status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::OK)
+            .count(),
+        1,
+        "concurrent completion must succeed once, got {statuses:?}"
+    );
+}
+
+#[tokio::test]
+async fn relay_ws_ticket_challenges_are_capped() {
+    let plane = test_public_control_plane().await;
+    for index in 0..4096 {
+        plane
+            .create_relay_ws_ticket_challenge(
+                "relay-refresh-1",
+                RelayWsTokenChallengeRequest {
+                    relay_id: "relay-1".to_string(),
+                    broker_room_id: "room-a".to_string(),
+                    relay_peer_id: format!("peer-{index}"),
+                },
+            )
+            .await
+            .expect("challenge under the cap should be accepted");
+    }
+    let overflow = plane
+        .create_relay_ws_ticket_challenge(
+            "relay-refresh-1",
+            RelayWsTokenChallengeRequest {
+                relay_id: "relay-1".to_string(),
+                broker_room_id: "room-a".to_string(),
+                relay_peer_id: "peer-overflow".to_string(),
+            },
+        )
+        .await
+        .expect_err("the challenge map must stay bounded");
+    assert!(overflow.contains("too many"), "{overflow}");
+}
+
+#[tokio::test]
+async fn public_registration_without_verify_key_cannot_mint_a_relay_ws_ticket() {
+    let plane = PublicControlPlane::from_parts(
+        Some("public-broker-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
+        Some(
+            serde_json::to_string(&vec![serde_json::json!({
+                "relay_id": "relay-1",
+                "broker_room_id": "room-a",
+                "refresh_token": "relay-refresh-1"
+            })])
+            .expect("registrations"),
+        ),
+        None,
+        Some("300".to_string()),
+        Some("300".to_string()),
+    )
+    .await
+    .expect("plane");
+    let address = spawn_public_mode_app_with(
+        plane,
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+    )
+    .await;
+    let response = public_post_response(
+        address,
+        "/api/public/relay/ws-token/challenge",
+        "relay-refresh-1",
+        &RelayWsTokenChallengeRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            relay_peer_id: "relay-1".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = response.text().await.expect("body");
+    assert!(body.contains("no enrolled verify key"), "{body}");
 }
 
 fn pairing_ticket_request(
@@ -2079,8 +3662,20 @@ async fn pairing_tickets_have_a_per_relay_budget() {
         Some("public-broker-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
         Some(
             serde_json::to_string(&vec![
-                json!({"relay_id": "relay-1", "broker_room_id": "room-a", "refresh_token": "relay-refresh-1"}),
-                json!({"relay_id": "relay-2", "broker_room_id": "room-b", "refresh_token": "relay-refresh-2"}),
+                json!({
+                    "relay_id": "relay-1",
+                    "broker_room_id": "room-a",
+                    "refresh_token": "relay-refresh-1",
+                    "relay_verify_key": seeded_relay_verify_key(),
+                }),
+                json!({
+                    "relay_id": "relay-2",
+                    "broker_room_id": "room-b",
+                    "refresh_token": "relay-refresh-2",
+                    "relay_verify_key": STANDARD.encode(
+                        SigningKey::from_bytes(&[8_u8; 32]).verifying_key().to_bytes()
+                    ),
+                }),
             ])
             .expect("relay registrations should encode"),
         ),
@@ -2096,6 +3691,7 @@ async fn pairing_tickets_have_a_per_relay_budget() {
         SecurityHeadersConfig::default(),
     )
     .await;
+    remember_relay_signing_key("relay-refresh-2", &SigningKey::from_bytes(&[8_u8; 32]));
 
     let mut statuses = Vec::new();
     for index in 0..100 {
@@ -2147,15 +3743,13 @@ async fn pairing_tickets_have_a_per_relay_budget() {
 async fn public_pairing_and_device_tokens_work_end_to_end() {
     let address = spawn_public_mode_app().await;
 
-    let relay_token: RelayWsTokenResponse = public_post(
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         "relay-refresh-1",
-        &RelayWsTokenRequest {
-            relay_id: "relay-1".to_string(),
-            broker_room_id: "room-a".to_string(),
-            relay_peer_id: "relay-1".to_string(),
-        },
+        "relay-1".to_string(),
+        "room-a".to_string(),
+        "relay-1".to_string(),
+        &seeded_relay_signing_key(),
     )
     .await;
     let relay_url = format!(
@@ -3921,15 +5515,13 @@ async fn public_api_rate_limit_is_enforced() {
     )
     .await;
 
-    let _: RelayWsTokenResponse = public_post(
+    let _: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         "relay-refresh-1",
-        &RelayWsTokenRequest {
-            relay_id: "relay-1".to_string(),
-            broker_room_id: "room-a".to_string(),
-            relay_peer_id: "relay-1".to_string(),
-        },
+        "relay-1".to_string(),
+        "room-a".to_string(),
+        "relay-1".to_string(),
+        &seeded_relay_signing_key(),
     )
     .await;
 
@@ -3941,6 +5533,8 @@ async fn public_api_rate_limit_is_enforced() {
             relay_id: "relay-1".to_string(),
             broker_room_id: "room-a".to_string(),
             relay_peer_id: "relay-2".to_string(),
+            challenge_id: String::new(),
+            challenge_signature: String::new(),
         },
         reqwest::StatusCode::TOO_MANY_REQUESTS,
     )
@@ -3970,6 +5564,8 @@ async fn public_api_global_rate_limit_bounds_distinct_client_ips() {
         relay_id: "relay-1".to_string(),
         broker_room_id: "room-a".to_string(),
         relay_peer_id: "relay-1".to_string(),
+        challenge_id: String::new(),
+        challenge_signature: String::new(),
     };
     let first = client
         .post(&url)
@@ -4061,15 +5657,13 @@ async fn a_random_room_join_flood_is_capped_per_ip_and_leaves_the_public_api_usa
          (first rate_limited at {first_limited:?})"
     );
 
-    let status = public_post_response(
+    let status = post_signed_relay_ws_token_response(
         address,
-        "/api/public/relay/ws-token",
         "relay-refresh-1",
-        &RelayWsTokenRequest {
-            relay_id: "relay-1".to_string(),
-            broker_room_id: "room-a".to_string(),
-            relay_peer_id: "relay-1".to_string(),
-        },
+        "relay-1",
+        "room-a",
+        "relay-1",
+        &seeded_relay_signing_key(),
     )
     .await
     .status();
@@ -4327,7 +5921,7 @@ async fn websocket_publish_rate_limit_rejects_messages_without_closing_socket() 
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
 
     let (mut relay, _) = connect_async(&relay_url)
@@ -4337,7 +5931,7 @@ async fn websocket_publish_rate_limit_rejects_messages_without_closing_socket() 
 
     let publish_frame = serde_json::to_string(&ClientMessage::Publish {
         protocol_version: protocol::BROKER_PROTOCOL_VERSION,
-        payload: json!({"ciphertext":"abc"}),
+        payload: json!({"target_peer_id":"absent-peer", "ciphertext":"abc"}),
     })
     .expect("client frame should serialize");
 
@@ -4677,6 +6271,8 @@ async fn per_ip_rate_limit_keys_on_forwarded_client_ip() {
         relay_id: "relay-1".to_string(),
         broker_room_id: "room-a".to_string(),
         relay_peer_id: "relay-1".to_string(),
+        challenge_id: String::new(),
+        challenge_signature: String::new(),
     };
 
     // Same forwarded client IP twice: the second exceeds the per-IP limit. (The
@@ -4802,26 +6398,25 @@ async fn spawn_public_mode_app_full(admin_token: Option<std::sync::Arc<str>>) ->
     address
 }
 
-/// Try to obtain a relay ws-token with the given refresh token. Returns the HTTP
-/// status, so tests can assert whether the credential authenticates.
+/// Obtain a relay ws-token with the enrolled signing key. Returns the completion
+/// status, so tests can assert the refresh bearer still authenticates.
 async fn relay_ws_token_status(
     address: SocketAddr,
     refresh_token: &str,
     relay_id: &str,
     broker_room_id: &str,
+    signing_key: &SigningKey,
 ) -> reqwest::StatusCode {
-    reqwest::Client::new()
-        .post(format!("http://{address}/api/public/relay/ws-token"))
-        .bearer_auth(refresh_token)
-        .json(&RelayWsTokenRequest {
-            relay_id: relay_id.to_string(),
-            broker_room_id: broker_room_id.to_string(),
-            relay_peer_id: "relay-peer".to_string(),
-        })
-        .send()
-        .await
-        .expect("ws-token request should complete")
-        .status()
+    post_signed_relay_ws_token_response(
+        address,
+        refresh_token,
+        relay_id,
+        broker_room_id,
+        "relay-peer",
+        signing_key,
+    )
+    .await
+    .status()
 }
 
 /// Enroll a relay against the test public control-plane, optionally supplying an
@@ -4831,15 +6426,7 @@ async fn enroll_relay(
     seed_label: &str,
     enrollment_token: Option<&str>,
 ) -> Result<RelayEnrollmentResponse, (reqwest::StatusCode, String)> {
-    let seed: [u8; 32] = {
-        let b = seed_label.as_bytes();
-        let mut s = [0xABu8; 32];
-        for (i, byte) in b.iter().take(32).enumerate() {
-            s[i] = *byte;
-        }
-        s
-    };
-    let signing_key = SigningKey::from_bytes(&seed);
+    let signing_key = signing_key_for_seed_label(seed_label);
     let verify_key_b64 = STANDARD.encode(signing_key.verifying_key().to_bytes());
 
     let challenge_resp = reqwest::Client::new()
@@ -4887,7 +6474,10 @@ async fn enroll_relay(
     let status = response.status();
     let body = response.text().await.expect("body should read");
     if status.is_success() {
-        Ok(serde_json::from_str(&body).expect("enrollment response should parse"))
+        let parsed: RelayEnrollmentResponse =
+            serde_json::from_str(&body).expect("enrollment response should parse");
+        remember_relay_signing_key(&parsed.relay_refresh_token, &signing_key);
+        Ok(parsed)
     } else {
         Err((status, body))
     }
@@ -5167,7 +6757,8 @@ async fn injected_required_token_conflict_idempotence_and_same_identity_race() {
             address,
             &reg_c.relay_refresh_token,
             &reg_c.relay_id,
-            &reg_c.broker_room_id
+            &reg_c.broker_room_id,
+            &signing_key_for_seed_label("tok-race"),
         )
         .await,
         reqwest::StatusCode::OK,
@@ -5265,6 +6856,8 @@ async fn ws_token_access_check_requires_auth_first() {
             relay_id: "no-such-relay".to_string(),
             broker_room_id: "room".to_string(),
             relay_peer_id: "peer".to_string(),
+            challenge_id: String::new(),
+            challenge_signature: String::new(),
         })
         .send()
         .await
@@ -5328,7 +6921,8 @@ async fn failed_bind_rolls_back_new_relay_and_restores_existing_refresh() {
             address,
             &first.relay_refresh_token,
             &first.relay_id,
-            &first.broker_room_id
+            &first.broker_room_id,
+            &signing_key_for_seed_label("bind-fail-existing"),
         )
         .await,
         reqwest::StatusCode::OK,
@@ -5349,7 +6943,8 @@ async fn failed_bind_rolls_back_new_relay_and_restores_existing_refresh() {
             address,
             &first.relay_refresh_token,
             &first.relay_id,
-            &first.broker_room_id
+            &first.broker_room_id,
+            &signing_key_for_seed_label("bind-fail-existing"),
         )
         .await,
         reqwest::StatusCode::OK,
@@ -5651,20 +7246,15 @@ async fn injected_forbidden_denial_blocks_relay_ws_token_after_auth() {
     let enrolled = enroll_relay(address, "access-deny-relay", None)
         .await
         .expect("enrollment should succeed under allow-enroll script");
-    let resp = reqwest::Client::new()
-        .post(format!("http://{address}/api/public/relay/ws-token"))
-        .header(
-            "Authorization",
-            format!("Bearer {}", enrolled.relay_refresh_token),
-        )
-        .json(&RelayWsTokenRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            relay_peer_id: "relay-peer".to_string(),
-        })
-        .send()
-        .await
-        .expect("ws-token request");
+    let resp = post_signed_relay_ws_token_response(
+        address,
+        &enrolled.relay_refresh_token,
+        &enrolled.relay_id,
+        &enrolled.broker_room_id,
+        "relay-peer",
+        &signing_key_for_seed_label("access-deny-relay"),
+    )
+    .await;
     assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
     let body = resp.text().await.unwrap_or_default();
     let (error, message, _) = parse_api_error(&body);
@@ -5691,20 +7281,17 @@ async fn injected_forbidden_denial_blocks_device_grant_after_auth() {
     let enrolled = enroll_relay(address, "access-deny-device", None)
         .await
         .expect("enrollment should succeed");
-    let resp = reqwest::Client::new()
-        .post(format!("http://{address}/api/public/devices"))
-        .header(
-            "Authorization",
-            format!("Bearer {}", enrolled.relay_refresh_token),
-        )
-        .json(&DeviceGrantRequest {
+    let resp = public_post_response(
+        address,
+        "/api/public/devices",
+        &enrolled.relay_refresh_token,
+        &DeviceGrantRequest {
             relay_id: enrolled.relay_id.clone(),
             broker_room_id: enrolled.broker_room_id.clone(),
             device_id: "phone".to_string(),
-        })
-        .send()
-        .await
-        .expect("device grant request");
+        },
+    )
+    .await;
     assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
     let body = resp.text().await.unwrap_or_default();
     let (error, message, _) = parse_api_error(&body);
@@ -5747,15 +7334,13 @@ async fn access_release_orders_auth_before_strategy_and_revokes_on_success() {
         .await
         .expect("enroll");
 
-    let relay_token: RelayWsTokenResponse = public_post(
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &enrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            relay_peer_id: "relay-peer".to_string(),
-        },
+        enrolled.relay_id.clone(),
+        enrolled.broker_room_id.clone(),
+        "relay-peer".to_string(),
+        &signing_key_for_seed_label("release-ok"),
     )
     .await;
     let device_grant: DeviceGrantResponse = public_post(
@@ -5919,15 +7504,13 @@ async fn access_release_strategy_denial_preserves_registration_and_sockets() {
     let enrolled = enroll_relay(address, "release-deny", None)
         .await
         .expect("enroll");
-    let relay_token: RelayWsTokenResponse = public_post(
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &enrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            relay_peer_id: "relay-peer".to_string(),
-        },
+        enrolled.relay_id.clone(),
+        enrolled.broker_room_id.clone(),
+        "relay-peer".to_string(),
+        &signing_key_for_seed_label("release-deny"),
     )
     .await;
     let (mut relay_ws, _) = connect_async(format!(
@@ -5957,15 +7540,13 @@ async fn access_release_strategy_denial_preserves_registration_and_sockets() {
             .await
     );
 
-    let _still: RelayWsTokenResponse = public_post(
+    let _still: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &enrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            relay_peer_id: "relay-peer-2".to_string(),
-        },
+        enrolled.relay_id.clone(),
+        enrolled.broker_room_id.clone(),
+        "relay-peer-2".to_string(),
+        &signing_key_for_seed_label("release-deny"),
     )
     .await;
 }
@@ -6008,15 +7589,13 @@ async fn access_release_wrong_room_and_wrong_relay_cannot_target_victim() {
         "strategy must not run before auth succeeds"
     );
 
-    let _ok: RelayWsTokenResponse = public_post(
+    let _ok: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &b.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: b.relay_id.clone(),
-            broker_room_id: b.broker_room_id.clone(),
-            relay_peer_id: "relay-b".to_string(),
-        },
+        b.relay_id.clone(),
+        b.broker_room_id.clone(),
+        "relay-b".to_string(),
+        &signing_key_for_seed_label("release-b"),
     )
     .await;
 }
@@ -6042,15 +7621,13 @@ async fn unavailable_strategy_fails_closed_on_access_release() {
     )
     .await;
     assert_eq!(denied.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-    let _ok: RelayWsTokenResponse = public_post(
+    let _ok: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &enrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            relay_peer_id: "relay-peer".to_string(),
-        },
+        enrolled.relay_id.clone(),
+        enrolled.broker_room_id.clone(),
+        "relay-peer".to_string(),
+        &signing_key_for_seed_label("release-unavail"),
     )
     .await;
 }
@@ -6080,6 +7657,8 @@ async fn open_access_release_still_revokes_registration() {
             relay_id: enrolled.relay_id.clone(),
             broker_room_id: enrolled.broker_room_id.clone(),
             relay_peer_id: "relay-peer".to_string(),
+            challenge_id: String::new(),
+            challenge_signature: String::new(),
         },
     )
     .await;
@@ -6099,15 +7678,13 @@ async fn socket_join_consults_strategy_after_ticket_verify() {
     let enrolled = enroll_relay(address, "sock-deny", None)
         .await
         .expect("enroll");
-    let relay_token: RelayWsTokenResponse = public_post(
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &enrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            relay_peer_id: "relay-peer".to_string(),
-        },
+        enrolled.relay_id.clone(),
+        enrolled.broker_room_id.clone(),
+        "relay-peer".to_string(),
+        &signing_key_for_seed_label("sock-deny"),
     )
     .await;
     let (mut ws, _) = connect_async(format!(
@@ -6160,15 +7737,13 @@ async fn released_ticket_cannot_seat_after_concurrent_access_release() {
     let enrolled = enroll_relay(address, "release-toctou", None)
         .await
         .expect("enroll");
-    let relay_token: RelayWsTokenResponse = public_post(
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &enrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            relay_peer_id: "relay-peer".to_string(),
-        },
+        enrolled.relay_id.clone(),
+        enrolled.broker_room_id.clone(),
+        "relay-peer".to_string(),
+        &signing_key_for_seed_label("release-toctou"),
     )
     .await;
 
@@ -6287,15 +7862,13 @@ async fn access_release_cleanup_failpoint_closes_sockets_and_retries() {
     let enrolled = enroll_relay(address, "release-failpoint", None)
         .await
         .expect("enroll");
-    let relay_token: RelayWsTokenResponse = public_post(
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &enrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            relay_peer_id: "relay-peer".to_string(),
-        },
+        enrolled.relay_id.clone(),
+        enrolled.broker_room_id.clone(),
+        "relay-peer".to_string(),
+        &signing_key_for_seed_label("release-failpoint"),
     )
     .await;
     let (mut relay_ws, _) = connect_async(format!(
@@ -6355,15 +7928,13 @@ async fn access_release_reload_uncertain_returns_503_even_when_memory_target_cle
     let enrolled = enroll_relay(address, "release-reload-uncertain", None)
         .await
         .expect("enroll");
-    let relay_token: RelayWsTokenResponse = public_post(
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &enrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            relay_peer_id: "relay-peer".to_string(),
-        },
+        enrolled.relay_id.clone(),
+        enrolled.broker_room_id.clone(),
+        "relay-peer".to_string(),
+        &signing_key_for_seed_label("release-reload-uncertain"),
     )
     .await;
     let (mut relay_ws, _) = connect_async(format!(
@@ -6489,15 +8060,13 @@ async fn open_access_release_force_closes_stale_join_seated_during_cleanup() {
     let enrolled = enroll_relay(address, "open-cleanup-race", None)
         .await
         .expect("enroll");
-    let relay_token: RelayWsTokenResponse = public_post(
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &enrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            relay_peer_id: "relay-peer".to_string(),
-        },
+        enrolled.relay_id.clone(),
+        enrolled.broker_room_id.clone(),
+        "relay-peer".to_string(),
+        &signing_key_for_seed_label("open-cleanup-race"),
     )
     .await;
 
@@ -6508,20 +8077,20 @@ async fn open_access_release_force_closes_stale_join_seated_during_cleanup() {
         });
     }));
 
-    let release_url = format!("http://{address}/api/public/relay/access/release");
     let release_token = enrolled.relay_refresh_token.clone();
     let release_body = AccessReleaseRequest {
         relay_id: enrolled.relay_id.clone(),
         broker_room_id: enrolled.broker_room_id.clone(),
     };
+    let release_address = address;
     let release_task = tokio::spawn(async move {
-        reqwest::Client::new()
-            .post(release_url)
-            .bearer_auth(release_token)
-            .json(&release_body)
-            .send()
-            .await
-            .expect("release request")
+        send_public_post(
+            release_address,
+            "/api/public/relay/access/release",
+            &release_token,
+            &release_body,
+        )
+        .await
     });
 
     tokio::task::spawn_blocking(move || at_cleanup_rx.recv())
@@ -6584,21 +8153,21 @@ async fn release_and_same_identity_reenrollment_serialize_on_lifecycle_lock() {
         .expect("enroll");
     let old_token = enrolled.relay_refresh_token.clone();
 
-    let release_url = format!("http://{address}/api/public/relay/access/release");
     let release_body = AccessReleaseRequest {
         relay_id: enrolled.relay_id.clone(),
         broker_room_id: enrolled.broker_room_id.clone(),
     };
     let release_task = tokio::spawn({
         let old_token = old_token.clone();
+        let release_address = address;
         async move {
-            reqwest::Client::new()
-                .post(release_url)
-                .bearer_auth(old_token)
-                .json(&release_body)
-                .send()
-                .await
-                .expect("release")
+            send_public_post(
+                release_address,
+                "/api/public/relay/access/release",
+                &old_token,
+                &release_body,
+            )
+            .await
         }
     });
     tokio::task::spawn_blocking(move || at_release_rx.recv())
@@ -6628,20 +8197,20 @@ async fn release_and_same_identity_reenrollment_serialize_on_lifecycle_lock() {
             relay_id: enrolled.relay_id.clone(),
             broker_room_id: enrolled.broker_room_id.clone(),
             relay_peer_id: "old".to_string(),
+            challenge_id: String::new(),
+            challenge_signature: String::new(),
         },
     )
     .await;
     assert_eq!(old_denied.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-    let _new_ok: RelayWsTokenResponse = public_post(
+    let _new_ok: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &reenrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: reenrolled.relay_id.clone(),
-            broker_room_id: reenrolled.broker_room_id.clone(),
-            relay_peer_id: "new".to_string(),
-        },
+        reenrolled.relay_id.clone(),
+        reenrolled.broker_room_id.clone(),
+        "new".to_string(),
+        &signing_key_for_seed_label("release-vs-reenroll"),
     )
     .await;
 }
@@ -6678,15 +8247,13 @@ async fn release_after_reenroll_fails_reauth_before_strategy() {
         "stale bearer must fail re-auth before strategy; must not unbind the new identity"
     );
 
-    let _still: RelayWsTokenResponse = public_post(
+    let _still: RelayWsTokenResponse = post_signed_relay_ws_token(
         address,
-        "/api/public/relay/ws-token",
         &reenrolled.relay_refresh_token,
-        &RelayWsTokenRequest {
-            relay_id: reenrolled.relay_id.clone(),
-            broker_room_id: reenrolled.broker_room_id.clone(),
-            relay_peer_id: "still".to_string(),
-        },
+        reenrolled.relay_id.clone(),
+        reenrolled.broker_room_id.clone(),
+        "still".to_string(),
+        &signing_key_for_seed_label("reenroll-wins"),
     )
     .await;
 }
@@ -6947,7 +8514,7 @@ async fn a_relays_designed_publish_cadence_is_not_rate_limited() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
 
     let (mut relay, _) = connect_async(&relay_url)
@@ -6957,7 +8524,7 @@ async fn a_relays_designed_publish_cadence_is_not_rate_limited() {
 
     let publish_frame = serde_json::to_string(&ClientMessage::Publish {
         protocol_version: protocol::BROKER_PROTOCOL_VERSION,
-        payload: json!({"ciphertext":"abc"}),
+        payload: json!({"target_peer_id":"absent-peer", "ciphertext":"abc"}),
     })
     .expect("client frame should serialize");
 
@@ -7005,6 +8572,8 @@ async fn an_api_flood_from_many_addresses_cannot_refuse_a_relays_publish() {
                 relay_id: "relay-x".to_string(),
                 broker_room_id: "room-x".to_string(),
                 relay_peer_id: "relay-x".to_string(),
+                challenge_id: String::new(),
+                challenge_signature: String::new(),
             })
             .send()
             .await
@@ -7016,7 +8585,7 @@ async fn an_api_flood_from_many_addresses_cannot_refuse_a_relays_publish() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     ))
     .await
     .expect("relay socket should connect");
@@ -7028,7 +8597,7 @@ async fn an_api_flood_from_many_addresses_cannot_refuse_a_relays_publish() {
         .send(Message::Text(
             serde_json::to_string(&ClientMessage::Publish {
                 protocol_version: protocol::BROKER_PROTOCOL_VERSION,
-                payload: json!({"ciphertext": "abc"}),
+                payload: json!({"target_peer_id":"absent-peer", "ciphertext": "abc"}),
             })
             .expect("client frame should serialize"),
         ))
@@ -7075,7 +8644,7 @@ async fn a_surface_is_still_held_to_the_tighter_publish_budget() {
 
     let publish_frame = serde_json::to_string(&ClientMessage::Publish {
         protocol_version: protocol::BROKER_PROTOCOL_VERSION,
-        payload: json!({"ciphertext":"abc"}),
+        payload: json!({"target_peer_id":"absent-peer", "ciphertext":"abc"}),
     })
     .expect("client frame should serialize");
     for _ in 0..4 {
@@ -7139,7 +8708,7 @@ fn an_explicit_generic_publish_limit_still_governs_relays() {
 fn large_publish_frame(payload_bytes: usize) -> String {
     serde_json::to_string(&ClientMessage::Publish {
         protocol_version: protocol::BROKER_PROTOCOL_VERSION,
-        payload: json!({ "ciphertext": "x".repeat(payload_bytes) }),
+        payload: json!({ "target_peer_id":"absent-peer", "ciphertext": "x".repeat(payload_bytes) }),
     })
     .expect("client frame should serialize")
 }
@@ -7204,7 +8773,7 @@ async fn a_relay_cannot_publish_unbounded_bytes_inside_its_frame_budget() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
 
     let (mut relay, _) = connect_async(&relay_url)
@@ -7253,7 +8822,7 @@ async fn a_relays_largest_designed_reply_is_not_byte_limited() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
 
     let (mut relay, _) = connect_async(&relay_url)
@@ -7291,7 +8860,7 @@ async fn reconnecting_does_not_reset_the_byte_budget() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
 
     // First connection: spend the budget until the broker refuses.
@@ -7781,35 +9350,49 @@ async fn reported_egress_equals_the_bytes_clients_actually_received() {
             .expect("egress_bytes must be reported")
     };
 
-    // Two peers in one room. Both join as relays purely because a relay ws token is the
-    // cheapest credential to mint here; egress accounting does not depend on role.
-    let mut sockets = Vec::new();
-    for peer in ["sender", "receiver-1"] {
-        let ws_token: RelayWsTokenResponse = public_post(
-            address,
-            "/api/public/relay/ws-token",
-            "relay-refresh-1",
-            &RelayWsTokenRequest {
-                relay_id: "relay-1".to_string(),
-                broker_room_id: "room-a".to_string(),
-                relay_peer_id: peer.to_string(),
-            },
-        )
-        .await;
-        let url = format!(
-            "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id={peer}&join_ticket={}",
-            ws_token.relay_ws_token
-        );
-        let (socket, _) = connect_async(&url).await.expect("peer should connect");
-        sockets.push(socket);
+    let ws_token: RelayWsTokenResponse = post_signed_relay_ws_token(
+        address,
+        "relay-refresh-1",
+        "relay-1".to_string(),
+        "room-a".to_string(),
+        "sender".to_string(),
+        &seeded_relay_signing_key(),
+    )
+    .await;
+    let url = format!(
+        "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id=sender&join_ticket={}",
+        ws_token.relay_ws_token
+    );
+    let (mut sender, _) = connect_async(&url).await.expect("relay should connect");
+    match next_server_message(&mut sender).await {
+        ServerMessage::Welcome { .. } => {}
+        other => panic!("relay should be seated before measuring egress, got {other:?}"),
     }
-    let mut receiver = sockets.pop().expect("receiver socket");
-    let mut sender = sockets.pop().expect("sender socket");
+    let grant: DeviceGrantResponse = public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: "receiver-device".to_string(),
+        },
+    )
+    .await;
+    let url = format!(
+        "ws://{address}/ws/room-a?role=surface&client_version=0.11.3&join_ticket={}",
+        grant.device_ws_token
+    );
+    let (mut receiver, _) = connect_async(&url).await.expect("surface should connect");
 
-    // Drain the welcome and the join presence so the baseline below is quiet.
-    let _ = next_server_message(&mut sender).await;
-    let _ = next_server_message(&mut sender).await;
-    let _ = next_server_message(&mut receiver).await;
+    let receiver_peer_id = match next_server_message(&mut receiver).await {
+        ServerMessage::Welcome { peer_id, .. } => peer_id,
+        other => panic!("expected surface welcome, got {other:?}"),
+    };
+    match next_server_message(&mut sender).await {
+        ServerMessage::Presence { .. } => {}
+        other => panic!("expected the receiver join before measuring egress, got {other:?}"),
+    };
 
     let baseline = egress_now(http.clone(), token.clone()).await;
 
@@ -7820,7 +9403,7 @@ async fn reported_egress_equals_the_bytes_clients_actually_received() {
         payload: json!({
             "kind": "targeted_messages",
             "messages": [
-                {"target_peer_id": "receiver-1", "payload": {"ciphertext": "x".repeat(32 * 1024)}},
+                {"target_peer_id": receiver_peer_id, "payload": {"ciphertext": "x".repeat(32 * 1024)}},
                 {"target_peer_id": "absent-peer", "payload": {"ciphertext": ""}},
             ],
         }),
@@ -8128,7 +9711,7 @@ async fn a_frame_cap_below_the_relays_fixed_size_is_raised_to_it() {
         "room-a",
         protocol::PeerRole::Relay,
         Some("relay-1"),
-        JoinTicketClaims::relay_join("room-a", "relay-1"),
+        JoinTicketClaims::relay_join("room-a", "relay-1", &seeded_relay_verify_key()),
     );
 
     let (mut relay, _) = connect_async(&relay_url)
@@ -8513,6 +10096,8 @@ async fn a_spoofed_edge_ip_off_the_edge_cannot_dodge_a_ban_or_spend_a_victims_bu
                 relay_id: "relay-1".to_string(),
                 broker_room_id: "room-a".to_string(),
                 relay_peer_id: "relay-1".to_string(),
+                challenge_id: String::new(),
+                challenge_signature: String::new(),
             });
         if let Some(secret) = secret {
             request = request.header(DEFAULT_ORIGIN_AUTH_HEADER, secret);

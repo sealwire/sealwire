@@ -6,6 +6,7 @@ mod device;
 mod goal_marks;
 mod injections;
 mod push;
+mod remote_requests;
 mod review_marks;
 mod runtime;
 mod session_binding;
@@ -39,9 +40,9 @@ pub use self::approval::{ApprovalKind, PendingApproval};
 pub use self::ask_user_question::{parse_ask_user_questions, PendingAskUserQuestion};
 mod mcp_marks;
 pub(crate) use self::device::{
-    BrokerPendingMessage, ClaimChallenge, CompletedPairing, CompletedRemoteClaim, DeviceRecord,
-    IssuedClaimChallenge, PairedDevice, PendingPairing, PendingPairingRequest,
-    PendingPairingResult, PendingTranscriptDelta, TranscriptDeltaKind,
+    BrokerPendingMessage, ClaimChallenge, CompletedPairing, DeviceRecord, IssuedClaimChallenge,
+    PairedDevice, PendingPairing, PendingPairingRequest, PendingPairingResult,
+    PendingTranscriptDelta, TranscriptDeltaKind,
 };
 pub(crate) use self::injections::{
     clip_chars, injection_kind_from_name, injection_kind_name, CardBodies, DelegateMark, ForkMark,
@@ -64,6 +65,12 @@ pub(crate) use self::transcript_cursor::{
     TranscriptCursor, TranscriptCursorRejection, TranscriptKeySpace,
 };
 pub(crate) use self::transcript_store::{IdSpace, ThreadTranscript};
+#[cfg(test)]
+pub(crate) use remote_requests::relay_boot_id;
+pub(crate) use remote_requests::{
+    relay_clock_ms, RequestAdmission, RequestClass, RequestSessionGrant, ReservationToken,
+    SignedRequestFacts, WaitOutcome,
+};
 
 /// Transcript frames (deltas and resyncs) the broker may hold undelivered.
 const MAX_PENDING_TRANSCRIPT_FRAMES: usize = 4096;
@@ -285,6 +292,8 @@ pub(crate) struct CachedRemoteActionResult {
     pub(crate) ask_detail: Option<crate::protocol::AskDetailResponse>,
     pub(crate) session_claim: Option<String>,
     pub(crate) session_claim_expires_at: Option<u64>,
+    pub(crate) session_claim_boot: Option<String>,
+    pub(crate) session_claim_relay_ms: Option<u64>,
     pub(crate) claim_challenge_id: Option<String>,
     pub(crate) claim_challenge: Option<String>,
     pub(crate) claim_challenge_expires_at: Option<u64>,
@@ -308,6 +317,15 @@ pub(crate) enum RemoteActionReplayDecision {
 pub(crate) struct RemoteActionWait {
     pub(crate) finished: std::sync::Arc<tokio::sync::Notify>,
     pub(crate) ticket: u64,
+    pub(crate) source: RemoteActionWaitSource,
+}
+
+/// Reads wait on the result cache; writes wait on the write ledger, which the result
+/// cache cannot evict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteActionWaitSource {
+    ResultCache,
+    WriteLedger,
 }
 
 /// Where something sat in the single order the relay does everything in.
@@ -323,6 +341,8 @@ pub fn next_relay_ingress() -> u64 {
 enum CachedRemoteActionState {
     InFlight {
         action_kind: String,
+        /// The request's logical content. Same id, other content: refused, not merged.
+        digest: String,
         seen_at: u64,
         finished: std::sync::Arc<tokio::sync::Notify>,
         /// Tickets handed out so far. Carried into `Completed` so a waiter can still
@@ -331,6 +351,7 @@ enum CachedRemoteActionState {
     },
     Completed {
         result: CachedRemoteActionResult,
+        digest: String,
         seen_at: u64,
         waiters: u64,
     },
@@ -608,6 +629,7 @@ pub struct RelayState {
     /// User rows the relay sent on the person's behalf. Loaded from the database.
     pub(crate) injections: Injections,
     recent_remote_actions: HashMap<String, CachedRemoteActionState>,
+    remote_requests: remote_requests::RemoteRequestBook,
     /// Relay-owned cross-agent review jobs, keyed by job id. TERMINAL jobs are
     /// persisted whole — including their recap/review text — so the Reviewer panel's
     /// completed cards survive a restart WITH their content, even if the reviewer's
@@ -827,6 +849,7 @@ impl RelayState {
             apply_states: HashMap::new(),
             injections: Injections::default(),
             recent_remote_actions: HashMap::new(),
+            remote_requests: remote_requests::RemoteRequestBook::default(),
             review_jobs: HashMap::new(),
             asks: HashMap::new(),
             handovers: HashMap::new(),
@@ -5362,6 +5385,7 @@ so {} never got it — hand over again when you are ready.",
         self.pending_approvals.clear();
         self.pending_ask_user_questions.clear();
         self.recent_remote_actions.clear();
+        self.remote_requests.clear();
         self.locally_deleted_thread_ids.clear();
         self.sync_selected_runtime_to_fields();
         self.upsert_thread(data.thread);
@@ -6226,6 +6250,7 @@ so {} never got it — hand over again when you are ready.",
     }
 
     pub fn mark_surface_peer_online(&mut self, peer_id: &str) -> bool {
+        self.online_surface_peer_devices.remove(peer_id);
         self.open_surface_lease(peer_id);
         self.online_surface_peer_ids.insert(peer_id.to_string())
     }
@@ -6239,9 +6264,8 @@ so {} never got it — hand over again when you are ready.",
         self.online_surface_peer_ids.contains(peer_id)
     }
 
-    /// Start this surface's lease over. Everything admitted under the previous one is
-    /// stale from here, including frames still queued from before a rejoin under the
-    /// same peer id.
+    /// Start this surface's lease over. Queued requests and replies from the old
+    /// connection are stale; work already accepted keeps its operation record.
     pub fn open_surface_lease(&mut self, peer_id: &str) -> u64 {
         let lease = self.next_surface_lease;
         self.next_surface_lease = self.next_surface_lease.saturating_add(1);
@@ -6283,6 +6307,7 @@ so {} never got it — hand over again when you are ready.",
     pub fn mark_surface_peer_offline(&mut self, peer_id: &str) -> bool {
         self.online_surface_peer_devices.remove(peer_id);
         self.revoke_surface_lease(peer_id);
+        self.drop_request_sessions_for_peer(peer_id);
         let removed = self.online_surface_peer_ids.remove(peer_id);
         self.prune_offline_broker_surfaces();
         removed
@@ -6298,11 +6323,11 @@ so {} never got it — hand over again when you are ready.",
         let online = self.online_surface_peer_ids.clone();
         self.surface_leases
             .retain(|peer_id, _| online.contains(peer_id));
+        self.drop_request_sessions_except_peers(&online);
         for peer_id in &online {
             self.open_surface_lease(peer_id);
         }
-        self.online_surface_peer_devices
-            .retain(|peer_id, _| self.online_surface_peer_ids.contains(peer_id));
+        self.online_surface_peer_devices.clear();
         self.prune_offline_broker_surfaces();
     }
 
@@ -7074,6 +7099,7 @@ so {} never got it — hand over again when you are ready.",
         self.pending_approvals.clear();
         self.pending_ask_user_questions.clear();
         self.recent_remote_actions.clear();
+        self.remote_requests.clear();
         self.locally_deleted_thread_ids.clear();
         self.runtimes.clear();
     }
@@ -7257,6 +7283,17 @@ so {} never got it — hand over again when you are ready.",
         action_kind: &str,
         now: u64,
     ) -> Result<RemoteActionReplayDecision, String> {
+        self.reserve_remote_action_with_digest(device_id, action_id, action_kind, "", now)
+    }
+
+    pub fn reserve_remote_action_with_digest(
+        &mut self,
+        device_id: &str,
+        action_id: &str,
+        action_kind: &str,
+        digest: &str,
+        now: u64,
+    ) -> Result<RemoteActionReplayDecision, String> {
         self.prune_remote_action_replays(now);
         let key = remote_action_cache_key(device_id, action_id);
         let Some(entry) = self.recent_remote_actions.get_mut(&key) else {
@@ -7264,6 +7301,7 @@ so {} never got it — hand over again when you are ready.",
                 key,
                 CachedRemoteActionState::InFlight {
                     action_kind: action_kind.to_string(),
+                    digest: digest.to_string(),
                     seen_at: now,
                     finished: std::sync::Arc::new(tokio::sync::Notify::new()),
                     waiters: 0,
@@ -7275,11 +7313,12 @@ so {} never got it — hand over again when you are ready.",
         match entry {
             CachedRemoteActionState::InFlight {
                 action_kind: existing_kind,
+                digest: existing_digest,
                 finished,
                 waiters,
                 ..
             } => {
-                if existing_kind != action_kind {
+                if existing_kind != action_kind || existing_digest != digest {
                     return Err(
                         "action_id is already in use for a different remote action".to_string()
                     );
@@ -7291,10 +7330,15 @@ so {} never got it — hand over again when you are ready.",
                 Ok(RemoteActionReplayDecision::InFlight(RemoteActionWait {
                     finished: std::sync::Arc::clone(finished),
                     ticket: *waiters,
+                    source: RemoteActionWaitSource::ResultCache,
                 }))
             }
-            CachedRemoteActionState::Completed { result, .. } => {
-                if result.action_kind != action_kind {
+            CachedRemoteActionState::Completed {
+                result,
+                digest: existing_digest,
+                ..
+            } => {
+                if result.action_kind != action_kind || existing_digest != digest {
                     return Err(
                         "action_id has already been used for a different remote action".to_string(),
                     );
@@ -7313,17 +7357,27 @@ so {} never got it — hand over again when you are ready.",
     ) {
         self.prune_remote_action_replays(now);
         let key = remote_action_cache_key(device_id, action_id);
-        let (finished, waiters) = match self.recent_remote_actions.get(&key) {
+        let (finished, waiters, digest) = match self.recent_remote_actions.get(&key) {
             Some(CachedRemoteActionState::InFlight {
-                finished, waiters, ..
-            }) => (Some(std::sync::Arc::clone(finished)), *waiters),
-            Some(CachedRemoteActionState::Completed { waiters, .. }) => (None, *waiters),
-            None => (None, 0),
+                finished,
+                waiters,
+                digest,
+                ..
+            }) => (
+                Some(std::sync::Arc::clone(finished)),
+                *waiters,
+                digest.clone(),
+            ),
+            Some(CachedRemoteActionState::Completed {
+                waiters, digest, ..
+            }) => (None, *waiters, digest.clone()),
+            None => (None, 0, String::new()),
         };
         self.recent_remote_actions.insert(
             key,
             CachedRemoteActionState::Completed {
                 result,
+                digest,
                 seen_at: now,
                 waiters,
             },
@@ -7352,6 +7406,7 @@ so {} never got it — hand over again when you are ready.",
 
     /// Whether this ticket is still the most recent asker. An earlier one holds the
     /// writer of a session that has since been replaced, so it must not answer.
+    #[cfg(test)]
     pub fn remote_action_waiter_is_current(
         &self,
         device_id: &str,
@@ -7368,6 +7423,31 @@ so {} never got it — hand over again when you are ready.",
             ) => *waiters == ticket,
             None => false,
         }
+    }
+
+    /// What a waiter on the result cache learns once woken, read in one look.
+    pub(crate) fn remote_action_wait_outcome(
+        &self,
+        device_id: &str,
+        action_id: &str,
+        ticket: u64,
+    ) -> remote_requests::WaitOutcome {
+        match self
+            .recent_remote_actions
+            .get(&remote_action_cache_key(device_id, action_id))
+        {
+            None => remote_requests::WaitOutcome::Superseded,
+            Some(CachedRemoteActionState::Completed {
+                result, waiters, ..
+            }) if *waiters == ticket => remote_requests::WaitOutcome::Result(result.clone()),
+            Some(_) => remote_requests::WaitOutcome::Superseded,
+        }
+    }
+
+    /// What expiry or eviction does to the dedup cache, without waiting ten minutes.
+    #[cfg(test)]
+    pub fn forget_remote_action_replays_for_test(&mut self) {
+        self.recent_remote_actions.clear();
     }
 
     fn prune_remote_action_replays(&mut self, now: u64) {

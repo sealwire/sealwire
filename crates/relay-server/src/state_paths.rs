@@ -40,6 +40,7 @@ pub(crate) const SESSION_FILE_NAME: &str = "session.json";
 pub(crate) const PUBLIC_BROKER_REGISTRATION_FILE: &str = "public-broker-registration.json";
 pub(crate) const PUBLIC_BROKER_IDENTITY_FILE: &str = "public-broker-identity.json";
 pub(crate) const VAPID_KEY_FILE: &str = "vapid.key";
+pub(crate) const RELAY_CONTENT_IDENTITY_FILE: &str = "relay-content-identity.json";
 
 pub(crate) const STATE_PATH_ENV: &str = "RELAY_STATE_PATH";
 

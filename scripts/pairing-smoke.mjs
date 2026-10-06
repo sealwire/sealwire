@@ -6,8 +6,8 @@ const prompt = process.env.PAIRING_SMOKE_PROMPT || "Reply with exactly: pairing-
 const cwd = process.env.PAIRING_SMOKE_CWD || process.cwd();
 const timeoutMs = Number(process.env.PAIRING_SMOKE_TIMEOUT_MS || 25000);
 
-const BROKER_PROTOCOL_VERSION = 1;
-const RELAY_PROTOCOL_VERSION = 3;
+const BROKER_PROTOCOL_VERSION = 2;
+const RELAY_PROTOCOL_VERSION = 5;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -57,6 +57,57 @@ function claimInitProofMessage(actionId, deviceId, peerId) {
 
 function claimProofMessage(challengeId, challenge, deviceId, peerId) {
   return `agent-relay:claim-challenge:${challengeId}:${challenge}:${deviceId || ""}:${peerId || ""}`;
+}
+
+function lengthPrefixed(domain, fields) {
+  const parts = [encoder.encode(domain)];
+  for (const field of fields) {
+    const bytes = typeof field === "string" ? encoder.encode(field) : field;
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    parts.push(new Uint8Array(length), bytes);
+  }
+  return new Uint8Array(Buffer.concat(parts));
+}
+
+// The phone's signed attempt: `remote_request_message` in broker/request_auth.rs.
+function signedAttempt({ ticket, deviceId, peerId, claim, seq, actionId, request, secret, signingKey }) {
+  const time = claim.relayMs + Math.floor(performance.now() - claim.receivedAt);
+  const envelope = encryptActionRequest(secret, actionId, request);
+  const digest = Buffer.from(
+    sha256(lengthPrefixed("agent-relay:remote-request-envelope-v1\0", [
+      base64ToBytes(envelope.nonce),
+      base64ToBytes(envelope.ciphertext),
+    ]))
+  ).toString("hex");
+  const message = lengthPrefixed("agent-relay:remote-request-v1\0", [
+    String(RELAY_PROTOCOL_VERSION),
+    ticket.relay_verify_key,
+    ticket.broker_channel_id,
+    ticket.relay_peer_id,
+    deviceId,
+    peerId,
+    claim.sid,
+    claim.boot,
+    String(seq),
+    String(time),
+    actionId,
+    request.type,
+    claim.boot,
+    String(time),
+    digest,
+  ]);
+  return {
+    action: request.type,
+    request_sid: claim.sid,
+    request_boot: claim.boot,
+    request_seq: seq,
+    request_time: time,
+    op_boot: claim.boot,
+    op_t0: time,
+    request_signature: bytesToBase64(nacl.sign.detached(message, signingKey.secretKey)),
+    envelope,
+  };
 }
 
 async function waitForPendingPairing(pairingId) {
@@ -143,6 +194,59 @@ async function main() {
   if (!peerId) {
     throw new Error("broker welcome did not include an assigned peer_id");
   }
+  if (!ticket.relay_verify_key) {
+    throw new Error("pairing ticket is missing relay_verify_key; generate a new QR and pair again");
+  }
+  globalThis.window = {
+    atob: (value) => Buffer.from(value, "base64").toString("binary"),
+    btoa: (value) => Buffer.from(value, "binary").toString("base64"),
+  };
+  const { verifyRelayContent } = await import("../frontend/remote/crypto.js");
+  const helloNonce = Buffer.from(nacl.randomBytes(18)).toString("hex");
+  ws.send(JSON.stringify({
+    type: "publish",
+    protocol_version: BROKER_PROTOCOL_VERSION,
+    payload: {
+      protocol_version: RELAY_PROTOCOL_VERSION,
+      target_peer_id: ticket.relay_peer_id,
+      kind: "relay_hello",
+      hello_nonce: helloNonce,
+      device_id: "smoke-phone",
+    },
+  }));
+  const proofFrame = await nextFrame(
+    (frame) => frame.type === "message" && frame.payload?.kind === "relay_hello_proof",
+    timeoutMs
+  );
+  const proof = proofFrame.payload;
+  if (proof.hello_nonce !== helloNonce || proof.device_id !== "smoke-phone") {
+    throw new Error("relay hello proof does not match this connection");
+  }
+  const contentSession = proof.relay_content_session;
+  if (!verifyRelayContent(ticket.relay_verify_key, proof.relay_content_signature, {
+    payload: proof,
+    fromPeerId: proofFrame.from_peer_id,
+    brokerRoomId: ticket.broker_channel_id,
+    session: contentSession,
+    nonce: proof.relay_content_nonce,
+  })) {
+    throw new Error("relay hello proof was not signed by the pinned key");
+  }
+  const assertContent = (frame) => {
+    const payload = frame.payload || {};
+    if (payload.relay_content_session !== contentSession) {
+      throw new Error(`relay ${payload.kind} is not bound to this connection`);
+    }
+    if (!verifyRelayContent(ticket.relay_verify_key, payload.relay_content_signature, {
+      payload,
+      fromPeerId: frame.from_peer_id,
+      brokerRoomId: ticket.broker_channel_id,
+      session: payload.relay_content_session,
+      nonce: payload.relay_content_nonce,
+    })) {
+      throw new Error(`relay ${payload.kind} signature was rejected`);
+    }
+  };
   const signingKeyPair = nacl.sign.keyPair();
   const requestedDeviceId = "smoke-phone";
 
@@ -152,6 +256,7 @@ async function main() {
       protocol_version: BROKER_PROTOCOL_VERSION,
       payload: {
         protocol_version: RELAY_PROTOCOL_VERSION,
+        target_peer_id: ticket.relay_peer_id,
         kind: "pairing_request",
         pairing_id: ticket.pairing_id,
         envelope: encryptJson(ticket.pairing_secret, {
@@ -189,6 +294,7 @@ async function main() {
       frame.payload?.target_peer_id === peerId,
     timeoutMs
   );
+  assertContent(pairingFrame);
   const pairingResult = decryptJson(ticket.pairing_secret, pairingFrame.payload.envelope);
   if (!pairingResult.ok) {
     throw new Error(`pairing failed: ${pairingResult.error}`);
@@ -203,6 +309,7 @@ async function main() {
       protocol_version: BROKER_PROTOCOL_VERSION,
       payload: {
         protocol_version: RELAY_PROTOCOL_VERSION,
+        target_peer_id: ticket.relay_peer_id,
         kind: "encrypted_remote_action",
         action_id: "claim-challenge-smoke",
         device_id: deviceId,
@@ -226,6 +333,7 @@ async function main() {
       frame.payload?.action_id === "claim-challenge-smoke",
     timeoutMs
   );
+  assertContent(challengeFrame);
   const challengeResult = decryptJson(payloadSecret, challengeFrame.payload.envelope);
   if (!challengeResult.ok) {
     throw new Error(`claim challenge failed: ${challengeResult.error}`);
@@ -237,12 +345,14 @@ async function main() {
       protocol_version: BROKER_PROTOCOL_VERSION,
       payload: {
         protocol_version: RELAY_PROTOCOL_VERSION,
+        target_peer_id: ticket.relay_peer_id,
         kind: "encrypted_remote_action",
         action_id: "claim-smoke",
         device_id: deviceId,
         envelope: encryptActionRequest(payloadSecret, "claim-smoke", {
           type: "claim_device",
           challenge_id: challengeResult.claim_challenge_id,
+          challenge: challengeResult.claim_challenge,
           proof: bytesToBase64(
             nacl.sign.detached(
               encoder.encode(
@@ -268,10 +378,17 @@ async function main() {
       frame.payload?.action_id === "claim-smoke",
     timeoutMs
   );
+  assertContent(claimFrame);
   const claimResult = decryptJson(payloadSecret, claimFrame.payload.envelope);
   if (!claimResult.ok) {
     throw new Error(`claim failed: ${claimResult.error}`);
   }
+  const claim = {
+    sid: claimResult.session_claim,
+    boot: claimResult.session_claim_boot,
+    relayMs: claimResult.session_claim_relay_ms,
+    receivedAt: performance.now(),
+  };
 
   ws.send(
     JSON.stringify({
@@ -279,20 +396,30 @@ async function main() {
       protocol_version: BROKER_PROTOCOL_VERSION,
       payload: {
         protocol_version: RELAY_PROTOCOL_VERSION,
+        target_peer_id: ticket.relay_peer_id,
         kind: "encrypted_remote_action",
         action_id: "start-smoke",
         device_id: deviceId,
-        session_claim: claimResult.session_claim,
-        envelope: encryptActionRequest(payloadSecret, "start-smoke", {
-          type: "start_session",
-          input: {
-            cwd,
-            initial_prompt: prompt,
-            model: "gpt-5-codex",
-            approval_policy: "never",
-            sandbox: "workspace-write",
-            effort: "low",
+        ...signedAttempt({
+          ticket,
+          deviceId,
+          peerId,
+          claim,
+          seq: 1,
+          actionId: "start-smoke",
+          request: {
+            type: "start_session",
+            input: {
+              cwd,
+              initial_prompt: prompt,
+              model: "gpt-5-codex",
+              approval_policy: "never",
+              sandbox: "workspace-write",
+              effort: "low",
+            },
           },
+          secret: payloadSecret,
+          signingKey: signingKeyPair,
         }),
       },
     })
@@ -305,6 +432,7 @@ async function main() {
       frame.payload?.action_id === "start-smoke",
     timeoutMs
   );
+  assertContent(startFrame);
   const startResult = decryptJson(payloadSecret, startFrame.payload.envelope);
   if (!startResult.ok) {
     throw new Error(`start_session failed: ${startResult.error}`);

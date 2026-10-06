@@ -1,6 +1,6 @@
 import { renderLog } from "./session-surface.js";
 import { classifyBrokerPairingError, expiredPairingMessage } from "./pairing-errors.js";
-import { clearPairingQueryFromUrl, signCredentialRefresh, signCredentialRefreshInit } from "./crypto.js";
+import { clearPairingQueryFromUrl, signCredentialRefresh, signCredentialRefreshInit, verifyRelayContent } from "./crypto.js";
 import {
   brokerControlUrl,
   canRefreshDeviceJoinTicket,
@@ -22,10 +22,10 @@ import {
   createPairingStatePatch,
 } from "./surface-state.js";
 
-const BROKER_PROTOCOL_VERSION = 1;
+const BROKER_PROTOCOL_VERSION = 2;
 // Old clients leave the deduplication key outside the authenticated ciphertext. Keep
 // this version in lockstep with RELAY_PROTOCOL_VERSION in crates/relay-server/src/broker.rs.
-const RELAY_PROTOCOL_VERSION = 3;
+const RELAY_PROTOCOL_VERSION = 5;
 const DEVICE_SESSION_ROOM_MAX_BYTES = 512;
 const SOCKET_RECONNECT_BASE_DELAY_MS = 1500;
 const SOCKET_RECONNECT_MAX_DELAY_MS = 60_000;
@@ -35,6 +35,7 @@ let onBrokerReady = () => {};
 let onBrokerPayload = async () => {};
 let onBrokerDisconnect = () => {};
 let onRelayPresence = () => {};
+let onRelayContentReady = () => {};
 const inFlightDeviceRefreshes = new Map();
 // What the CURRENT socket was opened for (`connectionTarget()`'s descriptor). A frame
 // must be judged against the attempt its own socket belongs to: the broker validates
@@ -50,6 +51,7 @@ export function configureBrokerClient(handlers) {
   onBrokerPayload = handlers.onBrokerPayload || onBrokerPayload;
   onBrokerDisconnect = handlers.onBrokerDisconnect || onBrokerDisconnect;
   onRelayPresence = handlers.onRelayPresence || onRelayPresence;
+  onRelayContentReady = handlers.onRelayContentReady || onRelayContentReady;
 }
 
 /// What `configureBrokerClient` currently has installed.
@@ -305,6 +307,7 @@ export async function connectBroker(reason) {
   renderLog(`Connecting to broker (${reason}) via ${url.host}.`);
   const socket = new WebSocket(url.toString());
   const connection = target;
+  socket.relayPeerId = connection.relayPeerId;
   currentConnection = connection;
   let socketOpenedAtMs = null;
   applyRemoteSurfacePatch(createBrokerConnectionPatch({
@@ -426,11 +429,16 @@ export function sendBrokerFrame(payload, expectedSocket = state.socket) {
     throw new Error("broker socket is not connected");
   }
 
+  const relayPeerId = expectedSocket.relayPeerId;
+  if (typeof relayPeerId !== "string" || !relayPeerId.trim()) {
+    throw new Error("relay peer id is missing; pair this relay again");
+  }
+
   expectedSocket.send(
     JSON.stringify({
       type: "publish",
       protocol_version: BROKER_PROTOCOL_VERSION,
-      payload: withRelayProtocolVersion(payload),
+      payload: withRelayProtocolVersion({ ...payload, target_peer_id: relayPeerId }),
     })
   );
 }
@@ -747,19 +755,22 @@ async function handleSocketMessage(rawData, connectReason, connection = currentC
       `Joined broker channel ${frame.channel_id} as ${frame.peer_id || "unknown-peer"}.`
     );
     const relayPresent = Array.isArray(frame.peers)
-      && frame.peers.some((peer) => peer?.role === "relay");
+      && frame.peers.some((peer) => peer?.role === "relay" && peer.peer_id === connection?.relayPeerId);
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
       relayConnected: relayPresent,
       relayConnectionMessage: relayPresent
         ? null
         : "Relay server disconnected. Waiting for it to reconnect.",
     }));
+    if (connection?.relayVerifyKey && relayPresent) {
+      sendRelayHello(connection);
+    }
     void onBrokerReady(frame, connectReason, connection);
     return;
   }
 
   if (frame.type === "presence") {
-    if (frame.peer?.role === "relay") {
+    if (frame.peer?.role === "relay" && frame.peer.peer_id === connection?.relayPeerId) {
       renderLog(`Relay peer ${frame.peer.peer_id} ${frame.kind}.`);
       applyRemoteSurfacePatch(createBrokerConnectionPatch({
         relayConnected: frame.kind === "joined",
@@ -767,7 +778,18 @@ async function handleSocketMessage(rawData, connectReason, connection = currentC
           ? null
           : "Relay server disconnected. Waiting for it to reconnect.",
       }));
-      void onRelayPresence(frame.kind, frame.peer);
+      if (frame.kind === "left") {
+        connection.relayContentSession = null;
+        connection.helloNonce = null;
+        void onRelayPresence(frame.kind, frame.peer);
+      } else if (frame.kind === "joined" && connection?.relayVerifyKey) {
+        // Retire the previous claim before the new hello. A mock can answer that
+        // hello before send() returns; doing this after would abandon the new claim.
+        void onRelayPresence(frame.kind, frame.peer, { helloFollows: true });
+        sendRelayHello(connection);
+      } else {
+        void onRelayPresence(frame.kind, frame.peer);
+      }
     }
     return;
   }
@@ -789,11 +811,11 @@ async function handleSocketMessage(rawData, connectReason, connection = currentC
   }
 
   logInboundBrokerMessage(frame);
-  // Every peer in the room gets every ordinary payload, and a paired phone is a peer. So
-  // without this any paired device could put words in the relay's mouth: a forged
-  // snapshot, a forged action result, a forged "still working" holding a request open.
-  if (frame.from_role !== "relay") {
-    renderLog(`Ignoring a ${frame.payload?.kind || "payload"} from a peer that is not the relay.`);
+  if (frame.from_role !== "relay" || frame.from_peer_id !== connection?.relayPeerId) {
+    renderLog(`Ignoring a ${frame.payload?.kind || "payload"} from a peer that is not the paired relay.`);
+    return;
+  }
+  if (frame.payload?.target_peer_id !== state.socketPeerId) {
     return;
   }
   if (!isSupportedRelayProtocolVersion(frame.payload?.protocol_version)) {
@@ -802,7 +824,163 @@ async function handleSocketMessage(rawData, connectReason, connection = currentC
     );
     return;
   }
+  if (!connection?.relayVerifyKey) {
+    renderLog("Ignoring relay payload until this phone pairs again and pins the relay key.");
+    return;
+  }
+  if (frame.payload.kind === "relay_hello_proof") {
+    acceptRelayHelloProof(frame, connection);
+    return;
+  }
+  if (!connection.relayContentSession || !acceptRelayContent(frame, connection)) {
+    renderLog(`Ignoring an unverified ${frame.payload.kind || "payload"} from the relay.`);
+    return;
+  }
   await onBrokerPayload(frame.payload);
+}
+
+function sendRelayHello(connection) {
+  const bytes = new Uint8Array(18);
+  crypto.getRandomValues(bytes);
+  const helloNonce = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  connection.helloNonce = helloNonce;
+  connection.relayContentSession = null;
+  connection.contentHighSeq = 0;
+  connection.seenContentSeqs = new Map();
+  const deviceId = state.remoteAuth?.deviceId || "";
+  connection.helloDeviceId = deviceId;
+  sendBrokerFrame({
+    kind: "relay_hello",
+    hello_nonce: helloNonce,
+    device_id: deviceId,
+  });
+}
+
+function relayContentFields(frame, connection, session, nonce) {
+  return {
+    payload: frame.payload,
+    fromPeerId: frame.from_peer_id,
+    brokerRoomId: connection.brokerChannelId,
+    session,
+    nonce,
+  };
+}
+
+// Nonces are assigned per recipient when a frame is written, so another
+// phone's traffic cannot push this phone's chunks out of range. The window
+// still rejects a replay older than the last 512 sequences on this session.
+const CONTENT_REPLAY_WINDOW = 512;
+
+function contentSequence(nonce) {
+  if (typeof nonce !== "string" || !/^[1-9][0-9]{0,15}$/.test(nonce)) {
+    return null;
+  }
+  const seq = Number(nonce);
+  if (!Number.isSafeInteger(seq) || String(seq) !== nonce) {
+    return null;
+  }
+  return seq;
+}
+
+function rememberContentNonce(connection, nonce, signature) {
+  const seq = contentSequence(nonce);
+  if (seq == null) {
+    return false;
+  }
+  const high = connection.contentHighSeq || 0;
+  if (seq <= high - CONTENT_REPLAY_WINDOW) {
+    return false;
+  }
+  const seen = connection.seenContentSeqs || (connection.seenContentSeqs = new Map());
+  const previous = seen.get(seq);
+  if (previous) {
+    return previous === signature;
+  }
+  seen.set(seq, signature);
+  if (seq > high) {
+    connection.contentHighSeq = seq;
+  }
+  const floor = connection.contentHighSeq - CONTENT_REPLAY_WINDOW;
+  for (const key of seen.keys()) {
+    if (key <= floor) {
+      seen.delete(key);
+    }
+  }
+  return true;
+}
+
+function acceptRelayHelloProof(frame, connection) {
+  const payload = frame.payload || {};
+  if (!connection.helloNonce || payload.hello_nonce !== connection.helloNonce) {
+    renderLog("Ignoring a relay identity proof for a different connection.");
+    return;
+  }
+  if (payload.device_id !== connection.helloDeviceId) {
+    renderLog("Ignoring a relay identity proof for a different device.");
+    return;
+  }
+  if (!payload.relay_content_session || !payload.relay_content_nonce || !payload.relay_content_signature) {
+    renderLog("Ignoring an incomplete relay identity proof.");
+    return;
+  }
+  const fields = relayContentFields(
+    frame,
+    connection,
+    payload.relay_content_session,
+    payload.relay_content_nonce
+  );
+  if (!verifyRelayContent(connection.relayVerifyKey, payload.relay_content_signature, fields)) {
+    renderLog("Ignoring a relay identity proof that does not match the pinned key.");
+    return;
+  }
+  if (!rememberContentNonce(connection, payload.relay_content_nonce, payload.relay_content_signature)) {
+    renderLog("Ignoring a replayed relay identity proof.");
+    return;
+  }
+  connection.relayContentSession = payload.relay_content_session;
+  onRelayContentReady(connection);
+}
+
+function acceptRelayContent(frame, connection) {
+  const payload = frame.payload || {};
+  if (payload.relay_content_session !== connection.relayContentSession) {
+    return false;
+  }
+  if (!payload.relay_content_nonce || !payload.relay_content_signature) {
+    return false;
+  }
+  const fields = relayContentFields(
+    frame,
+    connection,
+    payload.relay_content_session,
+    payload.relay_content_nonce
+  );
+  if (!verifyRelayContent(connection.relayVerifyKey, payload.relay_content_signature, fields)) {
+    return false;
+  }
+  return rememberContentNonce(connection, payload.relay_content_nonce, payload.relay_content_signature);
+}
+
+export function relayContentIsReady() {
+  return Boolean(currentConnection?.relayContentSession);
+}
+
+/// Who a request is for, as this phone pinned it: signed into every action so the relay
+/// can tell a request meant for it from one captured elsewhere.
+export function currentRelayBinding() {
+  const connection = currentConnection;
+  const relayVerifyKey = connection?.relayVerifyKey || state.remoteAuth?.relayVerifyKey;
+  const brokerRoomId = connection?.brokerChannelId || state.remoteAuth?.brokerChannelId;
+  const relayPeerId = connection?.relayPeerId || state.remoteAuth?.relayPeerId;
+  if (!relayVerifyKey || !brokerRoomId || !relayPeerId) {
+    return null;
+  }
+  return {
+    protocolVersion: RELAY_PROTOCOL_VERSION,
+    relayVerifyKey,
+    brokerRoomId,
+    relayPeerId,
+  };
 }
 
 function withRelayProtocolVersion(payload) {
@@ -826,16 +1004,7 @@ function logInboundBrokerMessage(frame) {
   if (isHighVolumeBrokerPayloadKind(kind) && !isVerboseBrokerLoggingEnabled()) {
     return;
   }
-  // This runs BEFORE anything knows whether the frame is ours, and the broker
-  // broadcasts every remote action result and session snapshot to the whole room
-  // (see `must_not_be_broadcast` in crates/relay-broker/src/state.rs). `renderLog`
-  // is a `patchRemoteState`, so logging an unaddressed frame here bought a full
-  // RemoteApp re-render for something the next filter throws away — a dozen of them
-  // per chunked `fetch_workspace_diff` belonging to some other surface.
-  //
-  // Frames with no `target_peer_id` are genuinely for everyone (presence, relay
-  // status) and still log. Only another surface's mail goes quiet, and the verbose
-  // flag brings it back for anyone debugging broker routing.
+  // A misaddressed frame should not trigger a render before the receiver rejects it.
   if (
     payload.target_peer_id
     && payload.target_peer_id !== state.socketPeerId

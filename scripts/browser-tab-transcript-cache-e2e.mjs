@@ -241,19 +241,19 @@ function installRemoteFixture({ snapshot, generation, cwd, threads, cachedRows, 
       this.readyState = 1;
       controls.activateA = () => {
         liveSnapshot = { ...snapshot, active_thread_id: "a", transcript_revision: 3, transcript: freshRows.slice(22) };
-        this.emit({ type: "message", payload: { protocol_version: 3, kind: "session_snapshot", snapshot: liveSnapshot } });
+        this.emit({ type: "message", payload: { protocol_version: 5, kind: "session_snapshot", snapshot: liveSnapshot } });
       };
       queueMicrotask(() => {
         this.dispatchEvent(new Event("open"));
-        this.emit({ type: "welcome", protocol_version: 1, peer_id: "surface-e2e", channel_id: "room-e2e", peers: [{ peer_id: "relay-peer-e2e", role: "relay" }] });
-        this.emit({ type: "message", payload: { protocol_version: 3, kind: "session_snapshot", snapshot } });
+        this.emit({ type: "welcome", protocol_version: 2, peer_id: "surface-e2e", channel_id: "room-e2e", peers: [{ peer_id: "relay-peer-e2e", role: "relay" }] });
+        this.emit({ type: "message", payload: { protocol_version: 5, kind: "session_snapshot", snapshot } });
       });
     }
     emit(frame) {
       this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ from_role: "relay", from_peer_id: "relay-peer-e2e", ...frame }) }));
     }
     respond(actionId, action, data = {}) {
-      this.emit({ type: "message", payload: { protocol_version: 3, kind: "remote_action_result", action_id: actionId, action, ok: true, snapshot: liveSnapshot, ...data } });
+      this.emit({ type: "message", payload: { protocol_version: 5, kind: "remote_action_result", action_id: actionId, action, ok: true, snapshot: liveSnapshot, ...data } });
     }
     send(raw) {
       const { payload } = JSON.parse(raw);

@@ -25,6 +25,9 @@ summary. See [`DEPLOYMENT.md`](../DEPLOYMENT.md) for setup and pairing, and
 
 - Pairing and remote claim flows bind device identity before a remote surface
   can take control of a session.
+- Signed remote requests must pass permission and freshness checks at admission.
+  Once accepted, preparation does not recheck request freshness or session validity;
+  retries use the same operation record to avoid executing a write twice.
 - Remote devices keep signing keys in browser-managed crypto storage when
   `WebCrypto` and `IndexedDB` are available, with a compatibility fallback for
   weaker browser contexts.

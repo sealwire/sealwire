@@ -756,3 +756,239 @@ fn this_relays_frame_size_fits_the_brokers_guaranteed_minimum() {
         relay_broker::MIN_MAX_TEXT_FRAME_BYTES
     );
 }
+
+fn content_publish(
+    crypto: &super::super::RelayContentCrypto,
+    peer: &str,
+    mut payload: serde_json::Value,
+) -> Message {
+    payload["target_peer_id"] = serde_json::json!(peer);
+    payload["protocol_version"] = serde_json::json!(4);
+    crypto.bind_epochs(&mut payload);
+    Message::Text(
+        serde_json::json!({
+            "type": "publish",
+            "protocol_version": 2,
+            "payload": payload,
+        })
+        .to_string(),
+    )
+}
+
+fn chunk_body(index: usize, count: usize) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "encrypted_remote_action_result_chunk",
+        "device_id": "device-a",
+        "action_id": "long-reply",
+        "action": "fetch_workspace_diff",
+        "chunk_index": index,
+        "chunk_count": count,
+        "envelope": { "nonce": format!("n{index}"), "ciphertext": format!("c{index}") },
+    })
+}
+
+/// Chunks are sealed when the writer emits them, per recipient. Another phone's
+/// traffic and size probes must not push this phone's chunks outside its window,
+/// and a hello that lands while they are queued must not rebind the old session.
+#[tokio::test(start_paused = true)]
+async fn emission_order_seals_each_recipient_without_probe_side_effects() {
+    use ed25519_dalek::{SigningKey, Verifier};
+
+    let key = SigningKey::from_bytes(&[7_u8; 32]);
+    let crypto = std::sync::Arc::new(super::super::RelayContentCrypto::new(
+        key.clone(),
+        "relay-writer".to_string(),
+        "room-writer".to_string(),
+    ));
+    let session_a = crypto.open_session("phone-a");
+    crypto.open_session("phone-b");
+    let probe = super::super::protocol::frame_bytes_for_payload(
+        &super::super::protocol::OutboundBrokerPayload::EncryptedRemoteActionResultChunk {
+            action_id: "probe".to_string(),
+            target_peer_id: "phone-a".to_string(),
+            device_id: "device-a".to_string(),
+            action: super::super::remote_actions::RemoteActionKind::FetchWorkspaceDiff,
+            chunk_index: 0,
+            chunk_count: 1,
+            envelope: super::super::crypto::EncryptedEnvelope {
+                nonce: "probe-n".to_string(),
+                ciphertext: "probe-c".to_string(),
+            },
+        },
+    );
+    assert!(probe > 0);
+    for _ in 0..600 {
+        let _ = super::super::protocol::frame_bytes_for_payload(
+            &super::super::protocol::OutboundBrokerPayload::RemoteActionPending {
+                action_id: "probe".to_string(),
+                target_peer_id: "phone-b".to_string(),
+            },
+        );
+    }
+    assert_eq!(
+        crypto.issued("phone-a"),
+        0,
+        "a size probe must not mint a nonce"
+    );
+    assert_eq!(crypto.issued("phone-b"), 0);
+
+    let (written, sink) = recorder();
+    let (_ping_tx, ping_rx) = mpsc::channel(4);
+    let (now_tx, now_rx) = mpsc::channel(64);
+    let (train_tx, train_rx) = mpsc::channel(1);
+    let writer = tokio::spawn(drive_writer_with_signer(
+        ping_rx,
+        now_rx,
+        train_rx,
+        sink,
+        always_online(),
+        Some(std::sync::Arc::clone(&crypto)),
+    ));
+
+    let first_train: Vec<Message> = (0..5)
+        .map(|index| content_publish(&crypto, "phone-a", chunk_body(index, 5)))
+        .collect();
+    train_tx
+        .send(plain_train(first_train, 100))
+        .await
+        .expect("first train queues");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    for index in 0..20 {
+        now_tx
+            .send(content_publish(
+                &crypto,
+                "phone-b",
+                serde_json::json!({
+                    "kind": "remote_action_pending",
+                    "action_id": format!("other-{index}"),
+                }),
+            ))
+            .await
+            .expect("other phone frame queues");
+    }
+    let second_train: Vec<Message> = (0..3)
+        .map(|index| content_publish(&crypto, "phone-a", chunk_body(index, 3)))
+        .collect();
+    train_tx
+        .send(plain_train(second_train, 100))
+        .await
+        .expect("second train queues");
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let stale = content_publish(&crypto, "phone-a", chunk_body(99, 100));
+    let session_b = crypto.open_session("phone-a");
+    assert_ne!(session_a, session_b);
+    let fresh = content_publish(
+        &crypto,
+        "phone-a",
+        serde_json::json!({
+            "kind": "encrypted_remote_action_result",
+            "device_id": "device-a",
+            "action_id": "after-hello",
+            "envelope": { "nonce": "new-n", "ciphertext": "new-c" },
+        }),
+    );
+    now_tx.send(stale).await.expect("stale frame queues");
+    now_tx.send(fresh).await.expect("fresh frame queues");
+    drop(now_tx);
+    drop(train_tx);
+    writer
+        .await
+        .expect("writer joins")
+        .expect("writer succeeds");
+
+    let written = written.lock().unwrap().clone();
+    let mut phone_a_chunks = Vec::new();
+    let mut phone_a_nonces = Vec::new();
+    let mut phone_b_nonces = Vec::new();
+    let mut saw_fresh = false;
+    for text in &written {
+        let frame: serde_json::Value = serde_json::from_str(text).expect("sealed json");
+        let payload = &frame["payload"];
+        let target = payload["target_peer_id"].as_str().unwrap();
+        let session = payload["relay_content_session"].as_str().unwrap();
+        let nonce = payload["relay_content_nonce"].as_str().unwrap();
+        let signed = super::super::relay_content_message(
+            "relay-writer",
+            "room-writer",
+            session,
+            nonce,
+            payload.as_object().unwrap(),
+        )
+        .unwrap();
+        let signature: [u8; 64] = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            payload["relay_content_signature"].as_str().unwrap(),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        key.verifying_key()
+            .verify(&signed, &ed25519_dalek::Signature::from_bytes(&signature))
+            .expect("emitted frame verifies");
+        if target == "phone-b" {
+            phone_b_nonces.push(nonce.to_string());
+            continue;
+        }
+        if payload["kind"] == "encrypted_remote_action_result_chunk" {
+            assert_eq!(session, session_a);
+            phone_a_chunks.push(payload["chunk_index"].as_u64().unwrap());
+            phone_a_nonces.push(nonce.to_string());
+        } else {
+            assert_eq!(payload["action_id"], "after-hello");
+            assert_eq!(session, session_b);
+            assert_eq!(nonce, "9");
+            saw_fresh = true;
+        }
+    }
+    assert_eq!(
+        phone_a_chunks,
+        vec![0, 1, 2, 3, 4, 0, 1, 2],
+        "both trains arrive, including chunks overtaken by the other phone: {written:?}"
+    );
+    assert_eq!(
+        phone_a_nonces,
+        (1..=8).map(|nonce| nonce.to_string()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        phone_b_nonces,
+        (1..=20).map(|nonce| nonce.to_string()).collect::<Vec<_>>()
+    );
+    assert!(
+        saw_fresh,
+        "the post-hello reply is delivered under the new session"
+    );
+    assert!(
+        written
+            .iter()
+            .all(|text| !text.contains("\"chunk_index\":99")),
+        "the frame queued under the old session must not be sent"
+    );
+}
+
+#[test]
+fn departure_drops_the_content_session_and_its_sequence() {
+    let crypto = super::super::RelayContentCrypto::new(
+        ed25519_dalek::SigningKey::from_bytes(&[4_u8; 32]),
+        "relay".to_string(),
+        "room".to_string(),
+    );
+    let session = crypto.open_session("phone");
+    let mut payload = serde_json::json!({
+        "kind": "remote_action_pending",
+        "target_peer_id": "phone",
+        "action_id": "queued",
+    });
+    crypto.bind_epochs(&mut payload);
+    crypto.forget_peer("phone");
+    let frame = serde_json::json!({
+        "type": "publish",
+        "protocol_version": 2,
+        "payload": payload,
+    })
+    .to_string();
+    assert!(crypto.seal_frame_text(&frame).unwrap().is_none());
+    assert_eq!(crypto.issued("phone"), 0);
+    assert!(crypto.session("phone").is_none());
+    assert_ne!(crypto.open_session("phone"), session);
+}

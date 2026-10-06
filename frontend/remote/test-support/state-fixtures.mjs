@@ -1,5 +1,16 @@
+export const TEST_RELAY_VERIFY_KEY = Buffer.from(new Uint8Array(32).fill(9)).toString("base64");
+
+/// A seeded claim is a request session the relay opened: give it the boot and clock a
+/// real claim reply carries, and pin the relay key, so requests can be signed.
 export function seedRemoteAuth(state, saveRemoteAuth, remoteAuth, patch = {}) {
-  saveRemoteAuth(remoteAuth);
+  const claimed = remoteAuth.sessionClaim && remoteAuth.sessionClaimBoot === undefined
+    ? {
+      sessionClaimBoot: "test-boot",
+      sessionClaimRelayMs: 2_000_000_000,
+      sessionClaimReceivedAt: performance.now(),
+    }
+    : {};
+  saveRemoteAuth({ relayVerifyKey: TEST_RELAY_VERIFY_KEY, ...remoteAuth, ...claimed });
   Object.assign(state, patch);
 }
 
@@ -20,6 +31,9 @@ export function seedPairingState(state, patch = {}) {
 }
 
 export function seedSocketState(state, patch = {}) {
+  if (patch.socket && !("relayPeerId" in patch.socket)) {
+    patch.socket.relayPeerId = state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId;
+  }
   Object.assign(
     state,
     {

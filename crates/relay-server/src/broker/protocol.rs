@@ -21,10 +21,27 @@ pub(super) enum InboundBrokerPayload {
         pairing_id: String,
         envelope: EncryptedEnvelope,
     },
+    /// A claim step carries none of the `request_*` fields; every other action carries
+    /// all of them, signed by the device key.
     EncryptedRemoteAction {
         action_id: String,
-        session_claim: Option<String>,
         device_id: Option<String>,
+        #[serde(default)]
+        action: Option<RemoteActionKind>,
+        #[serde(default)]
+        request_sid: Option<String>,
+        #[serde(default)]
+        request_boot: Option<String>,
+        #[serde(default)]
+        request_seq: Option<u64>,
+        #[serde(default)]
+        request_time: Option<u64>,
+        #[serde(default)]
+        op_boot: Option<String>,
+        #[serde(default)]
+        op_t0: Option<u64>,
+        #[serde(default)]
+        request_signature: Option<String>,
         envelope: EncryptedEnvelope,
     },
 }
@@ -45,6 +62,12 @@ pub(super) enum OutboundBrokerPayload {
     },
     // Carries only routing metadata, never an action result.
     RemoteActionPending {
+        action_id: String,
+        target_peer_id: String,
+    },
+    /// The phone signed this attempt, but its request session or clock is not good
+    /// here. Nothing ran; the phone claims again and resends the same operation.
+    RemoteActionReauthorize {
         action_id: String,
         target_peer_id: String,
     },
@@ -163,6 +186,8 @@ pub(super) fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> Str
         }
         OutboundBrokerPayload::RemoteActionPending { action_id, target_peer_id } =>
             format!("kind=remote_action_pending action_id={action_id} target_peer_id={target_peer_id}"),
+        OutboundBrokerPayload::RemoteActionReauthorize { action_id, target_peer_id } =>
+            format!("kind=remote_action_reauthorize action_id={action_id} target_peer_id={target_peer_id}"),
         OutboundBrokerPayload::EncryptedSessionSnapshot { target_peer_id, device_id, .. } =>
             format!("kind=encrypted_session_snapshot target_peer_id={target_peer_id} device_id={device_id}"),
         OutboundBrokerPayload::EncryptedTranscriptDelta { target_peer_id, device_id, .. } =>
@@ -179,21 +204,34 @@ pub(super) fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> Str
 }
 
 pub(super) fn frame_bytes_for_payload(payload: &OutboundBrokerPayload) -> usize {
-    frame_text_for_payload(payload).len()
+    let mut payload_value =
+        serde_json::to_value(payload.clone()).expect("broker payload should serialize");
+    add_relay_payload_protocol_version(&mut payload_value);
+    // Reserve signature, session, and the widest nonce. Measuring must not mint either.
+    super::reserved_publish_frame_len(&payload_value)
+}
+
+pub(super) fn frame_text_for_json_payload(mut payload: Value) -> String {
+    add_relay_payload_protocol_version(&mut payload);
+    publish_frame_text(&payload)
 }
 
 pub(super) fn frame_text_for_payload(payload: &OutboundBrokerPayload) -> String {
     let mut payload_value =
         serde_json::to_value(payload.clone()).expect("broker payload should serialize");
     add_relay_payload_protocol_version(&mut payload_value);
+    publish_frame_text(&payload_value)
+}
+
+pub(super) fn publish_frame_text(payload: &Value) -> String {
     let frame = ClientMessage::Publish {
         protocol_version: BROKER_PROTOCOL_VERSION,
-        payload: payload_value,
+        payload: payload.clone(),
     };
     serde_json::to_string(&frame).expect("broker client frame should serialize")
 }
 
-fn add_relay_payload_protocol_version(payload: &mut Value) {
+pub(super) fn add_relay_payload_protocol_version(payload: &mut Value) {
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "protocol_version".to_string(),

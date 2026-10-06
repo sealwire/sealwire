@@ -29113,10 +29113,12 @@ mod double_approve_race {
                 }))
             }
         };
-        let app = Router::new()
-            .route("/api/public/devices", post(device_grant))
-            .route("/api/public/clients/grants", post(client_grant))
-            .route("/api/public/devices/:device_id/revoke", post(revoke));
+        let app = crate::broker::with_test_control_challenge(
+            Router::new()
+                .route("/api/public/devices", post(device_grant))
+                .route("/api/public/clients/grants", post(client_grant))
+                .route("/api/public/devices/:device_id/revoke", post(revoke)),
+        );
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("mock control plane should bind");
@@ -29136,6 +29138,27 @@ mod double_approve_race {
             revokes: AtomicUsize::new(0),
         });
         let control_url = spawn_slow_control_plane(counts.clone()).await;
+        let identity_path = std::env::temp_dir().join(format!(
+            "sealwire-double-approve-identity-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let parsed_control = url::Url::parse(&control_url).expect("control url");
+        let signing_seed =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [4_u8; 32]);
+        std::fs::write(
+            &identity_path,
+            serde_json::json!({
+                "schema_version": 1,
+                "control_url": parsed_control.as_str(),
+                "relay_signing_seed": signing_seed,
+            })
+            .to_string(),
+        )
+        .expect("identity file");
 
         // decide_pairing_request resolves its broker config from env.
         let broker_env = [
@@ -29150,6 +29173,7 @@ mod double_approve_race {
         for (key, value) in broker_env {
             std::env::set_var(key, value);
         }
+        std::env::set_var("RELAY_BROKER_IDENTITY_PATH", &identity_path);
 
         let (change_tx, _change_rx) = watch::channel(0_u64);
         let relay = Arc::new(RwLock::new(RelayState::new(
@@ -29213,6 +29237,7 @@ mod double_approve_race {
         for (key, _) in broker_env {
             std::env::remove_var(key);
         }
+        std::env::remove_var("RELAY_BROKER_IDENTITY_PATH");
 
         assert_eq!(
             u8::from(first.is_ok()) + u8::from(second.is_ok()),
@@ -41405,12 +41430,14 @@ mod pairing_qr_replacement {
             grant_entered: Semaphore::new(0),
             grant_release: Semaphore::new(0),
         });
-        let app = Router::new()
-            .route("/api/public/pairing/ws-token", post(issue_pairing_ticket))
-            .route("/api/public/devices", post(issue_device_grant))
-            .route("/api/public/clients/grants", post(issue_client_grant))
-            .route("/api/public/devices/:device_id/revoke", post(revoke_device))
-            .with_state(cloud.clone());
+        let app = crate::broker::with_test_control_challenge(
+            Router::new()
+                .route("/api/public/pairing/ws-token", post(issue_pairing_ticket))
+                .route("/api/public/devices", post(issue_device_grant))
+                .route("/api/public/clients/grants", post(issue_client_grant))
+                .route("/api/public/devices/:device_id/revoke", post(revoke_device))
+                .with_state(cloud.clone()),
+        );
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("mock control plane should bind");
@@ -41420,17 +41447,36 @@ mod pairing_qr_replacement {
                 .await
                 .expect("mock control plane should serve");
         });
+        let control = format!("http://{address}");
+        let identity_path = std::env::temp_dir().join(format!(
+            "sealwire-cloud-identity-{}-{}.json",
+            std::process::id(),
+            address.port()
+        ));
+        let parsed_control = url::Url::parse(&control).expect("control url");
+        let signing_seed =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [4_u8; 32]);
+        std::fs::write(
+            &identity_path,
+            serde_json::json!({
+                "schema_version": 1,
+                "control_url": parsed_control.as_str(),
+                "relay_signing_seed": signing_seed,
+            })
+            .to_string(),
+        )
+        .expect("identity file");
         let broker = crate::broker::BrokerConfig::from_parts(
             Some("wss://broker.example.com".to_string()),
             None,
-            Some(format!("http://{address}")),
+            Some(control),
             Some("demo-room".to_string()),
             Some("relay-1".to_string()),
             Some("public".to_string()),
             None,
             Some("relay-owner-1".to_string()),
             Some("relay-refresh-1".to_string()),
-            None,
+            Some(identity_path.display().to_string()),
             None,
             None,
         )

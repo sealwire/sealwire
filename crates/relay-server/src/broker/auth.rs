@@ -1,21 +1,27 @@
 use std::time::Duration;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ed25519_dalek::{Signer, SigningKey};
 use relay_broker::{
     auth::BrokerAuthMode,
     join_ticket::{unix_now, JoinTicketClaims, JoinTicketKey, JOIN_TICKET_SECRET_ENV},
     public_control::{
-        ClientGrantRequest, ClientGrantResponse, DeviceGrantBulkRevokeRequest,
-        DeviceGrantBulkRevokeResponse, DeviceGrantRequest, DeviceGrantResponse,
-        DeviceGrantRevokeRequest, DeviceGrantRevokeResponse, PairingWsTokenRequest,
-        PairingWsTokenResponse, RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
-        RelayEnrollmentResponse, RelayWsTokenRequest, RelayWsTokenResponse,
+        relay_ws_ticket_message, ClientGrantRequest, ClientGrantResponse,
+        DeviceGrantBulkRevokeRequest, DeviceGrantBulkRevokeResponse, DeviceGrantRequest,
+        DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
+        PairingWsTokenRequest, PairingWsTokenResponse, RelayControlChallengeResponse,
+        RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse, RelayEnrollmentResponse,
+        RelayWsTokenChallengeRequest, RelayWsTokenChallengeResponse, RelayWsTokenRequest,
+        RelayWsTokenResponse,
     },
 };
-use relay_util::trimmed_option_string;
+use relay_util::{sha256_hex, trimmed_option_string};
 use reqwest::{redirect::Policy, Client};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use url::Url;
+
+use super::signed_control::{SignedControlError, SignedControlRequest, CONTROL_CHALLENGE_PATH};
 
 pub(crate) const RELAY_BROKER_CONTROL_URL_ENV: &str = "RELAY_BROKER_CONTROL_URL";
 pub(crate) const RELAY_BROKER_RELAY_ID_ENV: &str = "RELAY_BROKER_RELAY_ID";
@@ -103,6 +109,7 @@ pub(crate) enum BrokerAuthConfig {
         relay_id: String,
         relay_refresh_token: String,
         client: Client,
+        signing_key: SigningKey,
     },
 }
 
@@ -126,6 +133,7 @@ impl std::fmt::Debug for BrokerAuthConfig {
                 .field("control_url", control_url)
                 .field("relay_id", relay_id)
                 .field("relay_refresh_token", &"<redacted>")
+                .field("signing_key", &"<redacted>")
                 .field("client", &"<client>")
                 .finish(),
         }
@@ -140,6 +148,7 @@ impl BrokerAuthConfig {
         relay_id: Option<String>,
         relay_refresh_token: Option<String>,
         device_join_ttl_secs: Option<String>,
+        signing_key: Option<SigningKey>,
     ) -> Result<Self, String> {
         match BrokerAuthMode::parse(auth_mode)? {
             BrokerAuthMode::SelfHostedSharedSecret => {
@@ -173,13 +182,25 @@ impl BrokerAuthConfig {
                     )
                 })?;
                 let control_url = parse_control_plane_url(&control_url)?;
+                let signing_key = signing_key.ok_or_else(|| {
+                    "public broker identity is missing; refusing to generate a new key for an already enrolled relay"
+                        .to_string()
+                })?;
                 Ok(Self::PublicControlPlane {
                     control_url,
                     relay_id,
                     relay_refresh_token,
                     client: build_control_plane_client()?,
+                    signing_key,
                 })
             }
+        }
+    }
+
+    pub(crate) fn relay_identity_key(&self) -> Option<&SigningKey> {
+        match self {
+            Self::PublicControlPlane { signing_key, .. } => Some(signing_key),
+            Self::SelfHostedSharedSecret { .. } => None,
         }
     }
 
@@ -194,13 +215,17 @@ impl BrokerAuthConfig {
         &self,
         broker_room_id: &str,
         relay_peer_id: &str,
+        relay_verify_key: &str,
     ) -> Result<BrokerJoinCredential, String> {
         match self {
             Self::SelfHostedSharedSecret {
                 join_ticket_key, ..
             } => Ok(BrokerJoinCredential {
-                token: join_ticket_key
-                    .mint(&JoinTicketClaims::relay_join(broker_room_id, relay_peer_id))?,
+                token: join_ticket_key.mint(&JoinTicketClaims::relay_join(
+                    broker_room_id,
+                    relay_peer_id,
+                    relay_verify_key,
+                ))?,
                 expires_at: None,
             }),
             Self::PublicControlPlane {
@@ -208,7 +233,46 @@ impl BrokerAuthConfig {
                 relay_id,
                 relay_refresh_token,
                 client,
+                signing_key,
             } => {
+                let challenge: RelayWsTokenChallengeResponse = post_control_plane(
+                    client,
+                    control_url,
+                    "/api/public/relay/ws-token/challenge",
+                    relay_refresh_token,
+                    &RelayWsTokenChallengeRequest {
+                        relay_id: relay_id.clone(),
+                        broker_room_id: broker_room_id.to_string(),
+                        relay_peer_id: relay_peer_id.to_string(),
+                    },
+                )
+                .await?;
+                if challenge.relay_id != *relay_id
+                    || challenge.broker_room_id != broker_room_id
+                    || challenge.relay_peer_id != relay_peer_id
+                {
+                    return Err("broker ticket challenge does not match this relay".to_string());
+                }
+                let refresh_token_hash = sha256_hex(relay_refresh_token.trim());
+                if challenge.refresh_token_hash != refresh_token_hash {
+                    return Err(
+                        "broker ticket challenge is not bound to this relay refresh token"
+                            .to_string(),
+                    );
+                }
+                if challenge.broker_origin.is_empty() {
+                    return Err("broker ticket challenge origin is missing".to_string());
+                }
+                let message = relay_ws_ticket_message(
+                    &challenge.broker_origin,
+                    &challenge.challenge_id,
+                    &challenge.challenge,
+                    &challenge.relay_id,
+                    &challenge.broker_room_id,
+                    &challenge.relay_peer_id,
+                    &refresh_token_hash,
+                )?;
+                let challenge_signature = STANDARD.encode(signing_key.sign(&message).to_bytes());
                 let response: RelayWsTokenResponse = post_control_plane(
                     client,
                     control_url,
@@ -218,6 +282,8 @@ impl BrokerAuthConfig {
                         relay_id: relay_id.clone(),
                         broker_room_id: broker_room_id.to_string(),
                         relay_peer_id: relay_peer_id.to_string(),
+                        challenge_id: challenge.challenge_id,
+                        challenge_signature,
                     },
                 )
                 .await?;
@@ -253,12 +319,16 @@ impl BrokerAuthConfig {
                 relay_id,
                 relay_refresh_token,
                 client,
+                signing_key,
             } => {
-                let response: PairingWsTokenResponse = post_control_plane(
+                let response: PairingWsTokenResponse = post_privileged_control_plane(
                     client,
                     control_url,
                     "/api/public/pairing/ws-token",
                     relay_refresh_token,
+                    signing_key,
+                    relay_id,
+                    broker_room_id,
                     &PairingWsTokenRequest {
                         relay_id: relay_id.clone(),
                         broker_room_id: broker_room_id.to_string(),
@@ -310,12 +380,16 @@ impl BrokerAuthConfig {
                 relay_id,
                 relay_refresh_token,
                 client,
+                signing_key,
             } => {
-                let response: DeviceGrantResponse = post_control_plane(
+                let response: DeviceGrantResponse = post_privileged_control_plane(
                     client,
                     control_url,
                     "/api/public/devices",
                     relay_refresh_token,
+                    signing_key,
+                    relay_id,
+                    broker_room_id,
                     &DeviceGrantRequest {
                         relay_id: relay_id.clone(),
                         broker_room_id: broker_room_id.to_string(),
@@ -351,12 +425,16 @@ impl BrokerAuthConfig {
                 relay_id,
                 relay_refresh_token,
                 client,
+                signing_key,
             } => {
-                let response: ClientGrantResponse = post_control_plane(
+                let response: ClientGrantResponse = post_privileged_control_plane(
                     client,
                     control_url,
                     "/api/public/clients/grants",
                     relay_refresh_token,
+                    signing_key,
+                    relay_id,
+                    broker_room_id,
                     &ClientGrantRequest {
                         relay_id: relay_id.clone(),
                         broker_room_id: broker_room_id.to_string(),
@@ -393,13 +471,17 @@ impl BrokerAuthConfig {
                 relay_id,
                 relay_refresh_token,
                 client,
+                signing_key,
             } => {
                 let path = format!("/api/public/devices/{device_id}/revoke");
-                let response: DeviceGrantRevokeResponse = post_control_plane(
+                let response: DeviceGrantRevokeResponse = post_privileged_control_plane(
                     client,
                     control_url,
                     &path,
                     relay_refresh_token,
+                    signing_key,
+                    relay_id,
+                    broker_room_id,
                     &DeviceGrantRevokeRequest {
                         relay_id: relay_id.clone(),
                         broker_room_id: broker_room_id.to_string(),
@@ -426,12 +508,16 @@ impl BrokerAuthConfig {
                 relay_id,
                 relay_refresh_token,
                 client,
+                signing_key,
             } => {
-                let response: DeviceGrantBulkRevokeResponse = post_control_plane(
+                let response: DeviceGrantBulkRevokeResponse = post_privileged_control_plane(
                     client,
                     control_url,
                     "/api/public/devices/revoke-others",
                     relay_refresh_token,
+                    signing_key,
+                    relay_id,
+                    broker_room_id,
                     &DeviceGrantBulkRevokeRequest {
                         relay_id: relay_id.clone(),
                         broker_room_id: broker_room_id.to_string(),
@@ -566,6 +652,46 @@ pub(crate) fn parse_control_plane_url(raw: &str) -> Result<Url, String> {
         ));
     }
     Ok(url)
+}
+
+async fn post_privileged_control_plane<TReq, TResp>(
+    client: &Client,
+    control_url: &Url,
+    path: &str,
+    bearer_token: &str,
+    signing_key: &SigningKey,
+    relay_id: &str,
+    broker_room_id: &str,
+    request: &TReq,
+) -> Result<TResp, String>
+where
+    TReq: Serialize + ?Sized,
+    TResp: DeserializeOwned,
+{
+    let call = SignedControlRequest::new(control_url, path, relay_id, broker_room_id, request)
+        .map_err(|error| format!("failed to encode broker control-plane body: {error}"))?;
+    let challenge: RelayControlChallengeResponse = post_control_plane(
+        client,
+        control_url,
+        CONTROL_CHALLENGE_PATH,
+        bearer_token,
+        &call.challenge_request(),
+    )
+    .await?;
+    let url = call.url().clone();
+    let request = call
+        .sign(client, bearer_token, signing_key, challenge)
+        .map_err(|error| match error {
+            SignedControlError::ChallengeMismatch => {
+                "broker control challenge does not match this relay request".to_string()
+            }
+            SignedControlError::Message(message) => message,
+        })?;
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("failed to reach broker control-plane {url}: {error}"))?;
+    decode_control_plane_response(url, response).await
 }
 
 async fn post_control_plane<TReq, TResp>(

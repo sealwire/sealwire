@@ -194,6 +194,8 @@ export function connectionTarget() {
       kind: "pairing",
       pairingAttemptId: state.pairingAttemptId,
       pairingId: state.pairingTicket.pairing_id,
+      relayPeerId: state.pairingTicket.relay_peer_id,
+      relayVerifyKey: state.pairingTicket.relay_verify_key || null,
       brokerUrl: state.pairingTicket.broker_url,
       brokerChannelId: state.pairingTicket.broker_channel_id,
       joinTicket: state.pairingTicket.pairing_join_ticket,
@@ -204,6 +206,8 @@ export function connectionTarget() {
     return {
       kind: "device",
       relayId: state.remoteAuth.relayId,
+      relayPeerId: state.remoteAuth.relayPeerId,
+      relayVerifyKey: state.remoteAuth.relayVerifyKey || null,
       brokerUrl: state.remoteAuth.brokerUrl,
       brokerChannelId: state.remoteAuth.brokerChannelId,
       joinTicket: state.remoteAuth.deviceJoinTicket,
@@ -252,6 +256,9 @@ export function clearSessionClaim() {
   const patch = createRemoteProfileUpdatePatch(state, state.remoteAuth.relayId, {
     sessionClaim: null,
     sessionClaimExpiresAt: null,
+    sessionClaimBoot: null,
+    sessionClaimRelayMs: null,
+    sessionClaimReceivedAt: null,
   });
   if (!patch) {
     return;
@@ -272,7 +279,9 @@ export function setRecoveredSocketPeerId(value) {
   });
 }
 
-export function setSessionClaim(claim, expiresAt) {
+/// `relayMs` (relay clock at issue) and `receivedAt` (`performance.now()` on arrival) let
+/// requests be timed in the relay's clock without trusting this device's wall clock.
+export function setSessionClaim(claim, expiresAt, { boot = null, relayMs = null, receivedAt = null } = {}) {
   if (!state.remoteAuth) {
     return;
   }
@@ -280,6 +289,9 @@ export function setSessionClaim(claim, expiresAt) {
   const patch = createRemoteProfileUpdatePatch(state, state.remoteAuth.relayId, {
     sessionClaim: claim,
     sessionClaimExpiresAt: expiresAt || null,
+    sessionClaimBoot: boot,
+    sessionClaimRelayMs: relayMs,
+    sessionClaimReceivedAt: receivedAt,
   });
   if (!patch) {
     return;
@@ -302,7 +314,8 @@ export function clearSocketPeerId() {
 
 export function hasUsableSessionClaim(skewMs = 0) {
   const claim = state.remoteAuth?.sessionClaim;
-  if (!claim) {
+  // A claim without its boot and clock cannot sign a request.
+  if (!claim || !state.remoteAuth.sessionClaimBoot || state.remoteAuth.sessionClaimRelayMs == null) {
     return false;
   }
 
@@ -708,6 +721,7 @@ function normalizeRemoteProfile(profile, options = {}) {
     brokerUrl: profile.brokerUrl,
     brokerChannelId: profile.brokerChannelId,
     relayPeerId: profile.relayPeerId || null,
+    relayVerifyKey: profile.relayVerifyKey || null,
     securityMode: profile.securityMode || "private",
     deviceId: profile.deviceId,
     deviceLabel: profile.deviceLabel || defaultDeviceLabel(),
@@ -721,6 +735,9 @@ function normalizeRemoteProfile(profile, options = {}) {
       fromStorage && usesBrokerCookieRefresh ? null : profile.deviceJoinTicketExpiresAt ?? null,
     sessionClaim: fromStorage ? null : profile.sessionClaim ?? null,
     sessionClaimExpiresAt: fromStorage ? null : profile.sessionClaimExpiresAt ?? null,
+    sessionClaimBoot: fromStorage ? null : profile.sessionClaimBoot ?? null,
+    sessionClaimRelayMs: fromStorage ? null : profile.sessionClaimRelayMs ?? null,
+    sessionClaimReceivedAt: fromStorage ? null : profile.sessionClaimReceivedAt ?? null,
     // Set when a cookie-mode ws-token refresh 401s (device session cookie gone /
     // invalid, no token fallback). Gates canRefreshDeviceJoinTicket() so the app
     // surfaces a re-pair prompt instead of looping. Cleared on a successful
@@ -763,6 +780,7 @@ function persistRemoteStore() {
           brokerUrl: profile.brokerUrl,
           brokerChannelId: profile.brokerChannelId,
           relayPeerId: profile.relayPeerId || null,
+          relayVerifyKey: profile.relayVerifyKey || null,
           securityMode: profile.securityMode || "private",
           deviceId: profile.deviceId,
           deviceLabel: profile.deviceLabel || null,

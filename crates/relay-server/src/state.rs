@@ -23,6 +23,9 @@ pub(crate) use self::app::ThreadWorkspaceError;
 pub(crate) use self::app::TranscriptReadError;
 pub(crate) use self::app::REVIEW_LOCKED_THREAD_MSG;
 pub use self::app::{AppState, ApprovalError, AskUserAnswerError};
+#[cfg(test)]
+pub(crate) use self::relay::relay_boot_id;
+pub(crate) use self::relay::relay_clock_ms;
 pub(crate) use self::relay::IdSpace;
 #[cfg(test)]
 use self::relay::TranscriptRecord;
@@ -33,12 +36,12 @@ pub(crate) use self::relay::{
 pub(crate) use self::relay::{
     load_or_generate_vapid, next_relay_ingress, parse_ask_user_questions, thread_status_is_working,
     vapid_key_path, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge,
-    CompletedRemoteClaim, DeviceRecord, IssuedClaimChallenge, PairedDevice, PendingApproval,
-    PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta, ProviderEventSession,
-    PushDispatcher, PushSubscription, PushSubscriptionInput, RelayState,
-    RemoteActionReplayDecision, RemoteActionWait, ReviewerThread, SessionBinding,
-    ThreadSessionSettings, TranscriptDeltaKind, TurnFailureKind, TurnOutcome,
-    MAX_REVIEWERS_PER_PARENT,
+    DeviceRecord, IssuedClaimChallenge, PairedDevice, PendingApproval, PendingAskUserQuestion,
+    PendingPairingResult, PendingTranscriptDelta, ProviderEventSession, PushDispatcher,
+    PushSubscription, PushSubscriptionInput, RelayState, RemoteActionReplayDecision,
+    RemoteActionWait, RemoteActionWaitSource, RequestAdmission, RequestClass, RequestSessionGrant,
+    ReservationToken, ReviewerThread, SessionBinding, SignedRequestFacts, ThreadSessionSettings,
+    TranscriptDeltaKind, TurnFailureKind, TurnOutcome, WaitOutcome, MAX_REVIEWERS_PER_PARENT,
 };
 // `PushKind` is referenced only by cross-module tests (codex/claude handler tests
 // assert an Error push); gate the re-export so non-test builds don't warn.

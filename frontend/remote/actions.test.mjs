@@ -1,4 +1,4 @@
-import { decodeActionFrame, deliverEncryptedTestPayload } from "./test-support/encrypted-transport.mjs";
+import { decodeActionFrame, deliverEncryptedTestPayload, signedActionIsValid } from "./test-support/encrypted-transport.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
@@ -8,6 +8,28 @@ import {
 } from "./test-support/state-fixtures.mjs";
 
 const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
+
+async function answerClaimAction(frame, handlePayload) {
+  const action = frame.payload.request.type;
+  if (action !== "claim_challenge" && action !== "claim_device") return false;
+  await deliverEncryptedTestPayload(handlePayload, {
+    kind: "remote_action_result",
+    action_id: frame.payload.action_id,
+    action,
+    ok: true,
+    ...(action === "claim_challenge" ? {
+      claim_challenge_id: "challenge-1",
+      claim_challenge: "server-challenge",
+      claim_challenge_expires_at: Math.floor(Date.now() / 1000) + 60,
+    } : {
+      session_claim: "session-claim-1",
+      session_claim_expires_at: Math.floor(Date.now() / 1000) + 300,
+      session_claim_boot: "boot-1",
+      session_claim_relay_ms: 2_000_000_000,
+    }),
+  });
+  return true;
+}
 
 function createElementStub() {
   return {
@@ -233,6 +255,7 @@ test("a fire-and-forget action cannot migrate to a replacement socket", async ()
     socketPeerId: "surface-peer-1",
   });
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       oldSocketFrames.push(frameText);
@@ -241,6 +264,7 @@ test("a fire-and-forget action cannot migrate to a replacement socket", async ()
 
   const pending = dispatchRemoteActionWithoutReply("heartbeat", { input: {} });
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       replacementSocketFrames.push(frameText);
@@ -283,6 +307,7 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
   state.pendingActions.clear();
   state.claimPromise = null;
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -328,6 +353,7 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
   assert.equal(sentPayloads.length, 2);
   const { decryptJson } = await import("./crypto.js");
   for (const payload of sentPayloads) {
+    assert.equal(payload.target_peer_id, "relay-1");
     const plaintext = await decryptJson("payload-secret-1", payload.envelope);
     assert.equal(plaintext.action_id, payload.action_id);
     assert.deepEqual(plaintext.request, payload.request);
@@ -338,6 +364,7 @@ test("ensureRemoteClaim performs challenge-response without rotating payload sec
   assert.ok(sentPayloads[0].request.proof.length > 20);
   assert.equal(sentPayloads[1].request.type, "claim_device");
   assert.equal(sentPayloads[1].request.challenge_id, "challenge-1");
+  assert.equal(sentPayloads[1].request.challenge, "server-challenge");
   assert.ok(typeof sentPayloads[1].request.proof === "string");
   assert.ok(sentPayloads[1].request.proof.length > 20);
   assert.equal(sentPayloads[1].device_id, "device-1");
@@ -372,7 +399,7 @@ test("encrypted remote action results decrypt with the persisted payload secret"
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -429,7 +456,7 @@ test("encrypted remote action result chunks reassemble before resolving", async 
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -439,6 +466,7 @@ test("encrypted remote action result chunks reassemble before resolving", async 
   state.pendingActions.clear();
   state.pendingActionChunks.clear();
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -511,7 +539,7 @@ test("encrypted remote action result chunks reassemble before resolving", async 
   assert.equal(state.pendingActionChunks.size, 0);
 });
 
-test("list_threads uses device access without pre-claiming control", async () => {
+test("list_threads authenticates the device before requesting data", async () => {
   installBrowserStubs();
   const sentPayloads = [];
 
@@ -539,11 +567,13 @@ test("list_threads uses device access without pre-claiming control", async () =>
     socketPeerId: "surface-peer-1",
   });
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
+        if (await answerClaimAction(frame, handleRemoteBrokerPayload)) return;
         await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
           kind: "remote_action_result",
           action_id: frame.payload.action_id,
@@ -580,7 +610,12 @@ test("list_threads uses device access without pre-claiming control", async () =>
     (payload) => payload.request?.type === "list_threads"
   );
   assert.ok(listThreadsPayload);
+  assert.deepEqual(sentPayloads.map((payload) => payload.request.type), [
+    "claim_challenge", "claim_device", "list_threads",
+  ]);
+  assert.equal(listThreadsPayload.request_sid, "session-claim-1");
   assert.equal(listThreadsPayload.session_claim, undefined);
+  assert.ok(listThreadsPayload.request_signature);
   assert.equal(listThreadsPayload.device_id, "device-1");
 });
 
@@ -603,7 +638,7 @@ test("remote actions time out when the relay never replies", async () => {
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -612,6 +647,7 @@ test("remote actions time out when the relay never replies", async () => {
   });
   state.pendingActions.clear();
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {},
   };
@@ -622,6 +658,7 @@ test("remote actions time out when the relay never replies", async () => {
     },
   });
 
+  await nextTick();
   browser.runTimers();
 
   await assert.rejects(
@@ -631,13 +668,14 @@ test("remote actions time out when the relay never replies", async () => {
   assert.equal(state.pendingActions.size, 0);
 });
 
-test("recoverRemoteSession only auto-claims when this device still controls the thread", async () => {
+test("recoverRemoteSession authenticates before syncing without taking session control", async () => {
   installBrowserStubs();
 
   const { state, saveRemoteAuth } = await import("./state.js");
   const {
     configureRemoteActions,
     recoverRemoteSession,
+    handleRemoteBrokerPayload,
   } = await import("./actions.js");
 
   seedRemoteAuth(state, saveRemoteAuth, {
@@ -664,10 +702,21 @@ test("recoverRemoteSession only auto-claims when this device still controls the 
     active_thread_id: "thread-1",
     active_controller_device_id: "device-2",
   };
+  const sentActions = [];
+  state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
+    readyState: 1,
+    send(text) {
+      const frame = decodeActionFrame(text);
+      sentActions.push(frame.payload.request.type);
+      setImmediate(() => answerClaimAction(frame, handleRemoteBrokerPayload));
+    },
+  };
 
   let syncReason = null;
   configureRemoteActions({
     onSyncRemoteSnapshot: async (reason) => {
+      assert.equal(state.remoteAuth.sessionClaim, "session-claim-1");
       syncReason = reason;
       state.session = {
         active_thread_id: "thread-1",
@@ -679,7 +728,9 @@ test("recoverRemoteSession only auto-claims when this device still controls the 
   await recoverRemoteSession("unit test");
 
   assert.equal(syncReason, "recovery sync (unit test)");
-  assert.equal(state.remoteAuth.sessionClaim, null);
+  assert.deepEqual(sentActions, ["claim_challenge", "claim_device"]);
+  assert.equal(state.remoteAuth.sessionClaim, "session-claim-1");
+  assert.equal(state.session.active_controller_device_id, "device-2");
   assert.equal(state.recoverPromise, null);
 });
 
@@ -775,7 +826,7 @@ test("a refused action rejects with the relay's error code", async () => {
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketPeerId: "surface-mine" });
@@ -824,7 +875,7 @@ test("handleRemoteBrokerPayload decrypts encrypted typed transcript events", asy
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -873,7 +924,7 @@ test("handleRemoteBrokerPayload decrypts encrypted transcript deltas with delta_
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -994,15 +1045,6 @@ test("handleRemoteBrokerPayload does not apply snapshot for claim_challenge acti
   assert.equal(snapshotApplied, false);
 });
 
-// A surface receives every other surface's frames: the broker broadcasts remote
-// action results and filters nothing, by design (`must_not_be_broadcast` in
-// crates/relay-broker/src/state.rs lists only `encrypted_pairing_result`). That is
-// fine as long as discarding one is FREE. It was not: the discard path logged, and
-// `renderLog` is a `patchRemoteState`, which notifies the store that drives
-// `useSyncExternalStore` — i.e. a full re-render of RemoteApp per frame thrown away.
-//
-// A real boot trace showed 21 such frames arriving before the first frame addressed
-// to this surface, each one a chunk of another surface's `fetch_workspace_diff`.
 test("a frame addressed to another surface does not notify the remote store", async () => {
   installBrowserStubs();
 
@@ -1022,7 +1064,7 @@ test("a frame addressed to another surface does not notify the remote store", as
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketPeerId: "surface-mine" });
@@ -1089,7 +1131,7 @@ test("verbose broker logging restores the discarded-frame trace", async () => {
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketPeerId: "surface-mine" });
@@ -1149,7 +1191,7 @@ test("each chunk of a reply extends the action deadline", async () => {
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketPeerId: "surface-mine" });
@@ -1217,7 +1259,7 @@ test("this surface's own chunks do not each re-render the app", async () => {
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketPeerId: "surface-mine" });
@@ -1290,7 +1332,7 @@ test("a repeated chunk does not renew the action deadline", async () => {
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketPeerId: "surface-mine" });
@@ -1358,7 +1400,7 @@ test("this surface's own snapshots do not re-render the app just to be traced", 
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketPeerId: "surface-mine" });
@@ -1419,7 +1461,7 @@ test("resending an unanswered action reuses its original action id", async () =>
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -1428,6 +1470,7 @@ test("resending an unanswered action reuses its original action id", async () =>
 
   const sentActionIds = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -1438,11 +1481,11 @@ test("resending an unanswered action reuses its original action id", async () =>
 
   // Not awaited: the point is that it never settles.
   const pending = dispatchOrRecover("fetch_workspace_diff", {}).catch(() => {});
-  await nextTick();
+  // Signing a request takes a few ticks; wait for the frame rather than for one tick.
+  await waitFor(() => sentActionIds.length >= 1).catch(() => {});
   assert.equal(sentActionIds.length, 1, "the action should have been sent once");
 
   await resendPendingActions();
-  await nextTick();
 
   assert.equal(sentActionIds.length, 2, "an unanswered action should be resent");
   assert.equal(
@@ -1529,7 +1572,7 @@ test("a push registration stays pending until the relay answers it", async () =>
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-push" });
@@ -1537,6 +1580,7 @@ test("a push registration stays pending until the relay answers it", async () =>
 
   const sent = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     // Never answers: this models a relay that was not in the room to hear it.
     send(frameText) {
@@ -1561,8 +1605,10 @@ test("a push registration stays pending until the relay answers it", async () =>
     vapidPublicKey: "BMgLU4l-tVY26rhHP0AG0HsQBpTrGrhL-eryvizKLryWHlRJJk1Z4rZS0Mjkm9DOLuZ9CUMC1dvxQ8llGGQ_Q9I",
     registration,
   }).catch(() => {});
-  await nextTick();
-  await nextTick();
+  // Signing a request takes a few ticks; wait for the frame rather than for two ticks.
+  await waitFor(
+    () => sent.some((frame) => frame.payload?.request?.type === "register_push_subscription")
+  ).catch(() => {});
 
   assert.equal(
     sent.filter((frame) => frame.payload?.request?.type === "register_push_subscription").length,
@@ -1609,7 +1655,7 @@ test("a push unregistration stays pending until the relay answers it", async () 
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-push-off" });
@@ -1617,6 +1663,7 @@ test("a push unregistration stays pending until the relay answers it", async () 
 
   const sent = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       sent.push(decodeActionFrame(frameText));
@@ -1636,8 +1683,10 @@ test("a push unregistration stays pending until the relay answers it", async () 
   };
 
   const pending = disablePushSubscription({ registration }).catch(() => {});
-  await nextTick();
-  await nextTick();
+  // Signing a request takes a few ticks; wait for the frame rather than for two ticks.
+  await waitFor(
+    () => sent.some((frame) => frame.payload?.request?.type === "unregister_push_subscription")
+  ).catch(() => {});
 
   assert.equal(
     sent.filter((frame) => frame.payload?.request?.type === "unregister_push_subscription").length,
@@ -1678,7 +1727,7 @@ test("a relay saying it is still working restarts the phone's deadline", async (
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-waiting" });
@@ -1739,6 +1788,7 @@ test("a relay coming back does not leave recovery waiting on a dead claim", asyn
 
   const { state, saveRemoteAuth } = await import("./state.js");
   const { handleRelayPresence } = await import("./remote-runtime.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
 
   seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-dead-claim",
@@ -1753,7 +1803,7 @@ test("a relay coming back does not leave recovery waiting on a dead claim", asyn
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-claim" });
@@ -1770,7 +1820,13 @@ test("a relay coming back does not leave recovery waiting on a dead claim", asyn
     resolve: () => {},
   });
   state.claimPromise = new Promise(() => {});
-  state.socket = { readyState: 1, send() {} };
+  state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
+    readyState: 1,
+    send(text) {
+      setImmediate(() => answerClaimAction(decodeActionFrame(text), handleRemoteBrokerPayload));
+    },
+  };
 
   handleRelayPresence("joined", { role: "relay", peer_id: "relay-1" });
   await new Promise((resolve) => setImmediate(resolve));
@@ -1781,7 +1837,8 @@ test("a relay coming back does not leave recovery waiting on a dead claim", asyn
     "the claim nobody will answer has to be settled, or every later recovery waits on it"
   );
   assert.ok(rejected, "and settled as a failure, so its caller can start a fresh one");
-  assert.equal(state.claimPromise, null, "with the lifecycle cleared for a new attempt");
+  await waitFor(() => state.claimPromise === null);
+  assert.equal(state.remoteAuth.sessionClaim, "session-claim-1");
 
   state.pendingActions.clear();
   state.socket = null;
@@ -1795,7 +1852,7 @@ test("remote transport ignores plaintext content and encrypts actions despite a 
   seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1", brokerUrl: "wss://broker.example.test", brokerChannelId: "room-a",
     relayPeerId: "relay-1", deviceId: "device-1", payloadSecret: "payload-secret-1",
-    securityMode: "managed", sessionClaim: null,
+    securityMode: "managed", sessionClaim: "session-claim-1",
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
   state.pendingActions.clear();
@@ -1830,7 +1887,7 @@ test("remote transport ignores plaintext content and encrypts actions despite a 
   assert.equal(settled, true);
 
   const sent = [];
-  state.socket = { readyState: 1, send: (text) => sent.push(JSON.parse(text)) };
+  state.socket = { relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId, readyState: 1, send: (text) => sent.push(JSON.parse(text)) };
   await dispatchRemoteActionWithoutReply("heartbeat", { input: {} });
   assert.equal(sent.length, 1);
   assert.equal(sent[0].payload.kind, "encrypted_remote_action");
@@ -1838,5 +1895,292 @@ test("remote transport ignores plaintext content and encrypts actions despite a 
   const plaintext = await decryptJson("payload-secret-1", sent[0].payload.envelope);
   assert.equal(plaintext.action_id, sent[0].payload.action_id);
   assert.equal(plaintext.request.type, "heartbeat");
+  state.socket = null;
+});
+
+const SIGNING_RELAY_KEY = Buffer.from(new Uint8Array(32).fill(9)).toString("base64");
+
+async function seedSignedPhone({ sessionClaim = "sid-1", boot = "boot-1", relayMs = 2_000_000_000 } = {}) {
+  const { state, saveRemoteAuth, setSessionClaim } = await import("./state.js");
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    relayVerifyKey: SIGNING_RELAY_KEY,
+    securityMode: "private",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: null,
+    sessionClaimExpiresAt: null,
+  });
+  setSessionClaim(sessionClaim, Math.floor(Date.now() / 1000) + 300, {
+    boot,
+    relayMs,
+    receivedAt: performance.now(),
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+  return state;
+}
+
+async function deviceVerifyKey() {
+  const { ensureDeviceIdentity } = await import("./state.js");
+  return (await ensureDeviceIdentity()).verifyKey;
+}
+
+function signingBinding(verifyKey, peerId = "surface-peer-1") {
+  return {
+    verifyKey,
+    relayVerifyKey: SIGNING_RELAY_KEY,
+    brokerRoomId: "room-a",
+    relayPeerId: "relay-1",
+    peerId,
+  };
+}
+
+test("an ordinary action is signed by the device for this relay, session and connection", async () => {
+  installBrowserStubs();
+  const state = await seedSignedPhone();
+  const { dispatchOrRecover, handleRemoteBrokerPayload } = await import("./actions.js");
+  const sent = [];
+  state.socket = {
+    relayPeerId: "relay-1",
+    readyState: 1,
+    send(text) {
+      const frame = decodeActionFrame(text);
+      sent.push(frame.payload);
+      setImmediate(() => deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
+        kind: "remote_action_result",
+        action_id: frame.payload.action_id,
+        action: "send_message",
+        ok: true,
+      }));
+    },
+  };
+  await dispatchOrRecover("send_message", { input: { text: "hi", thread_id: "t1" } });
+  assert.equal(sent.length, 1);
+  const [payload] = sent;
+  assert.equal(payload.action, "send_message");
+  assert.equal(payload.request_sid, "sid-1");
+  assert.equal(payload.request_boot, "boot-1");
+  assert.equal(payload.op_boot, "boot-1");
+  assert.ok(payload.request_seq >= 1);
+  assert.ok(payload.request_time >= 2_000_000_000);
+  assert.equal(payload.op_t0, payload.request_time);
+  assert.equal(payload.session_claim, undefined, "the bearer claim no longer travels");
+  const verifyKey = await deviceVerifyKey();
+  assert.ok(signedActionIsValid(payload, signingBinding(verifyKey)));
+  assert.ok(!signedActionIsValid({ ...payload, request_seq: payload.request_seq + 1 }, signingBinding(verifyKey)));
+  assert.ok(!signedActionIsValid(payload, signingBinding(verifyKey, "surface-peer-2")));
+  state.socket = null;
+});
+
+test("a resend keeps the action id and operation but signs a new attempt", async () => {
+  installBrowserStubs();
+  const state = await seedSignedPhone();
+  const { dispatchOrRecover, handleRemoteBrokerPayload, resendPendingActions } =
+    await import("./actions.js");
+  const { setSessionClaim } = await import("./state.js");
+  const sent = [];
+  let answer = false;
+  state.socket = {
+    relayPeerId: "relay-1",
+    readyState: 1,
+    send(text) {
+      const frame = decodeActionFrame(text);
+      sent.push(frame.payload);
+      if (answer) {
+        setImmediate(() => deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "send_message",
+          ok: true,
+        }));
+      }
+    },
+  };
+  const pending = dispatchOrRecover("send_message", { input: { text: "hi", thread_id: "t1" } });
+  await waitFor(() => sent.length === 1);
+  setSessionClaim("sid-2", Math.floor(Date.now() / 1000) + 300, {
+    boot: "boot-1",
+    relayMs: 2_000_000_000,
+    receivedAt: performance.now(),
+  });
+  answer = true;
+  await resendPendingActions();
+  await pending;
+  assert.equal(sent.length, 2);
+  const [first, second] = sent;
+  assert.equal(second.action_id, first.action_id);
+  assert.equal(second.op_boot, first.op_boot);
+  assert.equal(second.op_t0, first.op_t0);
+  assert.equal(second.request_sid, "sid-2");
+  assert.notEqual(second.request_signature, first.request_signature);
+  assert.notEqual(second.envelope.nonce, first.envelope.nonce);
+  assert.deepEqual(second.request, first.request);
+  assert.ok(signedActionIsValid(second, signingBinding(await deviceVerifyKey())));
+  state.socket = null;
+});
+
+test("a re-authorization notice re-claims and resends the same operation", async () => {
+  installBrowserStubs();
+  const state = await seedSignedPhone();
+  const { dispatchOrRecover, handleRemoteBrokerPayload } = await import("./actions.js");
+  const sent = [];
+  state.socket = {
+    relayPeerId: "relay-1",
+    readyState: 1,
+    send(text) {
+      const frame = decodeActionFrame(text);
+      sent.push(frame.payload);
+      setImmediate(async () => {
+        if (await answerClaimAction(frame, handleRemoteBrokerPayload)) return;
+        const attempts = sent.filter((payload) => payload.action_id === frame.payload.action_id);
+        if (attempts.length === 1) {
+          await handleRemoteBrokerPayload({
+            kind: "remote_action_reauthorize",
+            action_id: frame.payload.action_id,
+            target_peer_id: "surface-peer-1",
+          });
+          return;
+        }
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: "start_session",
+          ok: true,
+        });
+      });
+    },
+  };
+  const result = await dispatchOrRecover("start_session", { input: { cwd: "/tmp/demo" } });
+  assert.equal(result.ok, true);
+  const kinds = sent.map((payload) => payload.request.type);
+  assert.deepEqual(kinds, ["start_session", "claim_challenge", "claim_device", "start_session"]);
+  const [first, , , retry] = sent;
+  assert.equal(retry.action_id, first.action_id);
+  assert.equal(retry.op_t0, first.op_t0);
+  assert.equal(retry.op_boot, first.op_boot);
+  assert.equal(retry.request_sid, "session-claim-1");
+  state.socket = null;
+});
+
+test("outcome_unknown is reported to the caller and never resent", async () => {
+  installBrowserStubs();
+  const state = await seedSignedPhone();
+  const { dispatchOrRecover, handleRemoteBrokerPayload, resendPendingActions } =
+    await import("./actions.js");
+  const sent = [];
+  state.socket = {
+    relayPeerId: "relay-1",
+    readyState: 1,
+    send(text) {
+      const frame = decodeActionFrame(text);
+      sent.push(frame.payload);
+      setImmediate(() => deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
+        kind: "remote_action_result",
+        action_id: frame.payload.action_id,
+        action: "send_message",
+        ok: false,
+        error: "The relay cannot tell whether this ran",
+        error_code: "outcome_unknown",
+      }));
+    },
+  };
+  await assert.rejects(
+    dispatchOrRecover("send_message", { input: { text: "hi", thread_id: "t1" } }),
+    (error) => error.code === "outcome_unknown"
+  );
+  await resendPendingActions();
+  assert.equal(sent.length, 1);
+  state.socket = null;
+});
+
+test("when the relay proves itself again, pending actions are resent after the new claim", async () => {
+  installBrowserStubs();
+  const state = await seedSignedPhone();
+  const { dispatchOrRecover, handleRemoteBrokerPayload, configureRemoteActions } =
+    await import("./actions.js");
+  const { handleRelayContentReady } = await import("./remote-runtime.js");
+  configureRemoteActions({ onSyncRemoteSnapshot: async () => {} });
+  const sent = [];
+  let relayBack = false;
+  state.socket = {
+    relayPeerId: "relay-1",
+    readyState: 1,
+    send(text) {
+      const frame = decodeActionFrame(text);
+      sent.push(frame.payload);
+      if (!relayBack) return;
+      setImmediate(async () => {
+        if (await answerClaimAction(frame, handleRemoteBrokerPayload)) return;
+        await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
+          kind: "remote_action_result",
+          action_id: frame.payload.action_id,
+          action: frame.payload.request.type,
+          ok: true,
+        });
+      });
+    },
+  };
+  const pending = dispatchOrRecover("send_message", { input: { text: "hi", thread_id: "t1" } });
+  await waitFor(() => sent.length === 1);
+  relayBack = true;
+  handleRelayContentReady({ kind: "device" });
+  const result = await pending;
+  assert.equal(result.ok, true);
+  const sends = sent.filter((payload) => payload.request.type === "send_message");
+  assert.equal(sends.length, 2);
+  assert.equal(sends[1].action_id, sends[0].action_id);
+  assert.equal(sends[1].request_sid, "session-claim-1");
+  state.socket = null;
+});
+
+test("a re-authorization for an attempt under an older claim resends under the current one", async () => {
+  installBrowserStubs();
+  const state = await seedSignedPhone();
+  const { dispatchOrRecover, handleRemoteBrokerPayload } = await import("./actions.js");
+  const { setSessionClaim } = await import("./state.js");
+  const sent = [];
+  state.socket = {
+    relayPeerId: "relay-1",
+    readyState: 1,
+    send(text) {
+      const frame = decodeActionFrame(text);
+      sent.push(frame.payload);
+      if (frame.payload.request_sid !== "sid-2") return;
+      setImmediate(() => deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
+        kind: "remote_action_result",
+        action_id: frame.payload.action_id,
+        action: "send_message",
+        ok: true,
+      }));
+    },
+  };
+  const pending = dispatchOrRecover("send_message", { input: { text: "hi", thread_id: "t1" } });
+  await waitFor(() => sent.length === 1);
+  // A claim refresh landed meanwhile; the relay retired the session the attempt used.
+  setSessionClaim("sid-2", Math.floor(Date.now() / 1000) + 300, {
+    boot: "boot-1",
+    relayMs: 2_000_000_000,
+    receivedAt: performance.now(),
+  });
+  await handleRemoteBrokerPayload({
+    kind: "remote_action_reauthorize",
+    action_id: sent[0].action_id,
+    target_peer_id: "surface-peer-1",
+  });
+  const result = await pending;
+  assert.equal(result.ok, true);
+  assert.deepEqual(sent.map((payload) => payload.request.type), ["send_message", "send_message"]);
+  assert.equal(sent[1].request_sid, "sid-2");
+  assert.equal(sent[1].action_id, sent[0].action_id);
+  assert.equal(sent[1].op_t0, sent[0].op_t0);
   state.socket = null;
 });

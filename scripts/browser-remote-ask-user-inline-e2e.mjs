@@ -259,8 +259,8 @@ async function main() {
           );
         };
 
-        const BROKER_PROTOCOL_VERSION = 1;
-        const RELAY_PROTOCOL_VERSION = 3;
+        const BROKER_PROTOCOL_VERSION = 2;
+        const RELAY_PROTOCOL_VERSION = 5;
 
         class FakeWebSocket extends EventTarget {
           static OPEN = 1;

@@ -16,15 +16,16 @@ use crate::state::{
 use axum::{extract::Path, routing::post, Json, Router};
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer, SigningKey, Verifier};
-use futures_util::sink::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use rand::{rngs::StdRng, SeedableRng};
 use relay_broker::public_control::{
     ClientGrantRequest, ClientGrantResponse, DeviceGrantBulkRevokeRequest,
     DeviceGrantBulkRevokeResponse, DeviceGrantRequest, DeviceGrantResponse,
     DeviceGrantRevokeRequest, DeviceGrantRevokeResponse, PairingWsTokenRequest,
-    PairingWsTokenResponse, RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
-    RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayWsTokenRequest,
-    RelayWsTokenResponse,
+    PairingWsTokenResponse, RelayControlChallengeRequest, RelayControlChallengeResponse,
+    RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
+    RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayWsTokenChallengeRequest,
+    RelayWsTokenChallengeResponse, RelayWsTokenRequest, RelayWsTokenResponse,
 };
 use tokio::time::Instant;
 use tokio::{
@@ -32,11 +33,46 @@ use tokio::{
     sync::{watch, RwLock},
 };
 
-use super::session_claim::{decode_and_verify_session_claim, unix_now};
+use relay_broker::join_ticket::unix_now;
 
 fn cloud_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+struct EnvStringGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvStringGuard {
+    fn set(key: &'static str, value: Option<&str>) -> Self {
+        let previous = std::env::var_os(key);
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvStringGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => std::env::set_var(self.key, previous),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+async fn write_test_public_identity(path: &str, control_url: &str, seed: [u8; 32]) {
+    let parsed = crate::broker::auth::parse_control_plane_url(control_url).expect("control url");
+    let identity = PublicRelayIdentity {
+        signing_key: SigningKey::from_bytes(&seed),
+    };
+    save_public_relay_identity(std::path::Path::new(path), parsed.as_str(), &identity)
+        .await
+        .expect("identity should save");
 }
 
 fn temp_registration_path(prefix: &str) -> String {
@@ -88,6 +124,27 @@ async fn spawn_public_control_mock() -> String {
             relay_refresh_token: "relay-refresh-enrolled".to_string(),
             created_at: unix_now(),
             relay_label: request.relay_label,
+        })
+    }
+
+    async fn relay_ws_challenge(
+        headers: axum::http::HeaderMap,
+        Json(request): Json<RelayWsTokenChallengeRequest>,
+    ) -> Json<RelayWsTokenChallengeResponse> {
+        let bearer = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .unwrap_or("");
+        Json(RelayWsTokenChallengeResponse {
+            challenge_id: "wch-test".to_string(),
+            challenge: "wc-test".to_string(),
+            relay_id: request.relay_id,
+            broker_room_id: request.broker_room_id,
+            relay_peer_id: request.relay_peer_id,
+            broker_origin: "sealwire-broker".to_string(),
+            refresh_token_hash: relay_util::sha256_hex(bearer),
+            expires_at: unix_now() + 60,
         })
     }
 
@@ -161,14 +218,44 @@ async fn spawn_public_control_mock() -> String {
         })
     }
 
+    async fn relay_control_challenge(
+        headers: axum::http::HeaderMap,
+        Json(request): Json<RelayControlChallengeRequest>,
+    ) -> Json<RelayControlChallengeResponse> {
+        let header = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        let token = header.strip_prefix("Bearer ").unwrap_or(header).trim();
+        Json(RelayControlChallengeResponse {
+            challenge_id: "cch-test".to_string(),
+            challenge: "ct-test".to_string(),
+            operation: request.operation,
+            relay_id: request.relay_id,
+            broker_room_id: request.broker_room_id,
+            broker_origin: "sealwire-broker".to_string(),
+            refresh_token_hash: relay_util::sha256_hex(token),
+            request_sha256: request.request_sha256,
+            expires_at: unix_now() + 60,
+        })
+    }
+
     let app = Router::new()
         .route(
             "/api/public/relay-enrollment/challenge",
             post(relay_enrollment_challenge),
         )
         .route(
+            "/api/public/relay/control/challenge",
+            post(relay_control_challenge),
+        )
+        .route(
             "/api/public/relay-enrollment/complete",
             post(relay_enrollment_complete),
+        )
+        .route(
+            "/api/public/relay/ws-token/challenge",
+            post(relay_ws_challenge),
         )
         .route("/api/public/relay/ws-token", post(relay_ws_token))
         .route("/api/public/pairing/ws-token", post(pairing_ws_token))
@@ -244,6 +331,96 @@ async fn spawn_heartbeat_test_broker(respond_to_ping: bool) -> String {
     format!("ws://{address}")
 }
 
+const TEST_PHONE_SEED: [u8; 32] = [31; 32];
+
+fn test_phone_verify_key() -> String {
+    STANDARD.encode(
+        SigningKey::from_bytes(&TEST_PHONE_SEED)
+            .verifying_key()
+            .to_bytes(),
+    )
+}
+
+/// What a claim would have opened for each connection these scripts speak for.
+fn seed_test_request_sessions(relay: &mut RelayState) {
+    for peer in ["surface-a", "surface-b", "surface-new", "surface-old"] {
+        relay.insert_request_session_for_test(&test_sid(peer), "phone-1", peer);
+    }
+}
+
+fn test_sid(peer: &str) -> String {
+    format!("sid-{peer}")
+}
+
+/// The scripted phone's new connection completed a claim: the session it would get.
+async fn authorize_joined(relay: &Arc<RwLock<RelayState>>, peer: &str) {
+    for _ in 0..60 {
+        if relay.read().await.surface_peer_is_online(peer) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    relay
+        .write()
+        .await
+        .insert_request_session_for_test(&test_sid(peer), "phone-1", peer);
+}
+
+/// A surface's frames queued behind `action_id` have been handled once it finished: they
+/// were admitted or refused in microseconds after it. Refusals to a departed surface
+/// produce no frame, so the scripts read the relay's own record instead.
+async fn wait_for_queue_behind(relay: &Arc<RwLock<RelayState>>, action_id: &str) -> bool {
+    for _ in 0..60 {
+        if relay
+            .read()
+            .await
+            .completed_remote_action("phone-1", action_id)
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+static TEST_FRAME_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A relay hello for every surface in a scripted welcome: replies are signed for a
+/// content session, and only a hello opens one.
+async fn send_test_hellos(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    welcome: &ServerMessage,
+) {
+    let ServerMessage::Welcome {
+        channel_id, peers, ..
+    } = welcome
+    else {
+        return;
+    };
+    for peer in peers.iter().filter(|peer| peer.role == PeerRole::Surface) {
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "message",
+                    "channel_id": channel_id,
+                    "from_peer_id": peer.peer_id,
+                    "from_role": "surface",
+                    "payload": {
+                        "kind": "relay_hello",
+                        "protocol_version": RELAY_PROTOCOL_VERSION,
+                        "device_id": "phone-1",
+                        "hello_nonce": "cd".repeat(18),
+                    }
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("hello sends");
+    }
+}
+
 async fn heartbeat_test_config(broker_url: String) -> BrokerConfig {
     BrokerConfig::from_parts(
         Some(broker_url),
@@ -261,6 +438,12 @@ async fn heartbeat_test_config(broker_url: String) -> BrokerConfig {
     )
     .await
     .expect("config should parse")
+    .map(|mut config| {
+        // Fixed so a scripted phone can sign requests before the session starts.
+        config.content_signing_key =
+            SigningKey::from_bytes(&super::writer::TEST_RELAY_CONTENT_SEED);
+        config
+    })
     .expect("config should be enabled")
 }
 
@@ -510,6 +693,8 @@ async fn broker_config_requires_join_ticket_secret_in_self_hosted_mode() {
 #[tokio::test]
 async fn broker_config_public_mode_uses_control_plane_tokens() {
     let control_url = spawn_public_control_mock().await;
+    let identity_path = temp_registration_path("agent-relay-public-connect-identity");
+    write_test_public_identity(&identity_path, &control_url, [4_u8; 32]).await;
     let config = BrokerConfig::from_parts(
         Some("wss://broker.example.com".to_string()),
         Some("wss://public-broker.example.com".to_string()),
@@ -520,7 +705,7 @@ async fn broker_config_public_mode_uses_control_plane_tokens() {
         None,
         Some("relay-owner-1".to_string()),
         Some("relay-refresh-1".to_string()),
-        None,
+        Some(identity_path),
         None,
         None,
     )
@@ -561,6 +746,1297 @@ async fn broker_config_public_mode_uses_control_plane_tokens() {
     assert_eq!(client_grant.relay_label.as_deref(), Some("Demo Relay"));
 }
 
+const REAL_BROKER_ISSUER: &str = "public-broker-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d";
+
+async fn spawn_real_public_broker(registrations_json: &str) -> std::net::SocketAddr {
+    let state_path = temp_registration_path("agent-relay-real-broker-state");
+    let plane = relay_broker::public_control::PublicControlPlane::from_parts(
+        Some(REAL_BROKER_ISSUER.to_string()),
+        Some(registrations_json.to_string()),
+        Some(state_path),
+        Some("300".to_string()),
+        Some("300".to_string()),
+    )
+    .await
+    .expect("real public control plane should configure");
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("real broker should bind");
+    let address = listener
+        .local_addr()
+        .expect("real broker should have an address");
+    let app = relay_broker::app_with_access_strategy_public_control_and_origin_guard(
+        relay_broker::BrokerState::default(),
+        relay_broker::standard_public_access_strategy(),
+        plane,
+        relay_broker::OriginGuard::from_config(None, None, false).expect("origin guard"),
+    )
+    .await;
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("real broker should serve");
+    });
+    address
+}
+
+async fn ready_public_broker_config(
+    broker_ws: &str,
+    control_url: &str,
+    identity_path: &str,
+    registration_path: &str,
+    seed: [u8; 32],
+    relay_id: &str,
+    refresh_token: &str,
+    room: &str,
+    peer: &str,
+) -> BrokerConfig {
+    write_test_public_identity(identity_path, control_url, seed).await;
+    BrokerConfig::from_parts(
+        Some(broker_ws.to_string()),
+        Some(broker_ws.to_string()),
+        Some(control_url.to_string()),
+        Some(room.to_string()),
+        Some(peer.to_string()),
+        Some("public".to_string()),
+        None,
+        Some(relay_id.to_string()),
+        Some(refresh_token.to_string()),
+        Some(identity_path.to_string()),
+        Some(registration_path.to_string()),
+        None,
+    )
+    .await
+    .expect("production config should parse")
+    .expect("production config should be enabled")
+}
+
+fn join_ticket_of(url: &url::Url) -> String {
+    url.query_pairs()
+        .find(|(key, _)| key == "join_ticket")
+        .expect("production join url should carry a ticket")
+        .1
+        .into_owned()
+}
+
+async fn assert_relay_welcome(url: &url::Url, peer_id: &str, seed: [u8; 32]) {
+    let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
+        .await
+        .expect("production ticket should open a websocket");
+    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("join challenge should arrive on the production websocket")
+        .expect("production websocket should stay open")
+        .expect("challenge frame should decode");
+    let text = frame.into_text().expect("challenge should be text");
+    let message: relay_broker::protocol::ServerMessage =
+        serde_json::from_str(&text).expect("challenge should parse");
+    let relay_broker::protocol::ServerMessage::RelayJoinChallenge {
+        challenge_id,
+        challenge,
+        broker_origin,
+        relay_id,
+        broker_room_id,
+        relay_peer_id,
+        ticket_sha256,
+        relay_verify_key,
+    } = message
+    else {
+        panic!("production relay join must challenge before welcome, got {message:?}");
+    };
+    let signing_key = SigningKey::from_bytes(&seed);
+    assert_eq!(
+        relay_verify_key,
+        STANDARD.encode(signing_key.verifying_key().to_bytes()),
+        "join challenge must name the enrolled key, not a caller-supplied one"
+    );
+    assert_eq!(relay_peer_id, peer_id);
+    let proof_message = relay_broker::public_control::relay_join_message(
+        &broker_origin,
+        &challenge_id,
+        &challenge,
+        &ticket_sha256,
+        &relay_id,
+        &broker_room_id,
+        &relay_peer_id,
+    )
+    .expect("join message should encode");
+    let signature = STANDARD.encode(signing_key.sign(&proof_message).to_bytes());
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&relay_broker::protocol::ClientMessage::RelayJoinProof {
+                challenge_id,
+                signature,
+            })
+            .expect("proof should encode"),
+        ))
+        .await
+        .expect("proof should send");
+    let welcome = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("welcome should arrive after the proof")
+        .expect("production websocket should stay open")
+        .expect("welcome frame should decode");
+    let welcome_text = welcome.into_text().expect("welcome should be text");
+    let welcomed: relay_broker::protocol::ServerMessage =
+        serde_json::from_str(&welcome_text).expect("welcome should parse");
+    match welcomed {
+        relay_broker::protocol::ServerMessage::Welcome { peer_id: got, .. } => {
+            assert_eq!(got, peer_id)
+        }
+        other => panic!("expected welcome, got {other:?}"),
+    }
+}
+
+/// Production `BrokerConfig` reads an existing identity seed and
+/// `relay_connect_url` (which calls `relay_connect_credential`) is accepted by
+/// a real public broker, including a second challenge for reconnect. A
+/// different seed already on disk cannot mint a ticket and is left in place.
+#[tokio::test]
+async fn production_relay_connect_credential_is_accepted_by_a_real_public_broker() {
+    let seed = [5_u8; 32];
+    let verify_key = STANDARD.encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+    let relay_id = "relay-prod-proof";
+    let refresh_token = "relay-refresh-prod-proof";
+    let room = "room-prod-proof";
+    let peer = "relay-peer-prod";
+    let registrations = serde_json::json!([{
+        "relay_id": relay_id,
+        "broker_room_id": room,
+        "refresh_token": refresh_token,
+        "relay_verify_key": verify_key,
+    }]);
+    let address = spawn_real_public_broker(&registrations.to_string()).await;
+    let broker_ws = format!("ws://{address}");
+    let control_url = format!("http://{address}");
+    let identity_path = temp_registration_path("agent-relay-prod-identity");
+    let registration_path = temp_registration_path("agent-relay-prod-registration");
+    let config = ready_public_broker_config(
+        &broker_ws,
+        &control_url,
+        &identity_path,
+        &registration_path,
+        seed,
+        relay_id,
+        refresh_token,
+        room,
+        peer,
+    )
+    .await;
+
+    let first = config
+        .relay_connect_url()
+        .await
+        .expect("matching identity should obtain a production join url");
+    let first_ticket = join_ticket_of(&first);
+    assert!(
+        first_ticket.starts_with("eyJ"),
+        "real broker should mint a signed join ticket"
+    );
+    assert_relay_welcome(&first, peer, seed).await;
+
+    let second = config
+        .relay_connect_url()
+        .await
+        .expect("a fresh challenge should mint a reconnect ticket");
+    let second_ticket = join_ticket_of(&second);
+    assert_ne!(first_ticket, second_ticket);
+    assert_relay_welcome(&second, peer, seed).await;
+
+    let wrong_identity = temp_registration_path("agent-relay-prod-identity-mismatch");
+    let wrong_registration = temp_registration_path("agent-relay-prod-registration-mismatch");
+    let wrong = ready_public_broker_config(
+        &broker_ws,
+        &control_url,
+        &wrong_identity,
+        &wrong_registration,
+        [9_u8; 32],
+        relay_id,
+        refresh_token,
+        room,
+        peer,
+    )
+    .await;
+    let identity_before = std::fs::read(&wrong_identity).expect("mismatch identity should exist");
+    let error = wrong
+        .auth
+        .relay_connect_credential(
+            wrong.broker_room_id(),
+            wrong.relay_peer_id(),
+            &wrong.content_verify_key(),
+        )
+        .await
+        .expect_err("mismatched identity must not obtain a ticket");
+    assert!(
+        !error.contains("refusing to generate"),
+        "mismatch must fail closed on the existing key: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&wrong_identity).expect("mismatch identity should remain"),
+        identity_before,
+        "a rejected proof must not replace the identity file"
+    );
+    assert!(
+        !std::path::Path::new(&wrong_registration).exists(),
+        "a rejected proof must not write a replacement registration"
+    );
+    let still = config
+        .relay_connect_url()
+        .await
+        .expect("original enrollment must still accept the matching identity");
+    assert_ne!(join_ticket_of(&still), second_ticket);
+    assert_relay_welcome(&still, peer, seed).await;
+}
+
+/// The production session loop, not the test helper, has to answer the join
+/// challenge. A ticket or the wrong key must not take that seat, and the
+/// seated session has to keep receiving pongs and be able to reconnect.
+#[tokio::test]
+async fn production_session_proves_possession_before_the_public_broker_seats_it() {
+    let seed = [5_u8; 32];
+    let verify_key = STANDARD.encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+    let relay_id = "relay-prod-session";
+    let refresh_token = "relay-refresh-prod-session";
+    let room = "room-prod-session";
+    let peer = "relay-peer-session";
+    let registrations = serde_json::json!([{
+        "relay_id": relay_id,
+        "broker_room_id": room,
+        "refresh_token": refresh_token,
+        "relay_verify_key": verify_key,
+    }]);
+    let address = spawn_real_public_broker(&registrations.to_string()).await;
+    let broker_ws = format!("ws://{address}");
+    let control_url = format!("http://{address}");
+    let identity_path = temp_registration_path("agent-relay-prod-session-identity");
+    let registration_path = temp_registration_path("agent-relay-prod-session-registration");
+    let config = ready_public_broker_config(
+        &broker_ws,
+        &control_url,
+        &identity_path,
+        &registration_path,
+        seed,
+        relay_id,
+        refresh_token,
+        room,
+        peer,
+    )
+    .await;
+    let state = broker_test_state();
+    {
+        let mut change_rx = state.subscribe();
+        let liveness = BrokerLivenessConfig {
+            ping_interval: Duration::from_millis(40),
+            pong_timeout: Duration::from_millis(200),
+        };
+        let mut session = std::pin::pin!(run_broker_session_with_liveness(
+            &state,
+            &mut change_rx,
+            &config,
+            liveness,
+        ));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if state.snapshot().await.broker_connected {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("production session did not finish the join proof");
+            }
+            tokio::select! {
+                result = &mut session => panic!("production session ended before it was seated: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+
+        let thief_url = {
+            let connect = config.relay_connect_url();
+            tokio::pin!(connect);
+            loop {
+                tokio::select! {
+                    result = &mut session => panic!("production session ended while minting a second ticket: {result:?}"),
+                    url = &mut connect => break url.expect("second ticket"),
+                }
+            }
+        };
+        let attack = async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(thief_url.as_str())
+                .await
+                .expect("copied ticket should open a socket");
+            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .expect("join challenge should arrive")
+                .expect("socket should stay open")
+                .expect("frame should decode");
+            let text = frame.into_text().expect("challenge should be text");
+            let message: relay_broker::protocol::ServerMessage =
+                serde_json::from_str(&text).expect("challenge should parse");
+            let relay_broker::protocol::ServerMessage::RelayJoinChallenge {
+                challenge_id,
+                challenge,
+                broker_origin,
+                relay_id,
+                broker_room_id,
+                relay_peer_id,
+                ticket_sha256,
+                relay_verify_key,
+            } = message
+            else {
+                panic!("ticket alone must not welcome the socket, got {message:?}");
+            };
+            let wrong = SigningKey::from_bytes(&[9_u8; 32]);
+            assert_ne!(
+                relay_verify_key,
+                STANDARD.encode(wrong.verifying_key().to_bytes())
+            );
+            let proof_message = relay_broker::public_control::relay_join_message(
+                &broker_origin,
+                &challenge_id,
+                &challenge,
+                &ticket_sha256,
+                &relay_id,
+                &broker_room_id,
+                &relay_peer_id,
+            )
+            .expect("join message");
+            let signature = STANDARD.encode(wrong.sign(&proof_message).to_bytes());
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::to_string(&relay_broker::protocol::ClientMessage::RelayJoinProof {
+                        challenge_id,
+                        signature,
+                    })
+                    .expect("proof"),
+                ))
+                .await
+                .expect("wrong proof should send");
+            let rejected = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .expect("wrong key should be answered")
+                .expect("wrong-key socket should produce a frame")
+                .expect("frame should decode");
+            let rejected_text = match rejected {
+                tokio_tungstenite::tungstenite::Message::Text(text) => text,
+                tokio_tungstenite::tungstenite::Message::Close(_) => String::new(),
+                other => panic!("wrong key must not be seated, got {other:?}"),
+            };
+            assert!(
+                !rejected_text.contains("\"type\":\"welcome\""),
+                "wrong key must not be welcomed: {rejected_text}"
+            );
+        };
+        tokio::select! {
+            result = &mut session => panic!("seated session ended during the stolen-ticket attempt: {result:?}"),
+            _ = attack => {}
+        }
+        let pong_deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < pong_deadline {
+            tokio::select! {
+                result = &mut session => panic!("seated session ended before a broker pong: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+        assert!(
+            state.snapshot().await.broker_connected,
+            "the seated production session must still be up after the heartbeat window"
+        );
+    }
+    state.set_broker_connection(false).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut change_rx = state.subscribe();
+    let mut reconnected = std::pin::pin!(run_broker_session_with_liveness(
+        &state,
+        &mut change_rx,
+        &config,
+        BrokerLivenessConfig {
+            ping_interval: Duration::from_millis(40),
+            pong_timeout: Duration::from_millis(200),
+        },
+    ));
+    let reconnect_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if state.snapshot().await.broker_connected {
+            break;
+        }
+        if Instant::now() > reconnect_deadline {
+            panic!("production session did not reconnect");
+        }
+        tokio::select! {
+            result = &mut reconnected => panic!("reconnect session ended early: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+    }
+}
+
+/// Grant, client grant, revoke, bulk revoke, pairing, and unbind go through
+/// the production poster against a broker that actually checks the signature.
+#[tokio::test]
+async fn production_callers_complete_privileged_control_on_a_real_broker() {
+    let seed = [5_u8; 32];
+    let verify_key = STANDARD.encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+    let client_key = STANDARD.encode(
+        SigningKey::from_bytes(&[4_u8; 32])
+            .verifying_key()
+            .to_bytes(),
+    );
+    let relay_id = "relay-prod-control";
+    let refresh_token = "relay-refresh-prod-control";
+    let room = "room-prod-control";
+    let peer = "relay-peer-control";
+    let registrations = serde_json::json!([{
+        "relay_id": relay_id,
+        "broker_room_id": room,
+        "refresh_token": refresh_token,
+        "relay_verify_key": verify_key,
+    }]);
+    let address = spawn_real_public_broker(&registrations.to_string()).await;
+    let control_url = format!("http://{address}");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registration_path = dir.path().join("public-broker-registration.json");
+    let identity_path = dir
+        .path()
+        .join(crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE);
+    let config = ready_public_broker_config(
+        &format!("ws://{address}"),
+        &control_url,
+        identity_path.to_str().expect("identity path"),
+        registration_path.to_str().expect("registration path"),
+        seed,
+        relay_id,
+        refresh_token,
+        room,
+        peer,
+    )
+    .await;
+    save_public_relay_registration(
+        &registration_path,
+        &control_url,
+        &PublicRelayRegistration {
+            relay_id: relay_id.to_string(),
+            broker_room_id: room.to_string(),
+            relay_refresh_token: refresh_token.to_string(),
+        },
+    )
+    .await
+    .expect("registration should save");
+
+    let device = config
+        .auth
+        .device_broker_credential(room, "device-a", None)
+        .await
+        .expect("production device grant");
+    assert!(!device.join_credential.token.is_empty());
+    let _other = config
+        .auth
+        .device_broker_credential(room, "device-b", None)
+        .await
+        .expect("second device grant");
+    let client = config
+        .auth
+        .client_broker_grant(room, "device-a", &client_key, Some("Phone".to_string()))
+        .await
+        .expect("production client grant")
+        .expect("public mode returns a claim");
+    assert!(!client.claim_id.is_empty());
+    let pairing = config
+        .auth
+        .pairing_join_credential(room, "pair-prod", unix_now().saturating_add(60))
+        .await
+        .expect("production pairing ticket");
+    assert!(!pairing.token.is_empty());
+    let bulk = config
+        .auth
+        .revoke_other_device_credentials(room, "device-a")
+        .await
+        .expect("production bulk revoke")
+        .expect("public mode returns a bulk revoke");
+    assert_eq!(bulk.kept_device_id, "device-a");
+    let revoked = config
+        .auth
+        .revoke_device_credential(room, "device-a")
+        .await
+        .expect("production revoke")
+        .expect("public mode returns a revoke");
+    assert!(revoked.revoked);
+    let marker = dir.path().join("pending-release.json");
+    let outcome =
+        super::access_release::release_cloud_access(&control_url, &registration_path, &marker)
+            .await;
+    assert!(
+        matches!(outcome, super::access_release::ReleaseOutcome::Released),
+        "production unbind should release access, got {outcome:?}"
+    );
+}
+
+fn claim_challenge_payload(
+    device_key: &SigningKey,
+    device_id: &str,
+    phone_peer: &str,
+    action_id: &str,
+    payload_secret: &str,
+) -> serde_json::Value {
+    let proof = STANDARD.encode(
+        device_key
+            .sign(
+                super::device_claim_init_proof_message(action_id, device_id, phone_peer).as_bytes(),
+            )
+            .to_bytes(),
+    );
+    let envelope = bound_action_envelope(
+        payload_secret,
+        action_id,
+        &serde_json::json!({ "type": "claim_challenge", "proof": proof }),
+    )
+    .expect("claim request encrypts");
+    serde_json::json!({
+        "protocol_version": RELAY_PROTOCOL_VERSION,
+        "kind": "encrypted_remote_action",
+        "action_id": action_id,
+        "device_id": device_id,
+        "envelope": envelope,
+    })
+}
+
+async fn send_phone_publish(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    relay_peer: &str,
+    mut payload: serde_json::Value,
+) {
+    if payload.get("target_peer_id").is_none() {
+        payload["target_peer_id"] = serde_json::json!(relay_peer);
+    }
+    let request = serde_json::json!({
+        "type": "publish",
+        "protocol_version": BROKER_PROTOCOL_VERSION,
+        "payload": payload,
+    });
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            request.to_string(),
+        ))
+        .await
+        .expect("phone publish should send");
+}
+
+async fn read_signed_relay_payload<F>(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    key: &SigningKey,
+    relay_peer: &str,
+    room: &str,
+    matches: F,
+) -> serde_json::Value
+where
+    F: Fn(&serde_json::Value) -> bool,
+{
+    let mut seen = Vec::new();
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = socket
+                .next()
+                .await
+                .expect("phone socket remains open")
+                .expect("phone frame");
+            let Ok(text) = frame.into_text() else {
+                seen.push("non-text".to_string());
+                continue;
+            };
+            let message: serde_json::Value = serde_json::from_str(&text).expect("phone json");
+            let payload = &message["payload"];
+            let snippet: String = text.chars().take(240).collect();
+            seen.push(format!(
+                "{}:{} action={} pairing={} target={} :: {snippet}",
+                message["type"].as_str().unwrap_or("-"),
+                payload["kind"].as_str().unwrap_or("-"),
+                payload["action_id"].as_str().unwrap_or("-"),
+                payload["pairing_id"].as_str().unwrap_or("-"),
+                payload["target_peer_id"].as_str().unwrap_or("-"),
+            ));
+            if !matches(payload) {
+                continue;
+            }
+            let session = payload["relay_content_session"]
+                .as_str()
+                .expect("signed payload has a session");
+            let nonce = payload["relay_content_nonce"]
+                .as_str()
+                .expect("signed payload has a nonce");
+            let signed = super::relay_content_message(
+                relay_peer,
+                room,
+                session,
+                nonce,
+                payload.as_object().expect("payload object"),
+            )
+            .expect("content message");
+            let signature: [u8; 64] = STANDARD
+                .decode(
+                    payload["relay_content_signature"]
+                        .as_str()
+                        .expect("signature"),
+                )
+                .expect("signature bytes")
+                .try_into()
+                .expect("signature length");
+            key.verifying_key()
+                .verify(&signed, &ed25519_dalek::Signature::from_bytes(&signature))
+                .expect("surface-worker reply must verify with the pinned identity");
+            return payload.clone();
+        }
+    })
+    .await;
+    result.unwrap_or_else(|_| {
+        panic!("the production session must sign this surface-worker reply; saw {seen:?}")
+    })
+}
+
+#[tokio::test]
+async fn production_session_answers_a_phone_hello_with_the_pinned_identity() {
+    let seed = [5_u8; 32];
+    let key = SigningKey::from_bytes(&seed);
+    let verify_key = STANDARD.encode(key.verifying_key().to_bytes());
+    let room = "room-prod-content";
+    let relay_peer = "relay-prod-content";
+    let registrations = serde_json::json!([{
+        "relay_id": "relay-content-registration",
+        "broker_room_id": room,
+        "refresh_token": "relay-content-refresh",
+        "relay_verify_key": verify_key,
+    }]);
+    let address = spawn_real_public_broker(&registrations.to_string()).await;
+    let dir = tempfile::tempdir().expect("temporary identity directory");
+    let config = ready_public_broker_config(
+        &format!("ws://{address}"),
+        &format!("http://{address}"),
+        dir.path().join("identity.json").to_str().unwrap(),
+        dir.path().join("registration.json").to_str().unwrap(),
+        seed,
+        "relay-content-registration",
+        "relay-content-refresh",
+        room,
+        relay_peer,
+    )
+    .await;
+    let ticket = config
+        .pairing_join_credential("pair-prod-content", unix_now() + 60)
+        .await
+        .expect("production pairing ticket");
+    let state = broker_test_state();
+    let mut change_rx = state.subscribe();
+    let session = run_broker_session_with_liveness(
+        &state,
+        &mut change_rx,
+        &config,
+        BrokerLivenessConfig {
+            ping_interval: Duration::from_millis(40),
+            pong_timeout: Duration::from_millis(200),
+        },
+    );
+    let phone = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !state.snapshot().await.broker_connected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("production relay should join");
+        let mut url = url::Url::parse(&format!("ws://{address}/ws/{room}")).unwrap();
+        url.query_pairs_mut()
+            .append_pair("role", "surface")
+            .append_pair("peer_id", "phone-prod-content")
+            .append_pair("client_version", product_version())
+            .append_pair("join_ticket", &ticket.token);
+        let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
+            .await
+            .expect("phone should connect");
+        let welcome = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let welcome: serde_json::Value = serde_json::from_str(&welcome).unwrap();
+        assert_eq!(welcome["type"], "welcome");
+        let phone_peer = welcome["peer_id"].as_str().unwrap().to_string();
+        let hello_nonce = "ab".repeat(18);
+        let request = serde_json::json!({
+            "type": "publish",
+            "protocol_version": BROKER_PROTOCOL_VERSION,
+            "payload": {
+                "protocol_version": RELAY_PROTOCOL_VERSION,
+                "kind": "relay_hello",
+                "target_peer_id": relay_peer,
+                "device_id": "phone-content-device",
+                "hello_nonce": hello_nonce,
+            },
+        });
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                request.to_string(),
+            ))
+            .await
+            .expect("phone hello should send");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let frame = socket
+                    .next()
+                    .await
+                    .expect("phone socket remains open")
+                    .unwrap();
+                let Ok(text) = frame.into_text() else {
+                    continue;
+                };
+                let message: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let payload = &message["payload"];
+                if payload["kind"] != "relay_hello_proof" {
+                    continue;
+                }
+                assert_eq!(payload["target_peer_id"], phone_peer);
+                assert_eq!(payload["hello_nonce"], hello_nonce);
+                assert_eq!(payload["device_id"], "phone-content-device");
+                let session = payload["relay_content_session"].as_str().unwrap();
+                assert!(!session.is_empty());
+                let nonce = payload["relay_content_nonce"].as_str().unwrap();
+                let signed = relay_content_message(
+                    relay_peer,
+                    room,
+                    session,
+                    nonce,
+                    payload.as_object().unwrap(),
+                )
+                .unwrap();
+                let signature: [u8; 64] = STANDARD
+                    .decode(payload["relay_content_signature"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+                key.verifying_key()
+                    .verify(&signed, &ed25519_dalek::Signature::from_bytes(&signature))
+                    .expect("phone proof must verify with the QR-pinned identity");
+                break;
+            }
+        })
+        .await
+        .expect("the real production session must answer the phone hello");
+
+        let device_id = "phone-content-device";
+        let payload_secret = "payload-secret-phone-content";
+        let device_seed = [9_u8; 32];
+        let device_key = SigningKey::from_bytes(&device_seed);
+        let retired = state
+            .start_pairing_with(
+                &config,
+                crate::protocol::PairingStartInput {
+                    expires_in_seconds: Some(600),
+                    path_scope: Some(Vec::new()),
+                },
+            )
+            .await
+            .expect("first QR");
+        let _current = state
+            .start_pairing_with(
+                &config,
+                crate::protocol::PairingStartInput {
+                    expires_in_seconds: Some(600),
+                    path_scope: Some(Vec::new()),
+                },
+            )
+            .await
+            .expect("replacement QR");
+        let pairing_proof = STANDARD.encode(
+            device_key
+                .sign(super::pairing_proof_message(&retired.pairing_id, Some(device_id)).as_bytes())
+                .to_bytes(),
+        );
+        let pairing_envelope = encrypt_json(
+            &retired.pairing_secret,
+            &PairingRequestPlaintext {
+                device_id: Some(device_id.to_string()),
+                device_label: Some("Content Phone".to_string()),
+                device_verify_key: STANDARD.encode(device_key.verifying_key().to_bytes()),
+                pairing_proof,
+            },
+        )
+        .expect("pairing request encrypts");
+        send_phone_publish(
+            &mut socket,
+            relay_peer,
+            serde_json::json!({
+                "protocol_version": RELAY_PROTOCOL_VERSION,
+                "kind": "pairing_request",
+                "pairing_id": retired.pairing_id,
+                "envelope": pairing_envelope,
+            }),
+        )
+        .await;
+        let pairing = read_signed_relay_payload(&mut socket, &key, relay_peer, room, |payload| {
+            payload["kind"] == "encrypted_pairing_result"
+        })
+        .await;
+        assert_eq!(pairing["target_peer_id"], phone_peer);
+        assert_eq!(pairing["pairing_id"], retired.pairing_id);
+
+        state
+            .insert_paired_device_for_test(crate::state::PairedDevice {
+                device_id: device_id.to_string(),
+                label: "Content Phone".to_string(),
+                payload_secret: payload_secret.to_string(),
+                device_verify_key: STANDARD.encode(device_key.verifying_key().to_bytes()),
+                created_at: 1,
+                last_seen_at: Some(1),
+                last_peer_id: Some(phone_peer.clone()),
+                broker_join_ticket_expires_at: None,
+                path_scope: Vec::new(),
+            })
+            .await;
+        let claim_id = "claim-live";
+        send_phone_publish(
+            &mut socket,
+            relay_peer,
+            claim_challenge_payload(
+                &device_key,
+                device_id,
+                &phone_peer,
+                claim_id,
+                payload_secret,
+            ),
+        )
+        .await;
+        let claim = read_signed_relay_payload(&mut socket, &key, relay_peer, room, |payload| {
+            payload["kind"] == "encrypted_remote_action_result" && payload["action_id"] == claim_id
+        })
+        .await;
+        let claim_body: serde_json::Value = decrypt_json(
+            payload_secret,
+            &serde_json::from_value(claim["envelope"].clone()).expect("claim envelope"),
+        )
+        .expect("claim reply decrypts");
+        assert!(
+            claim_body["claim_challenge"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "the surface worker's claim reply must be the real challenge, got {claim_body}"
+        );
+
+        let replay_id = "claim-wait";
+        // Claims are cached per connection, not by the phone's action id alone.
+        let replay_cache_id =
+            serde_json::to_string(&(phone_peer.as_str(), replay_id)).expect("claim cache key");
+        state
+            .reserve_remote_action(device_id, &replay_cache_id, "claim_challenge")
+            .await
+            .expect("pre-seed the in-flight action");
+        send_phone_publish(
+            &mut socket,
+            relay_peer,
+            claim_challenge_payload(
+                &device_key,
+                device_id,
+                &phone_peer,
+                replay_id,
+                payload_secret,
+            ),
+        )
+        .await;
+        let pending = read_signed_relay_payload(&mut socket, &key, relay_peer, room, |payload| {
+            payload["kind"] == "remote_action_pending" && payload["action_id"] == replay_id
+        })
+        .await;
+        assert_eq!(pending["target_peer_id"], phone_peer);
+        state
+            .store_remote_action_result(
+                device_id,
+                &replay_cache_id,
+                crate::state::CachedRemoteActionResult {
+                    action_kind: "claim_challenge".to_string(),
+                    ok: true,
+                    snapshot: None,
+                    receipt: None,
+                    ask_user_answer_receipt: None,
+                    providers: None,
+                    models: None,
+                    threads: None,
+                    thread_entry_detail: None,
+                    thread_transcript: None,
+                    workspace_diff: None,
+                    workspace_git_context: None,
+                    thread_workspace: None,
+                    thread_settings: None,
+                    thread_skills: None,
+                    reviews: None,
+                    workflows: None,
+                    devices: None,
+                    projects: None,
+                    ask_user_question_detail: None,
+                    ask_detail: None,
+                    session_claim: None,
+                    session_claim_expires_at: None,
+                    session_claim_boot: None,
+                    session_claim_relay_ms: None,
+                    claim_challenge_id: Some("replay-marker".to_string()),
+                    claim_challenge: Some("replay-challenge".to_string()),
+                    claim_challenge_expires_at: Some(4_000_000_000),
+                    response_secret: Some(payload_secret.to_string()),
+                    error: None,
+                    error_code: None,
+                },
+            )
+            .await;
+        let replay = read_signed_relay_payload(&mut socket, &key, relay_peer, room, |payload| {
+            payload["kind"] == "encrypted_remote_action_result" && payload["action_id"] == replay_id
+        })
+        .await;
+        let replay_body: serde_json::Value = decrypt_json(
+            payload_secret,
+            &serde_json::from_value(replay["envelope"].clone()).expect("replay envelope"),
+        )
+        .expect("replay reply decrypts");
+        assert_eq!(replay_body["claim_challenge_id"], "replay-marker");
+    };
+    tokio::select! {
+        result = session => panic!("production relay ended before answering the phone: {result:?}"),
+        _ = phone => {}
+    }
+}
+
+/// The whole chain on production code: a real public broker, the production relay
+/// session, and a phone socket that claims, signs and acts. The broker routes honestly,
+/// so a replayed frame keeps its genuine sender, and is still refused.
+#[tokio::test]
+async fn production_session_runs_a_signed_phone_action_once_through_a_real_broker() {
+    let seed = [6_u8; 32];
+    let key = SigningKey::from_bytes(&seed);
+    let verify_key = STANDARD.encode(key.verifying_key().to_bytes());
+    let room = "room-prod-request";
+    let relay_peer = "relay-prod-request";
+    let registrations = serde_json::json!([{
+        "relay_id": "relay-request-registration",
+        "broker_room_id": room,
+        "refresh_token": "relay-request-refresh",
+        "relay_verify_key": verify_key,
+    }]);
+    let address = spawn_real_public_broker(&registrations.to_string()).await;
+    let dir = tempfile::tempdir().expect("temporary identity directory");
+    let config = ready_public_broker_config(
+        &format!("ws://{address}"),
+        &format!("http://{address}"),
+        dir.path().join("identity.json").to_str().unwrap(),
+        dir.path().join("registration.json").to_str().unwrap(),
+        seed,
+        "relay-request-registration",
+        "relay-request-refresh",
+        room,
+        relay_peer,
+    )
+    .await;
+    let ticket = config
+        .pairing_join_credential("pair-prod-request", unix_now() + 60)
+        .await
+        .expect("production pairing ticket");
+    let device_id = "phone-request-device";
+    let payload_secret = "payload-secret-phone-request";
+    let device_key = SigningKey::from_bytes(&[19_u8; 32]);
+    let state = broker_test_state();
+    state
+        .insert_paired_device_for_test(crate::state::PairedDevice {
+            device_id: device_id.to_string(),
+            label: "Request Phone".to_string(),
+            payload_secret: payload_secret.to_string(),
+            device_verify_key: STANDARD.encode(device_key.verifying_key().to_bytes()),
+            created_at: 1,
+            last_seen_at: Some(1),
+            last_peer_id: None,
+            broker_join_ticket_expires_at: None,
+            path_scope: Vec::new(),
+        })
+        .await;
+    let binding = request_auth::RelayRequestBinding {
+        relay_verify_key: config.content_verify_key(),
+        broker_room_id: room.to_string(),
+        relay_peer_id: relay_peer.to_string(),
+    };
+    let mut change_rx = state.subscribe();
+    let session = run_broker_session_with_liveness(
+        &state,
+        &mut change_rx,
+        &config,
+        BrokerLivenessConfig {
+            ping_interval: Duration::from_millis(40),
+            pong_timeout: Duration::from_millis(200),
+        },
+    );
+    let phone = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !state.snapshot().await.broker_connected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("production relay should join");
+        let mut url = url::Url::parse(&format!("ws://{address}/ws/{room}")).unwrap();
+        url.query_pairs_mut()
+            .append_pair("role", "surface")
+            .append_pair("peer_id", "phone-prod-request")
+            .append_pair("client_version", product_version())
+            .append_pair("join_ticket", &ticket.token);
+        let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
+            .await
+            .expect("phone should connect");
+        let welcome = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let welcome: serde_json::Value = serde_json::from_str(&welcome).unwrap();
+        let phone_peer = welcome["peer_id"].as_str().unwrap().to_string();
+        send_phone_publish(
+            &mut socket,
+            relay_peer,
+            serde_json::json!({
+                "protocol_version": RELAY_PROTOCOL_VERSION,
+                "kind": "relay_hello",
+                "device_id": device_id,
+                "hello_nonce": "ef".repeat(18),
+            }),
+        )
+        .await;
+        read_signed_relay_payload(&mut socket, &key, relay_peer, room, |payload| {
+            payload["kind"] == "relay_hello_proof"
+        })
+        .await;
+
+        let open = |payload: &serde_json::Value| -> serde_json::Value {
+            decrypt_json(
+                payload_secret,
+                &serde_json::from_value(payload["envelope"].clone()).expect("envelope"),
+            )
+            .expect("reply decrypts")
+        };
+        send_phone_publish(
+            &mut socket,
+            relay_peer,
+            claim_challenge_payload(
+                &device_key,
+                device_id,
+                &phone_peer,
+                "claim-start",
+                payload_secret,
+            ),
+        )
+        .await;
+        let challenge = open(
+            &read_signed_relay_payload(&mut socket, &key, relay_peer, room, |payload| {
+                payload["action_id"] == "claim-start"
+            })
+            .await,
+        );
+        let challenge_id = challenge["claim_challenge_id"].as_str().unwrap();
+        let nonce = challenge["claim_challenge"].as_str().unwrap();
+        let proof = STANDARD.encode(
+            device_key
+                .sign(
+                    super::device_claim_proof_message(challenge_id, nonce, device_id, &phone_peer)
+                        .as_bytes(),
+                )
+                .to_bytes(),
+        );
+        send_phone_publish(
+            &mut socket,
+            relay_peer,
+            serde_json::json!({
+                "protocol_version": RELAY_PROTOCOL_VERSION,
+                "kind": "encrypted_remote_action",
+                "action_id": "claim-finish",
+                "device_id": device_id,
+                "envelope": bound_action_envelope(payload_secret, "claim-finish", &serde_json::json!({
+                    "type": "claim_device",
+                    "challenge_id": challenge_id,
+                    "challenge": nonce,
+                    "proof": proof,
+                })).unwrap(),
+            }),
+        )
+        .await;
+        let claimed = open(
+            &read_signed_relay_payload(&mut socket, &key, relay_peer, room, |payload| {
+                payload["action_id"] == "claim-finish"
+            })
+            .await,
+        );
+        assert_eq!(claimed["ok"], true, "{claimed}");
+        assert!(claimed["snapshot"].is_null());
+        let sid = claimed["session_claim"].as_str().unwrap().to_string();
+        assert_eq!(
+            claimed["session_claim_boot"].as_str(),
+            Some(crate::state::relay_boot_id())
+        );
+
+        let action = request_auth::test_signed_request(
+            &device_key,
+            &binding,
+            device_id,
+            &phone_peer,
+            &sid,
+            1,
+            "devices-once",
+            &serde_json::json!({"type": "fetch_devices"}),
+            payload_secret,
+        );
+        send_phone_publish(&mut socket, relay_peer, action.clone()).await;
+        let answer = open(
+            &read_signed_relay_payload(&mut socket, &key, relay_peer, room, |payload| {
+                payload["action_id"] == "devices-once"
+            })
+            .await,
+        );
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert!(answer["devices"].is_object());
+
+        // The same frame again through the same broker and socket, and a forgery.
+        send_phone_publish(&mut socket, relay_peer, action).await;
+        let forged = request_auth::test_signed_request(
+            &SigningKey::from_bytes(&[20_u8; 32]),
+            &binding,
+            device_id,
+            &phone_peer,
+            &sid,
+            2,
+            "devices-forged",
+            &serde_json::json!({"type": "fetch_devices"}),
+            payload_secret,
+        );
+        send_phone_publish(&mut socket, relay_peer, forged).await;
+        let quiet = tokio::time::timeout(Duration::from_millis(800), async {
+            loop {
+                let frame = socket.next().await.expect("socket open").expect("frame");
+                let Ok(text) = frame.into_text() else {
+                    continue;
+                };
+                let message: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let action_id = message["payload"]["action_id"].as_str().unwrap_or("");
+                if action_id == "devices-once" || action_id == "devices-forged" {
+                    return message;
+                }
+            }
+        })
+        .await;
+        if let Ok(message) = quiet {
+            panic!("a replayed or forged request was answered: {message}");
+        }
+        // The channel still works: the silence above was a refusal, not a dead socket.
+        let after = request_auth::test_signed_request(
+            &device_key,
+            &binding,
+            device_id,
+            &phone_peer,
+            &sid,
+            3,
+            "devices-after",
+            &serde_json::json!({"type": "fetch_devices"}),
+            payload_secret,
+        );
+        send_phone_publish(&mut socket, relay_peer, after).await;
+        let answer = open(
+            &read_signed_relay_payload(&mut socket, &key, relay_peer, room, |payload| {
+                payload["action_id"] == "devices-after"
+            })
+            .await,
+        );
+        assert_eq!(answer["ok"], true, "{answer}");
+    };
+    tokio::select! {
+        result = session => panic!("production relay ended before the phone finished: {result:?}"),
+        _ = phone => {}
+    }
+}
+
+#[tokio::test]
+async fn self_hosted_content_identity_survives_restart_and_refuses_a_missing_paired_key() {
+    let _cloud = cloud_env_lock().lock().expect("cloud env lock");
+    let _state = crate::state_paths::env_lock();
+    let home = tempfile::tempdir().expect("temp home");
+    let _home = crate::state_paths::EnvVarGuard::set("HOME", Some(home.path()));
+    let _url = EnvStringGuard::set("RELAY_BROKER_URL", Some("ws://127.0.0.1:9/ws"));
+    let _public = EnvStringGuard::set("RELAY_BROKER_PUBLIC_URL", None);
+    let _control = EnvStringGuard::set("RELAY_BROKER_CONTROL_URL", None);
+    let _channel = EnvStringGuard::set("RELAY_BROKER_CHANNEL_ID", Some("room-identity"));
+    let _peer = EnvStringGuard::set("RELAY_BROKER_PEER_ID", Some("relay-identity"));
+    let _mode = EnvStringGuard::set("RELAY_BROKER_AUTH_MODE", Some("self_hosted"));
+    let _secret = EnvStringGuard::set(
+        "RELAY_BROKER_TICKET_SECRET",
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d"),
+    );
+    let _relay = EnvStringGuard::set("RELAY_BROKER_RELAY_ID", None);
+    let _refresh = EnvStringGuard::set("RELAY_BROKER_RELAY_REFRESH_TOKEN", None);
+    let _identity_path = EnvStringGuard::set("RELAY_BROKER_IDENTITY_PATH", None);
+    let _registration_path = EnvStringGuard::set("RELAY_BROKER_REGISTRATION_PATH", None);
+    let _ttl = EnvStringGuard::set("RELAY_BROKER_DEVICE_JOIN_TTL_SECS", None);
+    let _content = EnvStringGuard::set("RELAY_CONTENT_IDENTITY_PATH", None);
+    let _session = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", None);
+
+    let identity = home
+        .path()
+        .join(".agent-relay")
+        .join(crate::state_paths::RELAY_CONTENT_IDENTITY_FILE);
+    let first = BrokerConfig::from_env()
+        .await
+        .expect("first start")
+        .expect("self-hosted broker should be configured");
+    let first_key = first.content_verify_key();
+    assert!(
+        identity.is_file(),
+        "the default state directory must hold the content identity"
+    );
+    let second = BrokerConfig::from_env()
+        .await
+        .expect("restart")
+        .expect("restart should stay configured");
+    assert_eq!(second.content_verify_key(), first_key);
+
+    std::fs::write(&identity, b"{").expect("corrupt identity");
+    let corrupt = BrokerConfig::from_env().await;
+    assert!(corrupt.is_err(), "a corrupt identity must not be replaced");
+    assert_eq!(
+        std::fs::read(&identity).expect("identity bytes"),
+        b"{",
+        "corrupt bytes must stay in place"
+    );
+
+    std::fs::remove_file(&identity).expect("remove identity");
+    let session = home.path().join(".agent-relay").join("session.json");
+    std::fs::write(
+        &session,
+        r#"{"paired_devices":{"phone-1":{"device_id":"phone-1"}}}"#,
+    )
+    .expect("paired session");
+    let lost = BrokerConfig::from_env().await;
+    let message = lost.expect_err("missing identity with paired devices");
+    assert!(
+        message.contains("paired devices"),
+        "identity loss must say the phones need a trusted re-pair: {message}"
+    );
+    assert!(
+        !identity.exists(),
+        "a lost identity must not be silently regenerated"
+    );
+
+    let scratch = tempfile::tempdir().expect("scratch state");
+    let session_path = scratch.path().join("session.json");
+    let _explicit = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", Some(&session_path));
+    let explicit = BrokerConfig::from_env()
+        .await
+        .expect("explicit state path")
+        .expect("explicit state path should configure");
+    let explicit_key = explicit.content_verify_key();
+    let explicit_identity = scratch
+        .path()
+        .join(crate::state_paths::RELAY_CONTENT_IDENTITY_FILE);
+    assert!(explicit_identity.is_file());
+    assert_ne!(explicit_key, first_key);
+    let explicit_again = BrokerConfig::from_env()
+        .await
+        .expect("explicit restart")
+        .expect("explicit restart should configure");
+    assert_eq!(explicit_again.content_verify_key(), explicit_key);
+}
+
 /// A broker that rejects device grants with the `device_limit_reached` 403.
 async fn spawn_device_limit_mock() -> String {
     async fn device_grant_over_limit() -> (axum::http::StatusCode, Json<serde_json::Value>) {
@@ -573,7 +2049,9 @@ async fn spawn_device_limit_mock() -> String {
             })),
         )
     }
-    let app = Router::new().route("/api/public/devices", post(device_grant_over_limit));
+    let app = super::access_release::with_test_control_challenge(
+        Router::new().route("/api/public/devices", post(device_grant_over_limit)),
+    );
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("listener should bind");
@@ -593,6 +2071,8 @@ async fn spawn_device_limit_mock() -> String {
 #[tokio::test]
 async fn device_broker_credential_surfaces_device_limit_error() {
     let control_url = spawn_device_limit_mock().await;
+    let identity_path = temp_registration_path("agent-relay-device-limit-identity");
+    write_test_public_identity(&identity_path, &control_url, [4_u8; 32]).await;
     let config = BrokerConfig::from_parts(
         Some("wss://broker.example.com".to_string()),
         Some("wss://public-broker.example.com".to_string()),
@@ -603,7 +2083,7 @@ async fn device_broker_credential_surfaces_device_limit_error() {
         None,
         Some("relay-owner-1".to_string()),
         Some("relay-refresh-1".to_string()),
-        None,
+        Some(identity_path),
         None,
         None,
     )
@@ -873,7 +2353,8 @@ fn targeted_messages_inner_payloads_include_relay_protocol_version() {
     };
 
     let frame: serde_json::Value =
-        serde_json::from_str(&frame_text_for_payload(&payload)).expect("frame should parse");
+        serde_json::from_str(&protocol::frame_text_for_payload(&payload))
+            .expect("frame should parse");
     let outer_payload = frame
         .get("payload")
         .expect("frame should contain publish payload");
@@ -1087,12 +2568,13 @@ fn parse_inbound_payload_parses_encrypted_remote_actions() {
         InboundBrokerPayload::EncryptedRemoteAction {
             action_id,
             device_id,
-            session_claim,
+            request_sid,
             envelope,
+            ..
         } => {
             assert_eq!(action_id, "act-2");
             assert_eq!(device_id.as_deref(), Some("phone-1"));
-            assert!(session_claim.is_none());
+            assert!(request_sid.is_none());
             let request: RemoteActionRequest = remote_actions::decrypt_remote_action_with_secret(
                 "device-secret",
                 &action_id,
@@ -1173,24 +2655,50 @@ fn parse_inbound_payload_ignores_non_action_payloads() {
     assert!(action.is_none());
 }
 
-#[test]
-fn session_claim_round_trips_for_same_peer() {
-    let claim = issue_session_claim("device-a", "peer-a").expect("claim should issue");
-
-    let payload =
-        decode_and_verify_session_claim(&claim.token, "peer-a").expect("claim should verify");
-
-    assert_eq!(payload.device_id, "device-a");
-    assert!(claim.expires_at > unix_now());
-}
-
-#[test]
-fn session_claim_rejects_different_peer() {
-    let claim = issue_session_claim("device-a", "peer-a").expect("claim should issue");
-    let error = decode_and_verify_session_claim(&claim.token, "peer-b")
-        .expect_err("claim should reject a different peer");
-
-    assert!(error.contains("different broker peer"));
+#[tokio::test]
+async fn targeted_publish_splits_repeated_peers_and_batch_limits_without_losing_order() {
+    let (writer, mut frames, _trains) = writer::test_writer();
+    let messages = (0..MAX_TARGETED_MESSAGES_PER_PUBLISH + 3)
+        .map(|index| {
+            let target_peer_id = if index < 2 {
+                "surface-repeat".to_string()
+            } else {
+                format!("surface-{index}")
+            };
+            TargetedBrokerMessage {
+                payload: Box::new(OutboundBrokerPayload::RemoteActionPending {
+                    action_id: index.to_string(),
+                    target_peer_id: target_peer_id.clone(),
+                }),
+                target_peer_id,
+            }
+        })
+        .collect::<Vec<_>>();
+    publish_targeted_messages(&writer, messages).await.unwrap();
+    let mut delivered = Vec::new();
+    let mut sizes = Vec::new();
+    while let Ok(Message::Text(text)) = frames.try_recv() {
+        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let batch = frame["payload"]["messages"].as_array().unwrap();
+        let mut targets = std::collections::HashSet::new();
+        assert!(batch.len() <= MAX_TARGETED_MESSAGES_PER_PUBLISH);
+        for message in batch {
+            assert!(targets.insert(message["target_peer_id"].as_str().unwrap()));
+            delivered.push(
+                message["payload"]["action_id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+            );
+        }
+        sizes.push(batch.len());
+    }
+    assert_eq!(sizes, [1, MAX_TARGETED_MESSAGES_PER_PUBLISH, 2]);
+    assert_eq!(
+        delivered,
+        (0..MAX_TARGETED_MESSAGES_PER_PUBLISH + 3).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -1749,7 +3257,7 @@ fn a_pairing_result_is_addressed_to_one_peer_and_never_broadcast() {
         "the wrapper must address the peer that completed the handshake"
     );
 
-    let frame = frame_text_for_payload(&OutboundBrokerPayload::TargetedMessages {
+    let frame = protocol::frame_text_for_payload(&OutboundBrokerPayload::TargetedMessages {
         messages: vec![message],
     });
     let parsed: serde_json::Value =
@@ -1857,7 +3365,7 @@ async fn encrypted_broker_state_parts(
             device_id: "phone-1".to_string(),
             label: "phone-1".to_string(),
             payload_secret: "secret".to_string(),
-            device_verify_key: "verify".to_string(),
+            device_verify_key: test_phone_verify_key(),
             created_at: 1,
             last_seen_at: Some(1),
             last_peer_id: None,
@@ -1865,6 +3373,7 @@ async fn encrypted_broker_state_parts(
             path_scope: Vec::new(),
         },
     );
+    seed_test_request_sessions(&mut *relay.write().await);
     (
         AppState::from_parts(Arc::clone(&relay), providers, change_tx),
         relay,
@@ -2214,24 +3723,7 @@ fn encrypted_action_frame(
     action_id: &str,
     request: serde_json::Value,
 ) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "type": "message",
-        "channel_id": "room-e2e",
-        "from_peer_id": from_peer_id,
-        "from_role": "surface",
-        "payload": {
-            "kind": "encrypted_remote_action",
-            // The constant, not a literal. A payload the relay considers the wrong version
-            // is a PARSE-level failure that kills the whole session, so a stale literal
-            // here does not fail one action — it produces a session that publishes
-            // nothing at all, which reads like a hang rather than a version mismatch.
-            "protocol_version": RELAY_PROTOCOL_VERSION,
-            "action_id": action_id,
-            "device_id": "phone-1",
-            "envelope": bound_action_envelope("secret", action_id, &request).expect("request encrypts"),
-        }
-    }))
-    .expect("action frame serializes")
+    encrypted_action_frame_versioned(from_peer_id, action_id, request, RELAY_PROTOCOL_VERSION)
 }
 
 /// One slow action must not cost every other surface — or the session itself.
@@ -2268,7 +3760,7 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
             .expect("handshake should succeed");
 
         let welcome = ServerMessage::Welcome {
-            protocol_version: 1,
+            protocol_version: BROKER_PROTOCOL_VERSION,
             channel_id: "room-e2e".to_string(),
             peer_id: "relay-e2e".to_string(),
             peers: vec![
@@ -2282,6 +3774,7 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
 
         // A asks the thing that never comes back.
         socket
@@ -2381,7 +3874,7 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
                 device_id: "phone-1".to_string(),
                 label: "phone-1".to_string(),
                 payload_secret: "secret".to_string(),
-                device_verify_key: "verify".to_string(),
+                device_verify_key: test_phone_verify_key(),
                 created_at: 1,
                 last_seen_at: Some(1),
                 last_peer_id: None,
@@ -2389,6 +3882,7 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
                 path_scope: Vec::new(),
             },
         );
+        seed_test_request_sessions(&mut *relay.write().await);
         let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> =
             HashMap::new();
         providers.insert(
@@ -2479,6 +3973,17 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
     let broker_saw_the_hang = Arc::clone(&hang_was_entered);
     let release_the_hang = Arc::new(tokio::sync::Notify::new());
 
+    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
+    providers.insert(
+        "gated".to_string(),
+        Arc::new(GatedThreadsProvider {
+            entered_list_threads: Arc::clone(&entered_the_hang),
+            released: Arc::clone(&release_the_hang),
+            entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }),
+    );
+    let (state, relay) = encrypted_broker_state_parts(&cwd, providers).await;
+    let script_relay = Arc::clone(&relay);
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("broker should accept");
         let mut socket = tokio_tungstenite::accept_async(stream)
@@ -2497,6 +4002,7 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
 
         socket
             .send(Message::Text(encrypted_action_frame(
@@ -2553,7 +4059,9 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
                 .expect("presence sends");
         }
 
-        // The replacement connection declares what the phone is really looking at.
+        // The replacement connection proves itself, then declares what the phone is
+        // really looking at.
+        authorize_joined(&script_relay, "surface-new").await;
         socket
             .send(Message::Text(encrypted_action_frame(
                 "surface-new",
@@ -2600,16 +4108,6 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
     });
 
     let config = heartbeat_test_config(format!("ws://{address}")).await;
-    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
-    providers.insert(
-        "gated".to_string(),
-        Arc::new(GatedThreadsProvider {
-            entered_list_threads: Arc::clone(&entered_the_hang),
-            released: Arc::clone(&release_the_hang),
-            entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }),
-    );
-    let (state, relay) = encrypted_broker_state_parts(&cwd, providers).await;
     let session_state = state.clone();
     let session = tokio::spawn(async move {
         let mut change_rx = session_state.subscribe();
@@ -2635,20 +4133,7 @@ async fn a_stale_declaration_does_not_overwrite_the_replacement_connections_watc
     }
     release_the_hang.notify_one();
 
-    let mut stale_queue_drained = false;
-    for _ in 0..60 {
-        if observations
-            .lock()
-            .unwrap()
-            .kinds()
-            .iter()
-            .any(|kind| kind.ends_with(":action-after-stale"))
-        {
-            stale_queue_drained = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let stale_queue_drained = wait_for_queue_behind(&relay, "action-hangs").await;
     let (live_still_watched, stale_watched) = {
         let relay = relay.read().await;
         (
@@ -2734,6 +4219,7 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
         socket
             .send(Message::Text(encrypted_action_frame(
                 "surface-a",
@@ -2802,6 +4288,7 @@ async fn a_result_reaches_the_session_that_asked_again_after_a_reconnect() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
         socket
             .send(Message::Text(encrypted_action_frame(
                 "surface-a",
@@ -2963,6 +4450,7 @@ async fn a_panicking_action_answers_the_device_rather_than_going_quiet() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
         socket
             .send(Message::Text(encrypted_action_frame(
                 "surface-a",
@@ -3100,6 +4588,7 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
 
         // Bury this surface's worker, so anything the router hands it stays unhandled.
         socket
@@ -3211,20 +4700,7 @@ async fn an_arrival_queued_before_a_departure_cannot_undo_it() {
 
     release_the_hang.notify_one();
 
-    let mut queue_drained = false;
-    for _ in 0..60 {
-        if observations
-            .lock()
-            .unwrap()
-            .kinds()
-            .iter()
-            .any(|kind| kind.ends_with(":action-after-arrival"))
-        {
-            queue_drained = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let queue_drained = wait_for_queue_behind(&relay, "action-hangs").await;
     let (still_departed, back_online) = {
         let relay = relay.read().await;
         (
@@ -3299,6 +4775,7 @@ async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
 
         socket
             .send(Message::Text(encrypted_action_frame(
@@ -3424,20 +4901,7 @@ async fn a_frame_queued_before_a_departure_does_not_re_register_the_surface() {
     // Only now let the queue drain, so the watch declaration lands AFTER the departure.
     release_the_hang.notify_one();
 
-    let mut queue_drained = false;
-    for _ in 0..60 {
-        if observations
-            .lock()
-            .unwrap()
-            .kinds()
-            .iter()
-            .any(|kind| kind.ends_with(":action-after-watch"))
-        {
-            queue_drained = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let queue_drained = wait_for_queue_behind(&relay, "action-hangs").await;
     let still_watched = relay.read().await.any_device_watches_thread("thread-x");
     session.abort();
 
@@ -3489,6 +4953,17 @@ async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
     let broker_saw_the_hang = Arc::clone(&hang_was_entered);
     let release_the_hang = Arc::new(tokio::sync::Notify::new());
 
+    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
+    providers.insert(
+        "gated".to_string(),
+        Arc::new(GatedThreadsProvider {
+            entered_list_threads: Arc::clone(&entered_the_hang),
+            released: Arc::clone(&release_the_hang),
+            entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }),
+    );
+    let (state, relay) = encrypted_broker_state_parts(&cwd, providers).await;
+    let script_relay = Arc::clone(&relay);
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("broker should accept");
         let mut socket = tokio_tungstenite::accept_async(stream)
@@ -3507,6 +4982,7 @@ async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
 
         socket
             .send(Message::Text(encrypted_action_frame(
@@ -3550,6 +5026,26 @@ async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
                 .await
                 .expect("presence sends");
         }
+        // The new connection proves itself (a claim) and acts, which is what binds it.
+        authorize_joined(&script_relay, "surface-new").await;
+        send_test_hellos(
+            &mut socket,
+            &ServerMessage::Welcome {
+                protocol_version: BROKER_PROTOCOL_VERSION,
+                channel_id: "room-e2e".to_string(),
+                peer_id: "relay-e2e".to_string(),
+                peers: vec![surface_peer("surface-new", "phone-1")],
+            },
+        )
+        .await;
+        socket
+            .send(Message::Text(encrypted_action_frame(
+                "surface-new",
+                "action-new-heartbeat",
+                serde_json::json!({ "type": "heartbeat", "input": {} }),
+            )))
+            .await
+            .expect("heartbeat sends");
 
         while let Some(frame) = socket.next().await {
             let Ok(frame) = frame else { break };
@@ -3585,16 +5081,6 @@ async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
     });
 
     let config = heartbeat_test_config(format!("ws://{address}")).await;
-    let mut providers: HashMap<String, Arc<dyn crate::provider::ProviderBridge>> = HashMap::new();
-    providers.insert(
-        "gated".to_string(),
-        Arc::new(GatedThreadsProvider {
-            entered_list_threads: Arc::clone(&entered_the_hang),
-            released: Arc::clone(&release_the_hang),
-            entries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }),
-    );
-    let (state, relay) = encrypted_broker_state_parts(&cwd, providers).await;
     let session_state = state.clone();
     let session = tokio::spawn(async move {
         let mut change_rx = session_state.subscribe();
@@ -3626,20 +5112,7 @@ async fn a_late_frame_does_not_rebind_a_device_to_its_closed_connection() {
     }
     release_the_hang.notify_one();
 
-    let mut late_frame_ran = false;
-    for _ in 0..60 {
-        if observations
-            .lock()
-            .unwrap()
-            .kinds()
-            .iter()
-            .any(|kind| kind.ends_with(":action-late"))
-        {
-            late_frame_ran = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let late_frame_ran = wait_for_queue_behind(&relay, "action-hangs").await;
     let bound_to = relay.read().await.paired_device_peer_id("phone-1");
     session.abort();
 
@@ -3712,6 +5185,7 @@ async fn a_big_reply_is_not_paced_at_a_surface_the_relay_saw_leave() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
 
         let _ =
             tokio::time::timeout(Duration::from_secs(3), broker_waits_for_arrival.notified()).await;
@@ -3872,6 +5346,7 @@ async fn a_departure_is_recorded_while_that_surface_is_still_hanging() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
 
         socket
             .send(Message::Text(encrypted_action_frame(
@@ -4023,6 +5498,7 @@ async fn a_full_surface_queue_ends_the_session_rather_than_shedding_a_frame() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
 
         socket
             .send(Message::Text(encrypted_action_frame(
@@ -4164,6 +5640,7 @@ async fn a_departing_surface_does_not_stall_the_relay_for_everyone_else() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
 
         // A asks for the big diff.
         socket
@@ -4319,6 +5796,7 @@ async fn a_dropped_publish_ends_the_session_instead_of_passing_unnoticed() {
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
         let rate_limited = ServerMessage::Error {
             code: "rate_limited".to_string(),
             message: "broker publish rate limit exceeded for this peer".to_string(),
@@ -4370,24 +5848,43 @@ async fn a_dropped_publish_ends_the_session_instead_of_passing_unnoticed() {
 // property nobody can test by hand.
 // ---------------------------------------------------------------------------
 
+/// A phone frame signed under the session `seed_test_request_sessions` opened for
+/// `from_peer_id`, against the fixed relay identity `heartbeat_test_config` uses.
 fn encrypted_action_frame_versioned(
     from_peer_id: &str,
     action_id: &str,
     request: serde_json::Value,
     protocol_version: u64,
 ) -> String {
+    let binding = request_auth::RelayRequestBinding {
+        relay_verify_key: STANDARD.encode(
+            SigningKey::from_bytes(&super::writer::TEST_RELAY_CONTENT_SEED)
+                .verifying_key()
+                .to_bytes(),
+        ),
+        broker_room_id: "room-stalled".to_string(),
+        relay_peer_id: "relay-stalled".to_string(),
+    };
+    let mut payload = request_auth::test_signed_request(
+        &SigningKey::from_bytes(&TEST_PHONE_SEED),
+        &binding,
+        "phone-1",
+        from_peer_id,
+        &test_sid(from_peer_id),
+        TEST_FRAME_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
+        action_id,
+        &request,
+        "secret",
+    );
+    // The constant, not a literal, unless a test asks: the wrong version is refused
+    // at parse, and a stale literal reads like a hang rather than a version mismatch.
+    payload["protocol_version"] = serde_json::json!(protocol_version);
     serde_json::to_string(&serde_json::json!({
         "type": "message",
-        "channel_id": "room-version",
+        "channel_id": "room-e2e",
         "from_peer_id": from_peer_id,
         "from_role": "surface",
-        "payload": {
-            "kind": "encrypted_remote_action",
-            "protocol_version": protocol_version,
-            "action_id": action_id,
-            "device_id": "phone-1",
-            "envelope": bound_action_envelope("secret", action_id, &request).expect("request encrypts"),
-        }
+        "payload": payload,
     }))
     .expect("action frame serializes")
 }
@@ -4407,7 +5904,7 @@ async fn private_broker_state(cwd: &str) -> AppState {
             device_id: "phone-1".to_string(),
             label: "phone-1".to_string(),
             payload_secret: "secret".to_string(),
-            device_verify_key: "verify".to_string(),
+            device_verify_key: test_phone_verify_key(),
             created_at: 1,
             last_seen_at: Some(1),
             last_peer_id: None,
@@ -4415,6 +5912,7 @@ async fn private_broker_state(cwd: &str) -> AppState {
             path_scope: Vec::new(),
         },
     );
+    seed_test_request_sessions(&mut *relay.write().await);
     AppState::from_parts(relay, HashMap::new(), change_tx)
 }
 
@@ -4453,6 +5951,27 @@ async fn observe_relay_session_with_state(
             ))
             .await
             .expect("welcome sends");
+        send_test_hellos(&mut socket, &welcome).await;
+        // A phone hello is what installs the content session. Without it the writer
+        // drops the reply instead of sending it unsigned.
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "message",
+                    "channel_id": "room-version",
+                    "from_peer_id": "surface-a",
+                    "from_role": "surface",
+                    "payload": {
+                        "kind": "relay_hello",
+                        "protocol_version": RELAY_PROTOCOL_VERSION,
+                        "device_id": "phone-1",
+                        "hello_nonce": "cd".repeat(18),
+                    }
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("hello sends");
         for frame in frames {
             socket
                 .send(Message::Text(frame))
@@ -4613,30 +6132,12 @@ async fn a_handler_error_after_parsing_does_not_end_the_session() {
         .unwrap()
         .remove("device_id");
     let refused = serde_json::to_string(&refused).expect("frame serializes");
-    // A valid encrypted request must still be served after the refusal.
-    let envelope = bound_action_envelope(
-        "secret",
+    // A valid signed request must still be served after the refusal.
+    let sealed = encrypted_action_frame(
+        "surface-a",
         "action-sealed",
-        &RemoteActionRequest::ListThreads {
-            query: serde_json::from_value(serde_json::json!({ "limit": 5 }))
-                .expect("threads query parses"),
-        },
-    )
-    .expect("request encrypts");
-    let sealed = serde_json::to_string(&serde_json::json!({
-        "type": "message",
-        "channel_id": "room-version",
-        "from_peer_id": "surface-a",
-        "from_role": "surface",
-        "payload": {
-            "kind": "encrypted_remote_action",
-            "protocol_version": RELAY_PROTOCOL_VERSION,
-            "action_id": "action-sealed",
-            "device_id": "phone-1",
-            "envelope": envelope,
-        }
-    }))
-    .expect("sealed frame serializes");
+        serde_json::json!({ "type": "list_threads", "query": { "limit": 5 } }),
+    );
 
     let kinds = observe_relay_session_with_state(vec![refused, sealed], Some(state)).await;
 
@@ -5037,6 +6538,8 @@ async fn cloud_launch_capture_scrub_then_matching_config_succeeds() {
         .as_str()
         .to_string();
     let registration_path = temp_registration_path("agent-relay-witness-matching");
+    let identity_path = temp_registration_path("agent-relay-witness-matching-identity");
+    write_test_public_identity(&identity_path, &control_url, [4_u8; 32]).await;
     let registration = PublicRelayRegistration {
         relay_id: "relay-match".into(),
         broker_room_id: "room-match".into(),
@@ -5080,7 +6583,7 @@ async fn cloud_launch_capture_scrub_then_matching_config_succeeds() {
         None,
         None,
         None,
-        None,
+        Some(identity_path),
         Some(registration_path),
         None,
         startup,
@@ -5088,6 +6591,74 @@ async fn cloud_launch_capture_scrub_then_matching_config_succeeds() {
     .await
     .unwrap();
     assert!(matches!(result, BrokerConfigResolution::Ready(_)));
+}
+
+#[tokio::test]
+async fn enrolled_relay_refuses_to_mint_a_replacement_identity() {
+    let control_url = crate::broker::auth::parse_control_plane_url("http://127.0.0.1:9")
+        .expect("control url")
+        .as_str()
+        .to_string();
+    let registration_path = temp_registration_path("agent-relay-missing-identity-reg");
+    let identity_path = temp_registration_path("agent-relay-missing-identity-id");
+    save_public_relay_registration(
+        std::path::Path::new(&registration_path),
+        &control_url,
+        &PublicRelayRegistration {
+            relay_id: "relay-keep".into(),
+            broker_room_id: "room-keep".into(),
+            relay_refresh_token: "refresh-keep".into(),
+        },
+    )
+    .await
+    .expect("registration should save");
+
+    let missing = BrokerConfig::from_parts(
+        Some("wss://broker.example.com".to_string()),
+        None,
+        Some(control_url.clone()),
+        None,
+        Some("relay-auto".to_string()),
+        Some("public".to_string()),
+        None,
+        None,
+        None,
+        Some(identity_path.clone()),
+        Some(registration_path.clone()),
+        None,
+    )
+    .await
+    .expect_err("a cached registration without an identity must fail");
+    assert!(missing.contains("refusing to generate"), "got: {missing}");
+    assert!(
+        !std::path::Path::new(&identity_path).exists(),
+        "startup must not create a replacement identity"
+    );
+
+    write_test_public_identity(&identity_path, "http://127.0.0.1:8", [4_u8; 32]).await;
+    let before = std::fs::read(&identity_path).expect("identity should exist");
+    let mismatched = BrokerConfig::from_parts(
+        Some("wss://broker.example.com".to_string()),
+        None,
+        Some(control_url),
+        None,
+        Some("relay-auto".to_string()),
+        Some("public".to_string()),
+        None,
+        None,
+        None,
+        Some(identity_path.clone()),
+        Some(registration_path),
+        None,
+    )
+    .await
+    .expect_err("an identity for a different control url must fail");
+    assert!(mismatched.contains("was created for"), "got: {mismatched}");
+    assert_eq!(
+        std::fs::read(&identity_path).expect("identity should remain"),
+        before,
+        "a control-url mismatch must not rewrite the identity file"
+    );
 }
 
 #[tokio::test]
@@ -5458,11 +7029,13 @@ async fn enroll_release_reenroll_different_key_lifecycle() {
         released: Arc::new(Mutex::new(Vec::new())),
         next_refresh: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
     };
-    let app = Router::new()
-        .route("/api/public/relay-enrollment/challenge", post(challenge))
-        .route("/api/public/relay-enrollment/complete", post(complete))
-        .route("/api/public/relay/access/release", post(release))
-        .with_state(plane.clone());
+    let app = super::access_release::with_test_control_challenge(
+        Router::new()
+            .route("/api/public/relay-enrollment/challenge", post(challenge))
+            .route("/api/public/relay-enrollment/complete", post(complete))
+            .route("/api/public/relay/access/release", post(release))
+            .with_state(plane.clone()),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -5470,8 +7043,17 @@ async fn enroll_release_reenroll_different_key_lifecycle() {
     });
     let control_url = format!("http://{addr}");
 
-    let registration_path = temp_registration_path("agent-relay-lifecycle-reg");
-    let identity_path = temp_registration_path("agent-relay-lifecycle-id");
+    let lifecycle_dir = tempfile::tempdir().expect("lifecycle dir");
+    let registration_path = lifecycle_dir
+        .path()
+        .join("public-broker-registration.json")
+        .display()
+        .to_string();
+    let identity_path = lifecycle_dir
+        .path()
+        .join(crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE)
+        .display()
+        .to_string();
     let marker = std::path::PathBuf::from(&registration_path)
         .parent()
         .unwrap()
@@ -5622,10 +7204,10 @@ async fn pending_generic_enrollment_rechecks_after_activation_writes() {
 async fn production_activate_then_matching_release_clears() {
     use axum::{routing::post, Json, Router};
 
-    let app = Router::new().route(
+    let app = super::access_release::with_test_control_challenge(Router::new().route(
         "/api/public/relay/access/release",
         post(|| async { Json(serde_json::json!({ "released": true })) }),
-    );
+    ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -5654,6 +7236,12 @@ async fn production_activate_then_matching_release_clears() {
     .unwrap();
     assert_eq!(locked.disposition, EnrollmentDisposition::Enrolled);
     drop(locked);
+    write_test_public_identity(
+        pending.identity_path.to_str().expect("identity path"),
+        &control_url,
+        [4_u8; 32],
+    )
+    .await;
 
     let outcome = crate::broker::access_release::release_cloud_access(
         &control_url,
@@ -5675,7 +7263,7 @@ async fn production_stale_release_refuses_after_locked_activation_rebind() {
 
     let started = Arc::new(std::sync::Barrier::new(2));
     let started_server = started.clone();
-    let app = Router::new().route(
+    let app = super::access_release::with_test_control_challenge(Router::new().route(
         "/api/public/relay/access/release",
         post(move || {
             let started_server = started_server.clone();
@@ -5689,7 +7277,7 @@ async fn production_stale_release_refuses_after_locked_activation_rebind() {
                 Json(serde_json::json!({ "released": true }))
             }
         }),
-    );
+    ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -5711,6 +7299,15 @@ async fn production_stale_release_refuses_after_locked_activation_rebind() {
     )
     .await
     .unwrap();
+    write_test_public_identity(
+        dir.path()
+            .join(crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE)
+            .to_str()
+            .expect("identity path"),
+        &control_url,
+        [4_u8; 32],
+    )
+    .await;
 
     // release_cloud_access holds the lifecycle lock across HTTP. Replace the
     // registration under that same lock using the production enroll critical
@@ -5768,10 +7365,10 @@ async fn production_release_first_then_activate_under_contended_lock() {
     use std::sync::{Arc, Barrier};
 
     let remote_enrolls = Arc::new(AtomicUsize::new(0));
-    let app = Router::new().route(
+    let app = super::access_release::with_test_control_challenge(Router::new().route(
         "/api/public/relay/access/release",
         post(|| async { Json(serde_json::json!({ "released": true })) }),
-    );
+    ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -5786,7 +7383,7 @@ async fn production_release_first_then_activate_under_contended_lock() {
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).unwrap(),
         registration_path: registration_path.clone(),
-        identity_path,
+        identity_path: identity_path.clone(),
     };
     save_public_relay_registration(
         &registration_path,
@@ -5799,6 +7396,12 @@ async fn production_release_first_then_activate_under_contended_lock() {
     )
     .await
     .unwrap();
+    write_test_public_identity(
+        identity_path.to_str().expect("identity path"),
+        &control_url,
+        [4_u8; 32],
+    )
+    .await;
 
     // Force release→activate by pausing release immediately after it holds the
     // real lifecycle lock (before it reads/mutates registration), then starting
@@ -5896,10 +7499,10 @@ async fn production_activate_first_then_release_under_contended_lock() {
     use std::sync::{Arc, Barrier};
 
     let remote_enrolls = Arc::new(AtomicUsize::new(0));
-    let app = Router::new().route(
+    let app = super::access_release::with_test_control_challenge(Router::new().route(
         "/api/public/relay/access/release",
         post(|| async { Json(serde_json::json!({ "released": true })) }),
-    );
+    ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -5914,8 +7517,14 @@ async fn production_activate_first_then_release_under_contended_lock() {
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).unwrap(),
         registration_path: registration_path.clone(),
-        identity_path,
+        identity_path: identity_path.clone(),
     };
+    write_test_public_identity(
+        identity_path.to_str().expect("identity path"),
+        &control_url,
+        [4_u8; 32],
+    )
+    .await;
 
     // Force activate→release by pausing activate immediately after it holds the
     // real lifecycle lock (before enroll/save), then starting release while that
@@ -6014,10 +7623,10 @@ async fn production_activate_first_then_release_under_contended_lock() {
 async fn production_release_then_activate_reenrolls_cleanly() {
     use axum::{routing::post, Json, Router};
 
-    let app = Router::new().route(
+    let app = super::access_release::with_test_control_challenge(Router::new().route(
         "/api/public/relay/access/release",
         post(|| async { Json(serde_json::json!({ "released": true })) }),
-    );
+    ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -6032,7 +7641,7 @@ async fn production_release_then_activate_reenrolls_cleanly() {
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).unwrap(),
         registration_path: registration_path.clone(),
-        identity_path,
+        identity_path: identity_path.clone(),
     };
     save_public_relay_registration(
         &registration_path,
@@ -6045,6 +7654,12 @@ async fn production_release_then_activate_reenrolls_cleanly() {
     )
     .await
     .unwrap();
+    write_test_public_identity(
+        identity_path.to_str().expect("identity path"),
+        &control_url,
+        [4_u8; 32],
+    )
+    .await;
 
     let outcome = crate::broker::access_release::release_cloud_access(
         &control_url,
@@ -6137,7 +7752,7 @@ async fn snapshot_publish_state(security: SecurityProfile) -> AppState {
             device_id: "phone-1".to_string(),
             label: "phone-1".to_string(),
             payload_secret: "secret".to_string(),
-            device_verify_key: "verify".to_string(),
+            device_verify_key: test_phone_verify_key(),
             created_at: 1,
             last_seen_at: Some(1),
             last_peer_id: Some("surface-yesterday".to_string()),
@@ -6145,6 +7760,7 @@ async fn snapshot_publish_state(security: SecurityProfile) -> AppState {
             path_scope: Vec::new(),
         },
     );
+    seed_test_request_sessions(&mut *relay.write().await);
     let state = AppState::from_parts(relay, HashMap::new(), change_tx);
     state
         .replace_online_surface_peers(["surface-pairing".to_string()])
@@ -6241,7 +7857,7 @@ pub(super) async fn folder_limited_phone_state(phone_dir: &str, session_dir: &st
                 device_id: "phone-1".to_string(),
                 label: "phone-1".to_string(),
                 payload_secret: "secret".to_string(),
-                device_verify_key: "verify".to_string(),
+                device_verify_key: test_phone_verify_key(),
                 created_at: 1,
                 last_seen_at: Some(1),
                 last_peer_id: None,
@@ -6249,6 +7865,7 @@ pub(super) async fn folder_limited_phone_state(phone_dir: &str, session_dir: &st
                 path_scope: vec![phone_dir.to_string()],
             },
         );
+        seed_test_request_sessions(&mut relay);
         relay.activate_thread(
             crate::protocol::ThreadSummaryView {
                 workspace_trusted: false,
@@ -6387,12 +8004,13 @@ fn open_encrypted_request_json(action_id: &str, request: serde_json::Value) -> R
         InboundBrokerPayload::EncryptedRemoteAction {
             action_id: parsed_id,
             device_id,
-            session_claim,
+            request_sid,
             envelope,
+            ..
         } => {
             assert_eq!(parsed_id, action_id);
             assert_eq!(device_id.as_deref(), Some("phone-1"));
-            assert!(session_claim.is_none());
+            assert!(request_sid.is_none());
             remote_actions::decrypt_remote_action_with_secret("secret", &parsed_id, &envelope)
                 .expect("request JSON parses")
         }
@@ -6448,14 +8066,19 @@ fn parse_encrypted_claim_device_json() {
     match open_encrypted_request_json(
         "claim-finish",
         serde_json::json!({
-            "type": "claim_device", "challenge_id": "challenge-1", "proof": "signed-proof"
+            "type": "claim_device",
+            "challenge_id": "challenge-1",
+            "challenge": "nonce-1",
+            "proof": "signed-proof"
         }),
     ) {
         RemoteActionRequest::ClaimDevice {
             challenge_id,
+            challenge,
             proof,
         } => {
             assert_eq!(challenge_id, "challenge-1");
+            assert_eq!(challenge, "nonce-1");
             assert_eq!(proof, "signed-proof");
         }
         other => panic!("unexpected request: {other:?}"),
@@ -6481,6 +8104,60 @@ async fn next_encrypted_action_reply(
         let envelope = serde_json::from_value(payload["envelope"].clone()).expect("reply envelope");
         let result = decrypt_json("secret", &envelope).expect("reply decrypts");
         return (payload.clone(), result);
+    }
+}
+
+/// Hand a scripted frame's payload to the relay, as the broker said it came from `peer`.
+async fn deliver_scripted(
+    state: &AppState,
+    writer: &super::writer::BrokerWriter,
+    origin: FrameOrigin,
+    peer: &str,
+    frame: &str,
+) {
+    let frame: serde_json::Value = serde_json::from_str(frame).expect("frame");
+    let Some(InboundBrokerPayload::EncryptedRemoteAction {
+        action_id,
+        device_id,
+        action,
+        request_sid,
+        request_boot,
+        request_seq,
+        request_time,
+        op_boot,
+        op_t0,
+        request_signature,
+        envelope,
+    }) = parse_inbound_payload(frame["payload"].clone()).expect("payload parses")
+    else {
+        panic!("not an action frame");
+    };
+    Box::pin(handle_encrypted_remote_action(
+        state,
+        writer,
+        origin,
+        peer.to_string(),
+        action_id,
+        device_id,
+        remote_actions::signed_attempt_from_parts(
+            action,
+            request_sid,
+            request_boot,
+            request_seq,
+            request_time,
+            op_boot,
+            op_t0,
+            request_signature,
+        ),
+        envelope,
+    ))
+    .await
+    .expect("the room remains connected");
+}
+
+fn no_more_replies(replies: &mut tokio::sync::mpsc::Receiver<Message>) {
+    if let Ok(Message::Text(text)) = replies.try_recv() {
+        panic!("expected no answer, got {text}");
     }
 }
 
@@ -6516,48 +8193,29 @@ async fn bound_action_retries_wait_and_replay_without_reexecuting_the_provider()
             },
         )
     };
-    let envelope = bound_action_envelope(
-        "secret",
-        "original",
-        &serde_json::json!({
-            "type": "list_threads", "query": {"limit": 5},
-        }),
-    )
-    .expect("encrypt request");
-    let (writer, mut replies, _trains) = super::writer::test_writer();
+    let list = serde_json::json!({"type": "list_threads", "query": {"limit": 5}});
+    let original = encrypted_action_frame("surface-a", "original", list.clone());
+    let (writer, mut replies, _trains) = super::writer::test_writer_with_identity();
     let first = {
         let state = state.clone();
         let writer = writer.clone();
-        let envelope = envelope.clone();
+        let original = original.clone();
         tokio::spawn(async move {
-            handle_encrypted_remote_action(
-                &state,
-                &writer,
-                origin,
-                "surface-a".to_string(),
-                "original".to_string(),
-                None,
-                Some("phone-1".to_string()),
-                envelope,
-            )
-            .await
+            deliver_scripted(&state, &writer, origin, "surface-a", &original).await;
         })
     };
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .expect("provider entered");
-    handle_encrypted_remote_action(
+    // The reconnected phone asks again: same operation, new connection, new signature.
+    deliver_scripted(
         &state,
         &writer,
         retry_origin,
-        "surface-b".to_string(),
-        "original".to_string(),
-        None,
-        Some("phone-1".to_string()),
-        envelope.clone(),
+        "surface-b",
+        &encrypted_action_frame("surface-b", "original", list.clone()),
     )
-    .await
-    .expect("same ID waits in flight");
+    .await;
     let pending = tokio::time::timeout(Duration::from_secs(2), replies.recv())
         .await
         .expect("in-flight notice arrives")
@@ -6568,74 +8226,51 @@ async fn bound_action_retries_wait_and_replay_without_reexecuting_the_provider()
     let pending: serde_json::Value = serde_json::from_str(&pending).expect("notice JSON");
     assert_eq!(pending["payload"]["kind"], "remote_action_pending");
     assert_eq!(pending["payload"]["action_id"], "original");
-    handle_encrypted_remote_action(
+
+    // The broker re-labels the original frame under another action id: refused unheard.
+    let mut relabelled: serde_json::Value = serde_json::from_str(&original).unwrap();
+    relabelled["payload"]["action_id"] = serde_json::json!("changed");
+    deliver_scripted(
         &state,
         &writer,
         origin,
-        "surface-a".to_string(),
-        "changed".to_string(),
-        None,
-        Some("phone-1".to_string()),
-        envelope.clone(),
+        "surface-a",
+        &relabelled.to_string(),
     )
-    .await
-    .expect("refusal delivered");
-    let (payload, refusal) = next_encrypted_action_reply(&mut replies).await;
-    assert_eq!(payload["action_id"], "changed");
-    assert_eq!(refusal["ok"], false);
-    assert!(refusal["error"]
-        .as_str()
-        .unwrap()
-        .contains("action_id does not match"));
+    .await;
     assert!(relay
         .read()
         .await
         .completed_remote_action("phone-1", "changed")
         .is_none());
     released.notify_one();
-    first
-        .await
-        .expect("handler joins")
-        .expect("original completes");
+    first.await.expect("handler joins");
     for _ in 0..2 {
         let (payload, result) = next_encrypted_action_reply(&mut replies).await;
         assert_eq!(payload["action_id"], "original");
         assert_eq!(result["ok"], true);
     }
-    handle_encrypted_remote_action(
+    no_more_replies(&mut replies);
+    deliver_scripted(
         &state,
         &writer,
         retry_origin,
-        "surface-b".to_string(),
-        "original".to_string(),
-        None,
-        Some("phone-1".to_string()),
-        envelope.clone(),
+        "surface-b",
+        &encrypted_action_frame("surface-b", "original", list),
     )
-    .await
-    .expect("completed result replayed");
+    .await;
     let (payload, result) = next_encrypted_action_reply(&mut replies).await;
     assert_eq!(payload["action_id"], "original");
     assert_eq!(result["ok"], true);
-    handle_encrypted_remote_action(
+    deliver_scripted(
         &state,
         &writer,
         origin,
-        "surface-a".to_string(),
-        "changed".to_string(),
-        None,
-        Some("phone-1".to_string()),
-        envelope,
+        "surface-a",
+        &relabelled.to_string(),
     )
-    .await
-    .expect("changed ID is also refused after completion");
-    let (payload, result) = next_encrypted_action_reply(&mut replies).await;
-    assert_eq!(payload["action_id"], "changed");
-    assert_eq!(result["ok"], false);
-    assert!(result["error"]
-        .as_str()
-        .unwrap()
-        .contains("action_id does not match"));
+    .await;
+    no_more_replies(&mut replies);
     assert_eq!(entries.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(matches!(
         state
@@ -6646,11 +8281,11 @@ async fn bound_action_retries_wait_and_replay_without_reexecuting_the_provider()
 }
 
 #[tokio::test]
-async fn a_bound_send_message_without_a_session_claim_is_refused_before_reservation() {
+async fn an_unsigned_send_message_is_dropped_before_reservation() {
     let dir = tempfile::TempDir::new().expect("tmpdir");
     let (state, relay) =
         encrypted_broker_state_parts(&dir.path().to_string_lossy(), HashMap::new()).await;
-    let (writer, mut replies, _trains) = super::writer::test_writer();
+    let (writer, mut replies, _trains) = super::writer::test_writer_with_identity();
     let origin = {
         let mut relay = relay.write().await;
         relay.mark_surface_peer_online("surface-a");
@@ -6659,45 +8294,39 @@ async fn a_bound_send_message_without_a_session_claim_is_refused_before_reservat
             lease: relay.current_surface_lease("surface-a").unwrap(),
         }
     };
-    let envelope = bound_action_envelope(
-        "secret",
-        "send-without-claim",
-        &serde_json::json!({
+    let mut unsigned: serde_json::Value = serde_json::from_str(&encrypted_action_frame(
+        "surface-a",
+        "send-unsigned",
+        serde_json::json!({
             "type": "send_message", "input": {"text": "hello", "thread_id": "thread-1"},
         }),
-    )
-    .expect("bound request");
-    handle_encrypted_remote_action(
-        &state,
-        &writer,
-        origin,
-        "surface-a".to_string(),
-        "send-without-claim".to_string(),
-        None,
-        Some("phone-1".to_string()),
-        envelope,
-    )
-    .await
-    .expect("refusal delivered without ending session");
-    let (payload, result) = next_encrypted_action_reply(&mut replies).await;
-    assert_eq!(payload["action_id"], "send-without-claim");
-    assert_eq!(result["action"], "send_message");
-    assert_eq!(result["ok"], false);
-    assert_eq!(
-        result["error"],
-        "broker transport auth only grants room access; session claim is missing or expired"
-    );
+    ))
+    .unwrap();
+    for field in [
+        "action",
+        "request_sid",
+        "request_boot",
+        "request_seq",
+        "request_time",
+        "op_boot",
+        "op_t0",
+        "request_signature",
+    ] {
+        unsigned["payload"].as_object_mut().unwrap().remove(field);
+    }
+    deliver_scripted(&state, &writer, origin, "surface-a", &unsigned.to_string()).await;
+    no_more_replies(&mut replies);
     {
         let relay = relay.read().await;
         assert_eq!(relay.paired_devices["phone-1"].last_peer_id, None);
         assert_eq!(relay.paired_devices["phone-1"].last_seen_at, Some(1));
         assert!(relay
-            .completed_remote_action("phone-1", "send-without-claim")
+            .completed_remote_action("phone-1", "send-unsigned")
             .is_none());
     }
     assert!(matches!(
         state
-            .reserve_remote_action("phone-1", "send-without-claim", "send_message")
+            .reserve_remote_action("phone-1", "send-unsigned", "send_message")
             .await,
         Ok(crate::state::RemoteActionReplayDecision::Execute)
     ));
@@ -6708,7 +8337,7 @@ async fn invalid_action_binding_cannot_change_device_or_claim_state() {
     let dir = tempfile::TempDir::new().expect("tmpdir");
     let (state, relay) =
         encrypted_broker_state_parts(&dir.path().to_string_lossy(), HashMap::new()).await;
-    let (writer, mut replies, _trains) = super::writer::test_writer();
+    let (writer, mut replies, _trains) = super::writer::test_writer_with_identity();
     let origin = {
         let mut relay = relay.write().await;
         relay.mark_surface_peer_online("surface-a");
@@ -6717,44 +8346,62 @@ async fn invalid_action_binding_cannot_change_device_or_claim_state() {
             lease: relay.current_surface_lease("surface-a").unwrap(),
         }
     };
-    let claim = issue_session_claim("phone-1", "surface-a")
-        .expect("issue test claim")
-        .token;
-    for session_claim in [None, Some(claim)] {
-        for request in [
-            serde_json::json!({"type": "claim_challenge", "proof": "proof"}),
-            serde_json::json!({"type": "claim_device", "challenge_id": "challenge", "proof": "proof"}),
-            serde_json::json!({"type": "heartbeat", "input": {}}),
-            serde_json::json!({"type": "watch_threads", "input": {"thread_ids": ["t1"]}}),
+    let assert_untouched = |relay: &RelayState| {
+        assert_eq!(relay.paired_devices["phone-1"].last_peer_id, None);
+        assert_eq!(relay.paired_devices["phone-1"].last_seen_at, Some(1));
+        assert!(relay.pending_claim_challenges.is_empty());
+        assert!(relay
+            .completed_remote_action("phone-1", "changed")
+            .is_none());
+        assert!(!relay.any_device_watches_thread("t1"));
+    };
+    // Claim steps travel unsigned and are answered with their refusal, as before.
+    for request in [
+        serde_json::json!({"type": "claim_challenge", "proof": "proof"}),
+        serde_json::json!({"type": "claim_device", "challenge_id": "challenge", "challenge": "nonce", "proof": "proof"}),
+    ] {
+        for envelope in [
+            bound_action_envelope("secret", "original", &request).expect("bound request"),
+            encrypt_json("secret", &request).expect("old unbound request"),
         ] {
-            for envelope in [
-                bound_action_envelope("secret", "original", &request).expect("bound request"),
-                encrypt_json("secret", &request).expect("old unbound request"),
-            ] {
-                handle_encrypted_remote_action(
-                    &state,
-                    &writer,
-                    origin,
-                    "surface-a".to_string(),
-                    "changed".to_string(),
-                    session_claim.clone(),
-                    Some("phone-1".to_string()),
-                    envelope,
-                )
-                .await
-                .expect("refusal delivered without ending session");
-                let (_, result) = next_encrypted_action_reply(&mut replies).await;
-                assert_eq!(result["ok"], false);
-                assert!(result["session_claim"].is_null());
-                let relay = relay.read().await;
-                assert_eq!(relay.paired_devices["phone-1"].last_peer_id, None);
-                assert_eq!(relay.paired_devices["phone-1"].last_seen_at, Some(1));
-                assert!(relay.pending_claim_challenges.is_empty());
-                assert!(relay
-                    .completed_remote_action("phone-1", "changed")
-                    .is_none());
-                assert!(!relay.any_device_watches_thread("t1"));
-            }
+            let frame = serde_json::json!({"payload": {
+                "kind": "encrypted_remote_action",
+                "protocol_version": RELAY_PROTOCOL_VERSION,
+                "action_id": "changed",
+                "device_id": "phone-1",
+                "envelope": envelope,
+            }});
+            deliver_scripted(&state, &writer, origin, "surface-a", &frame.to_string()).await;
+            let (_, result) = next_encrypted_action_reply(&mut replies).await;
+            assert_eq!(result["ok"], false);
+            assert!(result["session_claim"].is_null());
+            assert_untouched(&*relay.read().await);
+        }
+    }
+    // Everything else is signed; a re-labelled or unbound one is dropped unheard.
+    for request in [
+        serde_json::json!({"type": "heartbeat", "input": {}}),
+        serde_json::json!({"type": "watch_threads", "input": {"thread_ids": ["t1"]}}),
+    ] {
+        let mut relabelled: serde_json::Value = serde_json::from_str(&encrypted_action_frame(
+            "surface-a",
+            "original",
+            request.clone(),
+        ))
+        .unwrap();
+        relabelled["payload"]["action_id"] = serde_json::json!("changed");
+        let mut unbound: serde_json::Value = serde_json::from_str(&encrypted_action_frame(
+            "surface-a",
+            "changed",
+            request.clone(),
+        ))
+        .unwrap();
+        unbound["payload"]["envelope"] =
+            serde_json::to_value(encrypt_json("secret", &request).unwrap()).unwrap();
+        for frame in [relabelled, unbound] {
+            deliver_scripted(&state, &writer, origin, "surface-a", &frame.to_string()).await;
+            no_more_replies(&mut replies);
+            assert_untouched(&*relay.read().await);
         }
     }
 }
@@ -7033,3 +8680,4 @@ async fn a_second_phone_on_a_decided_pairing_qr_is_told_to_use_a_new_one() {
         assert_eq!(replay["ok"], approved, "{replay}");
     }
 }
+mod request_replay;

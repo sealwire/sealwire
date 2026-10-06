@@ -8,6 +8,16 @@ import { decodeActionFrame } from "../../../frontend/remote/test-support/encrypt
 import { installEncryptedMock } from "./encrypted-broker-mock.mjs";
 
 const request = { type: "heartbeat", input: { device_id: "phone-1" } };
+const signedAttempt = {
+  action: "heartbeat",
+  request_sid: "sid-1",
+  request_boot: "boot-1",
+  request_seq: 1,
+  request_time: 2_000_000_000,
+  op_boot: "boot-1",
+  op_t0: 2_000_000_000,
+  request_signature: "signature",
+};
 
 function encryptedFrame(secret, payload = { action_id: "action-1", request }) {
   const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
@@ -16,6 +26,7 @@ function encryptedFrame(secret, payload = { action_id: "action-1", request }) {
     payload: {
       kind: "encrypted_remote_action",
       action_id: "action-1",
+      target_peer_id: "relay-peer",
       envelope: {
         nonce: Buffer.from(nonce).toString("base64"),
         ciphertext: Buffer.from(nacl.secretbox(
@@ -69,6 +80,15 @@ for (const [name, secret, consumer] of [
     assert.throws(() => consume(JSON.stringify(frame)), /only protocol fields/);
   });
 
+  test(`${name} rejects actions without a valid relay target`, () => {
+    const { consume } = consumer();
+    for (const target of [undefined, null, "", " ", 42]) {
+      const frame = encryptedFrame(secret);
+      frame.payload.target_peer_id = target;
+      assert.throws(() => consume(JSON.stringify(frame)), /requires a relay target/);
+    }
+  });
+
   test(`${name} rejects plaintext under other field names`, () => {
     const { consume } = consumer();
     for (const leak of [
@@ -98,10 +118,20 @@ for (const [name, secret, consumer] of [
   test(`${name} decrypts the request in a valid encrypted frame`, { timeout: 2000 }, async () => {
     const { result } = consumer();
     const input = encryptedFrame(secret);
-    input.protocol_version = 1;
-    Object.assign(input.payload, { protocol_version: 3, device_id: "phone-1", session_claim: "claim-1" });
+    input.protocol_version = 2;
+    Object.assign(input.payload, { protocol_version: 5, device_id: "phone-1", ...signedAttempt });
     const frame = await result(JSON.stringify(input));
     assert.equal(frame.payload.action_id, "action-1");
     assert.deepEqual(frame.payload.request, request);
+  });
+
+  test(`${name} refuses an ordinary action that is not signed`, async () => {
+    const { result } = consumer();
+    const input = encryptedFrame(secret);
+    Object.assign(input.payload, { protocol_version: 5, device_id: "phone-1" });
+    await assert.rejects(async () => result(JSON.stringify(input)), /signed/);
+    const bearer = encryptedFrame(secret);
+    Object.assign(bearer.payload, { protocol_version: 5, device_id: "phone-1", session_claim: "claim-1" });
+    await assert.rejects(async () => result(JSON.stringify(bearer)), /only protocol fields/);
   });
 }

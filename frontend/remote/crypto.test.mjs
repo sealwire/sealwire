@@ -200,3 +200,47 @@ test("the device fingerprint matches the relay's format", async () => {
     "ae:21:6c:2e:f5:24:7a:37"
   );
 });
+
+test("remote request signature matches the relay vector", async () => {
+  const nacl = (await import("tweetnacl")).default;
+  const { remoteRequestEnvelopeDigest, remoteRequestMessageBytes, signRemoteRequest } =
+    await import("./crypto.js");
+  const seed = new Uint8Array(32).fill(3);
+  const pair = nacl.sign.keyPair.fromSeed(seed);
+  const keypair = {
+    async sign(bytes) {
+      return nacl.sign.detached(bytes, pair.secretKey);
+    },
+  };
+  const envelope = {
+    nonce: Buffer.from(new Uint8Array(24).fill(1)).toString("base64"),
+    ciphertext: Buffer.from("sealed request").toString("base64"),
+  };
+  // Pinned on the relay side by `the_request_signature_matches_the_shared_vector`.
+  assert.equal(
+    remoteRequestEnvelopeDigest(envelope),
+    "707827ac2928d80b36037da2b3855230bf1f1e5997c4c53d0d350b35921341ee"
+  );
+  const fields = {
+    protocolVersion: 5,
+    relayVerifyKey: "relay-key",
+    brokerRoomId: "room-1",
+    relayPeerId: "relay-peer",
+    deviceId: "phone-1",
+    peerId: "peer-1",
+    sid: "sid-1",
+    boot: "boot-1",
+    seq: 7,
+    time: 1_000_000_123,
+    actionId: "act-1",
+    action: "send_message",
+    opBoot: "boot-1",
+    opT0: 1_000_000_100,
+    envelope,
+  };
+  assert.equal(
+    await signRemoteRequest(fields, keypair),
+    "GZX0jO5Ur0l3NBTcSkR30osavd3LKYHWf+YBsqqVlCxtUmvmMCboHP05P7xTJ33GJMwznK+rP50jA6RHU++oAw=="
+  );
+  assert.ok(remoteRequestMessageBytes(fields) instanceof Uint8Array);
+});

@@ -3,9 +3,10 @@ import {
   encryptJson,
   signClaimChallengeProof,
   signClaimInitProof,
+  signRemoteRequest,
 } from "./crypto.js";
 import { renderLog } from "./session-surface.js";
-import { ACTIONS_REQUIRING_SESSION_CLAIM } from "./session-claim-actions.js";
+import { requiresSessionClaim } from "./session-claim-actions.js";
 import {
   CLAIM_REFRESH_FLOOR_MS,
   CLAIM_REFRESH_SKEW_MS,
@@ -21,7 +22,7 @@ import {
   applyRemoteSurfacePatch,
   createClaimLifecyclePatch,
 } from "./surface-state.js";
-import { sendBrokerFrame } from "./broker-client.js";
+import { currentRelayBinding, sendBrokerFrame } from "./broker-client.js";
 import { relayError } from "../shared/transcript-protocol.js";
 
 // One deadline for every action. Not because they are all quick — the relay still
@@ -29,6 +30,13 @@ import { relayError } from "../shared/transcript-protocol.js";
 // catalog alone is allowed 30s — but because a longer deadline is the wrong cure for
 // that: the relay is stalled either way, and waiting through it just hides that.
 const REMOTE_ACTION_TIMEOUT_MS = 15_000;
+// The relay re-runs no write whose first attempt is older than this; past it, the
+// honest answer is "unknown", not a resend.
+const WRITE_RETRY_WINDOW_MS = 5 * 60 * 1000;
+// A relay that keeps asking for re-authorization is not answered by asking forever.
+const MAX_REAUTHORIZATIONS = 2;
+const OUTCOME_UNKNOWN_MESSAGE =
+  "It is not known whether this ran: the connection to the relay was lost for too long. Check the session before doing it again.";
 
 let onApplySessionSnapshot = () => {};
 let onSyncRemoteSnapshot = async () => {};
@@ -76,6 +84,13 @@ export async function handleRemoteBrokerPayload(payload) {
   // NEW id that no replay cache can recognise.
   if (kind === "remote_action_pending") {
     extendPendingActionDeadline(payload.action_id);
+    return;
+  }
+
+  // The relay saw this phone's signature but not a session or clock it accepts. Nothing
+  // ran; the same operation is sent again under a fresh claim.
+  if (kind === "remote_action_reauthorize") {
+    void reauthorizePendingAction(payload.action_id);
     return;
   }
 
@@ -160,14 +175,8 @@ export async function recoverRemoteSession(reason) {
       if (state.remoteAuth?.sessionClaim) {
         clearSessionClaim();
       }
+      await ensureRemoteClaim({ force: true, reason });
       await onSyncRemoteSnapshot(`recovery sync (${reason})`, true);
-      if (shouldAutoReclaimSession()) {
-        await ensureRemoteClaim({
-          force: true,
-          reason,
-          syncAfterClaim: true,
-        });
-      }
       applyRemoteSurfacePatch(createClaimLifecyclePatch({
         recoveredSocketPeerId: state.socketPeerId,
       }));
@@ -188,7 +197,6 @@ export async function recoverRemoteSession(reason) {
 }
 
 export async function dispatchOrRecover(actionType, request, options = {}) {
-  const allowClaimRetry = options.allowClaimRetry !== false;
   const skipPreclaim = options.skipPreclaim === true;
 
   if (requiresSessionClaim(actionType) && !skipPreclaim) {
@@ -199,30 +207,10 @@ export async function dispatchOrRecover(actionType, request, options = {}) {
     });
   }
 
-  try {
-    return await dispatchRemoteAction(actionType, request);
-  } catch (error) {
-    if (
-      allowClaimRetry &&
-      requiresSessionClaim(actionType) &&
-      isSessionClaimError(error.message)
-    ) {
-      clearSessionClaim();
-      renderLog(`Session claim expired during ${actionType}; re-claiming and retrying once.`);
-      await ensureRemoteClaim({
-        force: true,
-        reason: `${actionType} retry`,
-        syncAfterClaim: false,
-      });
-      return dispatchOrRecover(actionType, request, {
-        ...options,
-        allowClaimRetry: false,
-        skipPreclaim: true,
-      });
-    }
-
-    throw error;
-  }
+  // An expired or replaced session comes back as a re-authorization notice and is
+  // retried inside `dispatchRemoteAction` under the SAME action id. Retrying here under a
+  // new one would let a write the relay already ran run again.
+  return dispatchRemoteAction(actionType, request);
 }
 
 export function scheduleClaimRefresh() {
@@ -258,7 +246,7 @@ export function scheduleClaimRefresh() {
 /// same promise to every later recovery, which then never finishes.
 export function abandonStalledClaim() {
   for (const [actionId, pending] of [...state.pendingActions.entries()]) {
-    if (pending?.actionType === "claim_challenge") {
+    if (pending?.actionType === "claim_challenge" || pending?.actionType === "claim_device") {
       rejectPendingAction(actionId, new Error("the relay restarted before answering"));
     }
   }
@@ -374,19 +362,7 @@ async function handleEncryptedRemoteActionResultChunk(payload) {
 }
 
 function logIgnoredEncryptedPayload(kind, payload) {
-  // Discarding a frame must be FREE. The broker broadcasts remote action results
-  // and session snapshots to every peer in the room and leaves the filtering to
-  // each surface (`must_not_be_broadcast` in crates/relay-broker/src/state.rs lists
-  // only `encrypted_pairing_result`), so every surface sees every other surface's
-  // traffic. `renderLog` is a `patchRemoteState`, which notifies the store behind
-  // `useSyncExternalStore` — so logging here cost one full RemoteApp re-render per
-  // frame we then threw away. A real boot trace showed 21 of them, all chunks of
-  // another surface's `fetch_workspace_diff`, arriving before the first frame
-  // addressed to this surface.
-  //
-  // The gate is now the whole function, not just the high-volume kinds: a frame
-  // that is not for us is by definition not this surface's business, and anyone
-  // debugging broker routing turns on `window.__agentRelayVerboseBrokerLogs`.
+  // Rejected frames must not notify the store and trigger a full render.
   if (!isVerboseBrokerLoggingEnabled()) {
     return;
   }
@@ -456,7 +432,11 @@ function handleRemoteActionResult(actionId, result) {
 
   try {
     if (result.session_claim && state.remoteAuth) {
-      setSessionClaim(result.session_claim, result.session_claim_expires_at || null);
+      setSessionClaim(result.session_claim, result.session_claim_expires_at || null, {
+        boot: result.session_claim_boot ?? null,
+        relayMs: result.session_claim_relay_ms ?? null,
+        receivedAt: performance.now(),
+      });
       scheduleClaimRefresh();
     }
 
@@ -492,11 +472,6 @@ function handleRemoteActionResult(actionId, result) {
       renderLog(`Remote ${result.action} succeeded.`);
     }
     return;
-  }
-
-  if (isSessionClaimError(result.error) && state.remoteAuth) {
-    clearSessionClaim();
-    scheduleClaimRefresh();
   }
 
   renderLog(`Remote ${result.action} failed: ${result.error || "unknown error"}`);
@@ -625,6 +600,9 @@ async function dispatchRemoteAction(actionType, request) {
 
   const actionId = makeActionId(actionType);
   const resultPromise = registerPendingAction(actionId, actionType, request);
+  // Signing is asynchronous, so the deadline can fire before this function reaches the
+  // `await` below; the rejection is still delivered there, not reported as unhandled.
+  resultPromise.catch(() => {});
 
   try {
     await sendRemoteActionFrame(actionId, actionType, request);
@@ -645,6 +623,9 @@ export async function dispatchRemoteActionWithoutReply(actionType, request) {
     throw new Error("this browser is not paired yet");
   }
   const socket = state.socket;
+  if (requiresSessionClaim(actionType)) {
+    await ensureRemoteClaim({ reason: `${actionType} preflight` });
+  }
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     throw new Error("broker socket is not connected");
   }
@@ -653,14 +634,8 @@ export async function dispatchRemoteActionWithoutReply(actionType, request) {
   }
 
   const actionId = makeActionId(actionType);
-  sendBrokerFrame(
-    await buildEncryptedActionPayload(
-      actionId,
-      { type: actionType, ...request },
-      requiresSessionClaim(actionType) ? state.remoteAuth.sessionClaim : undefined
-    ),
-    socket
-  );
+  const signed = await buildSignedActionPayload(actionId, actionType, request, null);
+  sendBrokerFrame(signed.payload, socket);
 }
 
 async function buildClaimChallengePayload(actionId) {
@@ -698,20 +673,96 @@ async function buildClaimDevicePayload(actionId, request) {
   return buildEncryptedActionPayload(actionId, {
     type: "claim_device",
     challenge_id: request.challenge_id,
+    challenge: request.challenge,
     proof: claimProof,
   });
 }
 
-async function buildEncryptedActionPayload(actionId, request, sessionClaim) {
+// Claim steps only: they carry their own signatures over the action id and challenge.
+async function buildEncryptedActionPayload(actionId, request) {
   return {
     kind: "encrypted_remote_action",
     action_id: actionId,
-    ...(sessionClaim === undefined ? {} : { session_claim: sessionClaim }),
     device_id: state.remoteAuth.deviceId,
     envelope: await encryptJson(state.remoteAuth.payloadSecret, {
       action_id: actionId,
       request,
     }),
+  };
+}
+
+/// The claim's relay-clock stamp plus monotonic time since it arrived, never the wall
+/// clock. Lags by the reply's delivery time (more after sleep; the relay then asks for a re-claim).
+function relayClockNow() {
+  const auth = state.remoteAuth;
+  const elapsed = Math.max(0, performance.now() - (auth.sessionClaimReceivedAt ?? performance.now()));
+  return Math.floor(auth.sessionClaimRelayMs + elapsed);
+}
+
+const requestSeqBySession = new Map();
+
+function nextRequestSeq(sid) {
+  const next = (requestSeqBySession.get(sid) || 0) + 1;
+  // Only the newest session is ever used again; older counters are dead weight.
+  requestSeqBySession.clear();
+  requestSeqBySession.set(sid, next);
+  return next;
+}
+
+/// One signed attempt at an operation. `op` is the operation's identity from its first
+/// attempt; a resend reuses it so the relay recognises the same write.
+async function buildSignedActionPayload(actionId, actionType, request, op) {
+  if (!hasUsableSessionClaim()) {
+    throw new Error("device is not claimed yet");
+  }
+  const binding = currentRelayBinding();
+  if (!binding) {
+    throw new Error("the relay identity is not pinned on this phone; pair it again");
+  }
+  if (!state.socketPeerId) {
+    throw new Error("broker peer id is not ready yet");
+  }
+  const auth = state.remoteAuth;
+  const time = relayClockNow();
+  const attemptOp = op || { boot: auth.sessionClaimBoot, t0: time };
+  const envelope = await encryptJson(auth.payloadSecret, {
+    action_id: actionId,
+    request: { type: actionType, ...request },
+  });
+  const fields = {
+    protocolVersion: binding.protocolVersion,
+    relayVerifyKey: binding.relayVerifyKey,
+    brokerRoomId: binding.brokerRoomId,
+    relayPeerId: binding.relayPeerId,
+    deviceId: auth.deviceId,
+    peerId: state.socketPeerId,
+    sid: auth.sessionClaim,
+    boot: auth.sessionClaimBoot,
+    seq: nextRequestSeq(auth.sessionClaim),
+    time,
+    actionId,
+    action: actionType,
+    opBoot: attemptOp.boot,
+    opT0: attemptOp.t0,
+    envelope,
+  };
+  const signature = await signRemoteRequest(fields, await ensureDeviceIdentity());
+  return {
+    op: attemptOp,
+    payload: {
+      kind: "encrypted_remote_action",
+      action_id: actionId,
+      device_id: fields.deviceId,
+      action: actionType,
+      request_sid: fields.sid,
+      request_boot: fields.boot,
+      request_seq: fields.seq,
+      request_time: fields.time,
+      op_boot: fields.opBoot,
+      op_t0: fields.opT0,
+      request_signature: signature,
+      envelope,
+    },
   };
 }
 
@@ -732,17 +783,16 @@ async function sendRemoteActionFrame(actionId, actionType, request) {
     sendBrokerFrame(await buildClaimDevicePayload(actionId, request), socket);
     return;
   }
-  if (requiresSessionClaim(actionType) && !state.remoteAuth.sessionClaim) {
-    throw new Error("device is not claimed yet");
+  const pending = state.pendingActions.get(actionId);
+  const signed = await buildSignedActionPayload(actionId, actionType, request, pending?.op ?? null);
+  sendBrokerFrame(signed.payload, socket);
+  if (pending) {
+    pending.signedSid = signed.payload.request_sid;
+    if (!pending.op) {
+      pending.op = signed.op;
+      pending.firstSentAt = performance.now();
+    }
   }
-  sendBrokerFrame(
-    await buildEncryptedActionPayload(
-      actionId,
-      { type: actionType, ...request },
-      requiresSessionClaim(actionType) ? state.remoteAuth.sessionClaim : undefined
-    ),
-    socket
-  );
 }
 
 /// Stand down the deadlines of everything still in flight, without failing anything.
@@ -772,7 +822,12 @@ export function suspendPendingActionDeadlines() {
 export async function resendPendingActions() {
   const attempts = [...state.pendingActions.entries()];
   for (const [actionId, pending] of attempts) {
-    if (!pending || pending.actionType === "claim_challenge") {
+    // A claim step answers a challenge the relay has forgotten; recovery claims afresh.
+    if (!pending || pending.actionType === "claim_challenge" || pending.actionType === "claim_device") {
+      continue;
+    }
+    if (pending.firstSentAt != null && performance.now() - pending.firstSentAt > WRITE_RETRY_WINDOW_MS) {
+      rejectPendingAction(actionId, relayError(OUTCOME_UNKNOWN_MESSAGE, "outcome_unknown"));
       continue;
     }
     try {
@@ -781,6 +836,39 @@ export async function resendPendingActions() {
     } catch (error) {
       rejectPendingAction(actionId, error);
     }
+  }
+}
+
+/// New session, clock and signature; same action id and operation identity, so a write the
+/// relay already ran is answered from its ledger rather than run twice.
+async function reauthorizePendingAction(actionId) {
+  const pending = state.pendingActions.get(actionId);
+  if (!pending || !requiresSessionClaim(pending.actionType)) {
+    return;
+  }
+  if ((pending.reauthorizations || 0) >= MAX_REAUTHORIZATIONS) {
+    rejectPendingAction(
+      actionId,
+      new Error(`the relay would not accept this ${pending.actionType} request; reconnect and try again`)
+    );
+    return;
+  }
+  pending.reauthorizations = (pending.reauthorizations || 0) + 1;
+  try {
+    // Signed under a claim already replaced: the newer one is enough. Forcing another would
+    // retire it under every other request still in flight.
+    const claimIsStale = state.remoteAuth?.sessionClaim === pending.signedSid;
+    await ensureRemoteClaim({
+      force: claimIsStale || !hasUsableSessionClaim(),
+      reason: `${pending.actionType} re-authorization`,
+    });
+    if (state.pendingActions.get(actionId) !== pending) {
+      return;
+    }
+    await sendRemoteActionFrame(actionId, pending.actionType, pending.request);
+    extendPendingActionDeadline(actionId);
+  } catch (error) {
+    rejectPendingAction(actionId, error);
   }
 }
 
@@ -812,6 +900,11 @@ function registerPendingAction(actionId, actionType, request) {
       actionType,
       // Kept so the attempt can be reproduced verbatim under the same id.
       request,
+      // The operation's identity, fixed by its first signed attempt.
+      op: null,
+      firstSentAt: null,
+      signedSid: null,
+      reauthorizations: 0,
       timeoutId,
       reject,
       resolve,
@@ -851,22 +944,9 @@ function cancelClaimRefresh() {
   }));
 }
 
-function isSessionClaimError(message) {
-  return typeof message === "string" && message.toLowerCase().includes("session claim");
-}
-
-function requiresSessionClaim(actionType) {
-  return ACTIONS_REQUIRING_SESSION_CLAIM.has(actionType);
-}
-
-function shouldAutoReclaimSession() {
-  return Boolean(
-    state.remoteAuth?.deviceId &&
-      state.session?.active_thread_id &&
-      state.session.active_controller_device_id === state.remoteAuth.deviceId
-  );
-}
-
 function makeActionId(prefix) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  const suffix = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${prefix}-${Date.now()}-${suffix}`;
 }

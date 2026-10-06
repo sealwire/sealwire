@@ -45,7 +45,11 @@ async fn join_publish_and_leave_broadcast_presence() {
     );
 
     state
-        .publish("room-a", "relay-1", json!({"ciphertext":"abc"}))
+        .publish(
+            "room-a",
+            "relay-1",
+            json!({"target_peer_id":"phone-1", "ciphertext":"abc"}),
+        )
         .await
         .expect("publish should succeed");
     let relayed = surface
@@ -60,7 +64,7 @@ async fn join_publish_and_leave_broadcast_presence() {
             channel_id: "room-a".to_string(),
             from_peer_id: "relay-1".to_string(),
             from_role: PeerRole::Relay,
-            payload: json!({"ciphertext":"abc"}),
+            payload: json!({"target_peer_id":"phone-1", "ciphertext":"abc"}),
         }
     );
 
@@ -157,7 +161,7 @@ async fn relay_reconnect_replaces_old_connection_without_old_leave_removing_new_
             "room-a",
             "relay-1",
             new_relay.connection_id,
-            json!({"kind":"session_snapshot"}),
+            json!({"kind":"session_snapshot", "target_peer_id":"phone-1"}),
         )
         .await
         .expect("old connection cleanup must not remove the replacement");
@@ -239,6 +243,134 @@ struct CollectingSink {
     events: Arc<std::sync::Mutex<Vec<UsageEvent>>>,
 }
 
+#[tokio::test]
+async fn invalid_batches_and_same_role_routes_never_deliver_a_prefix() {
+    let state = BrokerState::default();
+    let mut relay = state
+        .join("room", "relay", PeerRole::Relay, None, None)
+        .await
+        .unwrap();
+    let mut other_relay = state
+        .join("room", "other-relay", PeerRole::Relay, None, None)
+        .await
+        .unwrap();
+    let mut surface = state
+        .join("room", "surface", PeerRole::Surface, None, None)
+        .await
+        .unwrap();
+    let mut other_surface = state
+        .join("room", "other-surface", PeerRole::Surface, None, None)
+        .await
+        .unwrap();
+    for peer in [
+        &mut relay,
+        &mut other_relay,
+        &mut surface,
+        &mut other_surface,
+    ] {
+        drain_presence(&mut peer.receiver).await;
+    }
+
+    let message = json!({"target_peer_id":"surface", "payload":{"kind":"probe"}});
+    let repeated = state
+        .publish(
+            "room",
+            "relay",
+            json!({
+                "kind":"targeted_messages", "messages":[message.clone(), message.clone()]
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(repeated.contains("repeats"));
+    let oversized = (0..=MAX_TARGETED_MESSAGES_PER_PUBLISH)
+        .map(|index| json!({"target_peer_id":format!("surface-{index}"), "payload":{}}))
+        .collect::<Vec<_>>();
+    let too_many = state
+        .publish(
+            "room",
+            "relay",
+            json!({
+                "kind":"targeted_messages", "messages":oversized
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(too_many.contains("exceeds"));
+    let wrong_role = state.publish("room", "relay", json!({
+        "kind":"targeted_messages", "messages":[message, {"target_peer_id":"other-relay", "payload":{}}]
+    })).await.unwrap_err();
+    assert!(wrong_role.contains("opposite peer role"));
+    let wrong_role = state
+        .publish("room", "surface", json!({"target_peer_id":"other-surface"}))
+        .await
+        .unwrap_err();
+    assert!(wrong_role.contains("opposite peer role"));
+    for peer in [
+        &mut relay,
+        &mut other_relay,
+        &mut surface,
+        &mut other_surface,
+    ] {
+        assert!(peer.receiver.try_recv().is_err());
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            peer.overflow.notified()
+        )
+        .await
+        .is_err());
+    }
+}
+
+#[tokio::test]
+async fn a_surface_cannot_flood_any_peer_with_a_targeted_batch() {
+    let state = BrokerState::default();
+    let mut relay = state
+        .join("room", "relay", PeerRole::Relay, None, None)
+        .await
+        .unwrap();
+    let mut surface = state
+        .join("room", "surface", PeerRole::Surface, None, None)
+        .await
+        .unwrap();
+    drain_presence(&mut relay.receiver).await;
+    let messages = vec![json!({"target_peer_id":"relay", "payload":{"kind":"probe"}}); 400];
+    let error = state
+        .publish(
+            "room",
+            "surface",
+            json!({
+                "kind":"targeted_messages", "messages":messages
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("single payload"));
+    assert!(relay.receiver.try_recv().is_err());
+    assert!(surface.receiver.try_recv().is_err());
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(1),
+        relay.overflow.notified()
+    )
+    .await
+    .is_err());
+    state
+        .publish(
+            "room",
+            "surface",
+            json!({"target_peer_id":"relay", "kind":"probe"}),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        relay.receiver.try_recv().map(decode),
+        Ok(ServerMessage::Message {
+            from_role: PeerRole::Surface,
+            ..
+        })
+    ));
+}
+
 impl UsageEventSink for CollectingSink {
     fn record(&self, event: UsageEvent) {
         self.events
@@ -268,7 +400,11 @@ async fn records_usage_events_for_connect_publish_and_disconnect() {
         .await
         .expect("surface should join");
     state
-        .publish("room-a", "relay-1", json!({"kind": "session_snapshot"}))
+        .publish(
+            "room-a",
+            "relay-1",
+            json!({"kind": "session_snapshot", "target_peer_id":"phone-1"}),
+        )
         .await
         .expect("publish should succeed");
     state.leave("room-a", "phone-1").await;
@@ -369,7 +505,7 @@ async fn malformed_targeted_publish_is_not_counted_as_activity() {
 }
 
 #[tokio::test]
-async fn a_refused_bare_pairing_result_is_not_counted_as_activity() {
+async fn a_refused_unaddressed_publish_is_not_counted_as_activity() {
     let sink = Arc::new(CollectingSink::default());
     let state = BrokerState::with_event_sink(sink.clone());
 
@@ -378,10 +514,6 @@ async fn a_refused_bare_pairing_result_is_not_counted_as_activity() {
         .await
         .expect("relay should join");
 
-    // A pairing result published without the `targeted_messages` wrapper is
-    // refused (it would hand the sealed device credentials to any bystander that
-    // photographed the QR), so like any other rejected frame it must not land in
-    // the usage stream.
     let result = state
         .publish(
             "room-a",
@@ -389,14 +521,13 @@ async fn a_refused_bare_pairing_result_is_not_counted_as_activity() {
             json!({
                 "kind": "encrypted_pairing_result",
                 "pairing_id": "pair-1",
-                "target_peer_id": "phone-1",
                 "envelope": {"nonce": "n", "ciphertext": "c"},
             }),
         )
         .await;
     assert!(
         result.is_err(),
-        "a bare pairing result should be rejected, got {result:?}"
+        "an unaddressed pairing result should be rejected, got {result:?}"
     );
 
     let events = sink
@@ -413,13 +544,18 @@ async fn a_refused_bare_pairing_result_is_not_counted_as_activity() {
 }
 
 #[tokio::test]
-async fn a_directed_remote_action_result_still_fans_out() {
+async fn a_directed_remote_action_result_reaches_only_its_target() {
     let state = BrokerState::default();
 
     let relay = state
         .join("room-a", "relay-1", PeerRole::Relay, None, None)
         .await
         .expect("relay should join");
+    let mut bystander = state
+        .join("room-a", "phone-other", PeerRole::Surface, None, None)
+        .await
+        .expect("bystander should join")
+        .receiver;
     let mut surface = state
         .join("room-a", "phone-1", PeerRole::Surface, None, None)
         .await
@@ -427,9 +563,7 @@ async fn a_directed_remote_action_result_still_fans_out() {
         .receiver;
     drop(relay);
 
-    // `target_peer_id` is a client-side filter hint on most payloads, not a
-    // routing directive. Refusing every payload that carries one would silently
-    // drop every remote action response and strand the surface waiting.
+    drain_presence(&mut bystander).await;
     state
         .publish(
             "room-a",
@@ -445,14 +579,125 @@ async fn a_directed_remote_action_result_still_fans_out() {
         .await
         .expect("a directed remote action result should publish");
 
-    // No drain here: the surface joined last, so nothing was queued for it before
-    // the publish (and `drain_presence` would swallow the very frame under test —
-    // its `try_recv` consumes the first non-Presence message).
     match surface.try_recv().map(decode) {
         Ok(ServerMessage::Message { payload, .. }) => {
             assert_eq!(payload["kind"], "encrypted_remote_action_result");
         }
         other => panic!("surface should receive the remote action result: {other:?}"),
+    }
+    assert!(
+        bystander.try_recv().is_err(),
+        "bystander must not receive ciphertext"
+    );
+}
+
+#[tokio::test]
+async fn routing_rejects_missing_invalid_and_conflicting_targets_before_delivery() {
+    let state = BrokerState::default();
+    let mut relay = state
+        .join("room", "relay", PeerRole::Relay, None, None)
+        .await
+        .unwrap();
+    let mut surface = state
+        .join("room", "phone", PeerRole::Surface, None, None)
+        .await
+        .unwrap();
+    drain_presence(&mut relay.receiver).await;
+    for payload in [
+        json!({"kind":"encrypted_remote_action"}),
+        json!({"kind":"future_action"}),
+        json!({"kind":"encrypted_remote_action_result", "target_peer_id":null}),
+        json!({"kind":"encrypted_remote_action_result", "target_peer_id":42}),
+        json!({"kind":"encrypted_remote_action_result", "target_peer_id":""}),
+        json!({"kind":"encrypted_remote_action_result", "target_peer_id":" "}),
+        json!({"kind":"targeted_messages", "messages":[
+            {"target_peer_id":"phone", "payload":{"kind":"encrypted_remote_action_result"}},
+            {"target_peer_id":"phone", "payload":{"target_peer_id":"other"}}
+        ]}),
+        json!({"kind":"targeted_messages", "messages":[
+            {"target_peer_id":"phone", "payload":{"kind":"encrypted_remote_action_result"}},
+            {"target_peer_id":" ", "payload":{}}
+        ]}),
+    ] {
+        assert!(
+            state
+                .publish("room", "relay", payload.clone())
+                .await
+                .is_err(),
+            "accepted invalid routing: {payload}"
+        );
+        assert!(
+            surface.receiver.try_recv().is_err(),
+            "invalid routing must not deliver even a batch prefix"
+        );
+    }
+    state
+        .publish(
+            "room",
+            "relay",
+            json!({"kind":"future_action", "target_peer_id":"offline"}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        surface.receiver.try_recv().is_err(),
+        "an offline target must never fall back to broadcasting"
+    );
+}
+
+#[tokio::test]
+async fn requests_are_delivered_only_to_the_named_relay() {
+    let state = BrokerState::default();
+    let mut relay = state
+        .join("room", "relay", PeerRole::Relay, None, None)
+        .await
+        .unwrap();
+    let mut other_relay = state
+        .join("room", "relay-other", PeerRole::Relay, None, None)
+        .await
+        .unwrap();
+    let mut bystander = state
+        .join(
+            "room",
+            "other-phone",
+            PeerRole::Surface,
+            Some("device-1".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut surface = state
+        .join(
+            "room",
+            "phone",
+            PeerRole::Surface,
+            Some("device-1".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    for receiver in [
+        &mut relay.receiver,
+        &mut other_relay.receiver,
+        &mut bystander.receiver,
+    ] {
+        drain_presence(receiver).await;
+    }
+    for kind in ["pairing_request", "encrypted_remote_action"] {
+        state.publish("room", "phone", json!({"kind":kind, "target_peer_id":"relay", "envelope":{"nonce":"n", "ciphertext":"c"}})).await.unwrap();
+        assert!(
+            matches!(relay.receiver.try_recv().map(decode), Ok(ServerMessage::Message {payload, ..}) if payload["kind"] == kind)
+        );
+        for receiver in [
+            &mut other_relay.receiver,
+            &mut bystander.receiver,
+            &mut surface.receiver,
+        ] {
+            assert!(
+                receiver.try_recv().is_err(),
+                "a bystander sharing the room or device must receive no request"
+            );
+        }
     }
 }
 
@@ -520,7 +765,17 @@ async fn message_count_limit_signals_a_slow_peer_without_blocking_a_healthy_peer
 
     for n in 0..=OUTBOUND_QUEUE_CAPACITY {
         state
-            .publish("room", "relay", json!({"n": n}))
+            .publish(
+                "room",
+                "relay",
+                json!({
+                    "kind":"targeted_messages",
+                    "messages":[
+                        {"target_peer_id":"slow", "payload":{"n":n}},
+                        {"target_peer_id":"healthy", "payload":{"n":n}}
+                    ]
+                }),
+            )
             .await
             .unwrap();
         assert!(matches!(

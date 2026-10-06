@@ -1,10 +1,15 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use tokio::sync::{mpsc, Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tracing::{info, warn};
 
 use crate::events::{UsageEvent, UsageEventKind, UsageEventSink};
-use crate::protocol::{PeerRole, PeerSummary, PresenceKind, ServerMessage};
+use crate::protocol::{
+    PeerRole, PeerSummary, PresenceKind, ServerMessage, MAX_TARGETED_MESSAGES_PER_PUBLISH,
+};
 
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 const OUTBOUND_QUEUE_BYTES: usize = 8 * 1024 * 1024;
@@ -488,101 +493,47 @@ impl BrokerState {
         )
         .with_payload_kind(outbound_payload_kind.clone());
 
-        if is_targeted_messages_payload(&payload) {
-            let targeted = parse_targeted_messages_payload(payload)?;
-            self.record_event(publish_event);
-            let target_count = targeted.messages.len();
-            let inner_kinds = targeted
-                .messages
-                .iter()
-                .map(|message| payload_kind(&message.payload).to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut delivered_count = 0usize;
-            let mut skipped_sender_count = 0usize;
-            let mut missing_target_count = 0usize;
-            let mut failed_count = 0usize;
-            for message in targeted.messages {
-                if message.target_peer_id == from_peer_id {
-                    skipped_sender_count += 1;
-                    continue;
-                }
-                let Some(handle) = room.peers.get(&message.target_peer_id) else {
-                    missing_target_count += 1;
-                    warn!(
-                        channel_id,
-                        from_peer_id,
-                        target_peer_id = %message.target_peer_id,
-                        "broker targeted publish target is not connected"
-                    );
-                    continue;
-                };
-                if handle
-                    .enqueue(ServerMessage::Message {
-                        channel_id: channel_id.to_string(),
-                        from_peer_id: from_peer_id.to_string(),
-                        from_role: sender_role,
-                        payload: message.payload,
-                    })
-                    .is_ok()
-                {
-                    delivered_count += 1;
-                } else {
-                    failed_count += 1;
-                    warn!(
-                        channel_id,
-                        from_peer_id,
-                        target_peer_id = %message.target_peer_id,
-                        "broker targeted publish queue is full or closed"
-                    );
-                }
+        if sender_role == PeerRole::Surface && is_targeted_messages_payload(&payload) {
+            return Err("surfaces must publish a single payload to a relay".to_string());
+        }
+        let targeted = parse_targeted_messages_payload(payload)?;
+        for message in &targeted.messages {
+            if room
+                .peers
+                .get(&message.target_peer_id)
+                .is_some_and(|handle| handle.role == sender_role)
+            {
+                return Err("broker payload must target the opposite peer role".to_string());
             }
-            info!(
-                channel_id,
-                from_peer_id,
-                target_count,
-                delivered_count,
-                skipped_sender_count,
-                missing_target_count,
-                failed_count,
-                inner_kinds = %inner_kinds,
-                "broker targeted publish fanout"
-            );
-            return Ok(());
         }
-
-        // Confidentiality backstop, fail closed. Checked BEFORE the publish is
-        // recorded, so a refused frame does not land in the usage stream.
-        //
-        // Deliberately keyed on the payload KIND, not on the presence of a
-        // `target_peer_id` field: across this protocol that field is a client-side
-        // filter hint on a broadcast payload (see the `[broker-filter]` logging in
-        // the remote surface), and remote action results legitimately rely on it.
-        // Only the kinds listed here must never reach a second peer.
-        if must_not_be_broadcast(&outbound_payload_kind) {
-            return Err(format!(
-                "payload `{outbound_payload_kind}` must be published inside a \
-                 `targeted_messages` wrapper; refusing to broadcast it"
-            ));
-        }
-
         self.record_event(publish_event);
-
-        let mut recipient_count = 0usize;
+        let target_count = targeted.messages.len();
+        let inner_kinds = targeted
+            .messages
+            .iter()
+            .map(|message| payload_kind(&message.payload).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let mut delivered_count = 0usize;
+        let mut missing_target_count = 0usize;
         let mut failed_count = 0usize;
-        for (peer_id, handle) in &room.peers {
-            if peer_id == from_peer_id {
+        for message in targeted.messages {
+            let Some(handle) = room.peers.get(&message.target_peer_id) else {
+                missing_target_count += 1;
+                warn!(
+                    channel_id,
+                    from_peer_id,
+                    target_peer_id = %message.target_peer_id,
+                    "broker targeted publish target is not connected"
+                );
                 continue;
-            }
-
-            recipient_count += 1;
+            };
             if handle
                 .enqueue(ServerMessage::Message {
                     channel_id: channel_id.to_string(),
                     from_peer_id: from_peer_id.to_string(),
                     from_role: sender_role,
-                    payload: payload.clone(),
+                    payload: message.payload,
                 })
                 .is_ok()
             {
@@ -592,22 +543,21 @@ impl BrokerState {
                 warn!(
                     channel_id,
                     from_peer_id,
-                    target_peer_id = %peer_id,
-                    payload_kind = %outbound_payload_kind,
-                    "broker publish queue is full or closed"
+                    target_peer_id = %message.target_peer_id,
+                    "broker targeted publish queue is full or closed"
                 );
             }
         }
         info!(
             channel_id,
             from_peer_id,
-            payload_kind = %outbound_payload_kind,
-            recipient_count,
+            target_count,
             delivered_count,
+            missing_target_count,
             failed_count,
-            "broker publish fanout"
+            inner_kinds = %inner_kinds,
+            "broker targeted publish fanout"
         );
-
         Ok(())
     }
 }
@@ -627,24 +577,6 @@ fn is_targeted_messages_payload(payload: &serde_json::Value) -> bool {
     payload.get("kind").and_then(serde_json::Value::as_str) == Some("targeted_messages")
 }
 
-/// Payload kinds that carry a secret a *bystander in the room* could open, and so
-/// may only ever be delivered through the `targeted_messages` wrapper.
-///
-/// `encrypted_pairing_result` seals the new device's `payload_secret` and refresh
-/// tokens with nothing but the `pairing_secret` printed into the QR code. Anyone
-/// who photographed that QR can decrypt it, so broadcasting the frame handed them
-/// the device's credentials. It shipped bare for a while; this refuses the bare
-/// form outright rather than re-routing it, so a regression fails loudly here.
-///
-/// This is intentionally NOT "any payload with a `target_peer_id`". That field is
-/// a client-side filter hint throughout the rest of the protocol — remote action
-/// results, session snapshots and transcript deltas are all broadcast with it and
-/// filtered by the receiving surface — so treating it as a routing directive would
-/// silently drop every remote action response.
-fn must_not_be_broadcast(payload_kind: &str) -> bool {
-    matches!(payload_kind, "encrypted_pairing_result")
-}
-
 fn payload_kind(payload: &serde_json::Value) -> &str {
     payload
         .get("kind")
@@ -655,14 +587,41 @@ fn payload_kind(payload: &serde_json::Value) -> &str {
 fn parse_targeted_messages_payload(
     payload: serde_json::Value,
 ) -> Result<TargetedMessagesPayload, String> {
-    let targeted = serde_json::from_value::<TargetedMessagesPayload>(payload)
-        .map_err(|error| format!("invalid targeted_messages payload: {error}"))?;
-    if targeted
-        .messages
-        .iter()
-        .any(|message| message.target_peer_id.is_empty())
-    {
-        return Err("invalid targeted_messages payload: target_peer_id is empty".to_string());
+    let targeted = if is_targeted_messages_payload(&payload) {
+        serde_json::from_value::<TargetedMessagesPayload>(payload)
+            .map_err(|error| format!("invalid targeted_messages payload: {error}"))?
+    } else {
+        let target_peer_id = payload
+            .get("target_peer_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "broker payload target_peer_id is required".to_string())?
+            .to_string();
+        TargetedMessagesPayload {
+            messages: vec![TargetedMessagePayload {
+                target_peer_id,
+                payload,
+            }],
+        }
+    };
+    if targeted.messages.len() > MAX_TARGETED_MESSAGES_PER_PUBLISH {
+        return Err(format!(
+            "targeted_messages exceeds {MAX_TARGETED_MESSAGES_PER_PUBLISH} messages"
+        ));
+    }
+    let mut targets = HashSet::new();
+    // Validate the whole batch before any delivery, so malformed routing cannot leak a prefix.
+    for message in &targeted.messages {
+        if message.target_peer_id.trim().is_empty() {
+            return Err("broker payload target_peer_id is empty".to_string());
+        }
+        if !targets.insert(&message.target_peer_id) {
+            return Err("targeted_messages repeats a target_peer_id".to_string());
+        }
+        if let Some(inner_target) = message.payload.get("target_peer_id") {
+            if inner_target.as_str() != Some(message.target_peer_id.as_str()) {
+                return Err("targeted message target_peer_id does not match payload".to_string());
+            }
+        }
     }
     Ok(targeted)
 }

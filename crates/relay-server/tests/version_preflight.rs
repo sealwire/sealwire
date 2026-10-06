@@ -54,7 +54,15 @@ fn outdated_relay_exits_before_opening_local_server() {
             String::from_utf8_lossy(&request[..length]).starts_with("GET /api/health "),
             "relay must check the broker before startup"
         );
-        let body = r#"{"status":"ok","service":"relay-broker","broker_auth_mode":"self_hosted","join_auth_ready":true,"minimum_relay_version":"999.0.0","broker_protocol_version":1}"#;
+        let body = serde_json::json!({
+            "status": "ok",
+            "service": "relay-broker",
+            "broker_auth_mode": "self_hosted",
+            "join_auth_ready": true,
+            "minimum_relay_version": "999.0.0",
+            "broker_protocol_version": relay_broker::protocol::BROKER_PROTOCOL_VERSION,
+        })
+        .to_string();
         write!(
             socket,
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

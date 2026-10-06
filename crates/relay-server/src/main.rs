@@ -1409,6 +1409,8 @@ fn transcript_read_error(error: TranscriptReadError) -> (StatusCode, Json<ApiErr
     let status = match code {
         ClientErrorCode::TranscriptCursorRejected => StatusCode::GONE,
         ClientErrorCode::TranscriptHistoryPending => StatusCode::SERVICE_UNAVAILABLE,
+        // Remote-action codes; a transcript read never produces them.
+        ClientErrorCode::OutcomeUnknown | ClientErrorCode::AlreadyCompleted => StatusCode::CONFLICT,
     };
     (
         status,

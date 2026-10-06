@@ -133,6 +133,9 @@ pub(super) struct BrokerWriter {
     ping_tx: mpsc::Sender<Message>,
     now_tx: mpsc::Sender<Message>,
     train_tx: mpsc::Sender<TrainFrame>,
+    /// Signs relay payloads when they leave the socket. Absent only for tests that
+    /// inspect the queue before a writer task exists.
+    content: Option<std::sync::Arc<super::RelayContentCrypto>>,
 }
 
 impl BrokerWriter {
@@ -192,6 +195,35 @@ impl BrokerWriter {
             }
         }
     }
+
+    pub(super) fn open_content_session(&self, peer_id: &str) -> Result<(), String> {
+        let content = self
+            .content
+            .as_ref()
+            .ok_or_else(|| "relay content signer is not installed".to_string())?;
+        content.open_session(peer_id);
+        Ok(())
+    }
+
+    pub(super) fn forget_content_peer(&self, peer_id: &str) {
+        if let Some(content) = &self.content {
+            content.forget_peer(peer_id);
+        }
+    }
+
+    /// The relay identity a phone's request must be signed for. `None` only for tests
+    /// with no signer, where every signed request is then refused.
+    pub(super) fn request_binding(&self) -> Option<super::request_auth::RelayRequestBinding> {
+        self.content
+            .as_ref()
+            .map(|content| content.request_binding())
+    }
+
+    pub(super) fn bind_content_epochs(&self, payload: &mut serde_json::Value) {
+        if let Some(content) = &self.content {
+            content.bind_epochs(payload);
+        }
+    }
 }
 
 /// Aborts the writer task when the session that owns it goes away.
@@ -215,13 +247,17 @@ impl Drop for BrokerWriterGuard {
 pub(super) fn spawn_broker_writer(
     sink: SplitSink<BrokerSocket, Message>,
     presence: AppState,
+    content: std::sync::Arc<super::RelayContentCrypto>,
 ) -> (BrokerWriter, oneshot::Receiver<String>, BrokerWriterGuard) {
     let (ping_tx, ping_rx) = mpsc::channel(PING_QUEUE_CAPACITY);
     let (now_tx, now_rx) = mpsc::channel(NOW_QUEUE_CAPACITY);
     let (train_tx, train_rx) = mpsc::channel(TRAIN_QUEUE_CAPACITY);
     let (error_tx, error_rx) = oneshot::channel();
+    let signer = std::sync::Arc::clone(&content);
     let task = tokio::spawn(async move {
-        if let Err(error) = drive_writer(ping_rx, now_rx, train_rx, sink, presence).await {
+        if let Err(error) =
+            drive_writer_with_signer(ping_rx, now_rx, train_rx, sink, presence, Some(signer)).await
+        {
             // Nobody left to tell is fine: it means the session already ended.
             let _ = error_tx.send(error);
         }
@@ -231,6 +267,7 @@ pub(super) fn spawn_broker_writer(
             ping_tx,
             now_tx,
             train_tx,
+            content: Some(content),
         },
         error_rx,
         BrokerWriterGuard(task),
@@ -275,19 +312,87 @@ pub(super) fn test_writer() -> (
             ping_tx,
             now_tx,
             train_tx,
+            content: None,
         },
         now_rx,
         train_rx,
     )
 }
 
+/// The relay key, room and peer every signed-request test signs against.
+#[cfg(test)]
+pub(super) const TEST_RELAY_CONTENT_SEED: [u8; 32] = [77; 32];
+
+/// `test_writer`, plus the relay identity a signed request is checked against.
+#[cfg(test)]
+pub(super) fn test_writer_with_identity() -> (
+    BrokerWriter,
+    mpsc::Receiver<Message>,
+    mpsc::Receiver<TrainFrame>,
+) {
+    let (mut writer, now_rx, train_rx) = test_writer();
+    writer.content = Some(std::sync::Arc::new(super::RelayContentCrypto::new(
+        ed25519_dalek::SigningKey::from_bytes(&TEST_RELAY_CONTENT_SEED),
+        "relay-stalled".to_string(),
+        "room-stalled".to_string(),
+    )));
+    (writer, now_rx, train_rx)
+}
+
+/// Sign a relay publish as it is written. Control frames (pings, the join proof) pass
+/// through. A publish with no signer is an error: protocol 4 must not go out unsigned.
+async fn write_broker_frame<S: FrameSink>(
+    sink: &mut S,
+    signer: Option<&super::RelayContentCrypto>,
+    message: Message,
+) -> Result<(), String> {
+    let message = match seal_outbound(signer, message)? {
+        Some(message) => message,
+        None => return Ok(()),
+    };
+    sink.send_frame(message).await
+}
+
+fn seal_outbound(
+    signer: Option<&super::RelayContentCrypto>,
+    message: Message,
+) -> Result<Option<Message>, String> {
+    let Message::Text(text) = &message else {
+        return Ok(Some(message));
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Ok(Some(message));
+    };
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("publish") {
+        return Ok(Some(message));
+    }
+    let Some(signer) = signer else {
+        return Err(
+            "relay content signer is not installed; refusing to send an unsigned payload"
+                .to_string(),
+        );
+    };
+    Ok(signer.seal_frame_text(text)?.map(Message::Text))
+}
+
 /// The scheduling policy, generic over where frames go and where presence comes from.
 pub(super) async fn drive_writer<S: FrameSink, P: SurfacePresence>(
+    ping_rx: mpsc::Receiver<Message>,
+    now_rx: mpsc::Receiver<Message>,
+    train_rx: mpsc::Receiver<TrainFrame>,
+    sink: S,
+    presence: P,
+) -> Result<(), String> {
+    drive_writer_with_signer(ping_rx, now_rx, train_rx, sink, presence, None).await
+}
+
+pub(super) async fn drive_writer_with_signer<S: FrameSink, P: SurfacePresence>(
     mut ping_rx: mpsc::Receiver<Message>,
     mut now_rx: mpsc::Receiver<Message>,
     mut train_rx: mpsc::Receiver<TrainFrame>,
     mut sink: S,
     presence: P,
+    signer: Option<std::sync::Arc<super::RelayContentCrypto>>,
 ) -> Result<(), String> {
     let mut train: VecDeque<Message> = VecDeque::new();
     let mut train_interval = Duration::ZERO;
@@ -313,7 +418,7 @@ pub(super) async fn drive_writer<S: FrameSink, P: SurfacePresence>(
         // 0. Heartbeat pings first, unconditionally. They keep the session alive and
         //    cost nothing against the broker's publish allowance.
         if let Ok(ping) = ping_rx.try_recv() {
-            sink.send_frame(ping).await?;
+            write_broker_frame(&mut sink, signer.as_deref(), ping).await?;
             continue;
         }
 
@@ -338,7 +443,7 @@ pub(super) async fn drive_writer<S: FrameSink, P: SurfacePresence>(
                 }
             }
             if let Some(chunk) = train.pop_front() {
-                sink.send_frame(chunk).await?;
+                write_broker_frame(&mut sink, signer.as_deref(), chunk).await?;
                 // Recorded after the write, matching `advance_train`: the interval is
                 // measured from when a chunk actually left, not from when it was picked up.
                 last_chunk_at = Some(Instant::now());
@@ -378,7 +483,7 @@ pub(super) async fn drive_writer<S: FrameSink, P: SurfacePresence>(
         //    during the pacing gap instead of queueing behind every chunk.
         match now_rx.try_recv() {
             Ok(message) => {
-                sink.send_frame(message).await?;
+                write_broker_frame(&mut sink, signer.as_deref(), message).await?;
                 continue;
             }
             Err(mpsc::error::TryRecvError::Disconnected) => now_closed = true,
@@ -396,12 +501,12 @@ pub(super) async fn drive_writer<S: FrameSink, P: SurfacePresence>(
                 biased;
                 received = ping_rx.recv() => {
                     if let Some(ping) = received {
-                        sink.send_frame(ping).await?;
+                        write_broker_frame(&mut sink, signer.as_deref(), ping).await?;
                     }
                 }
                 received = now_rx.recv() => match received {
                     Some(message) => {
-                                sink.send_frame(message).await?;
+                                write_broker_frame(&mut sink, signer.as_deref(), message).await?;
                     }
                     None => now_closed = true,
                 },
@@ -424,12 +529,12 @@ pub(super) async fn drive_writer<S: FrameSink, P: SurfacePresence>(
             biased;
             received = ping_rx.recv() => {
                 if let Some(ping) = received {
-                    sink.send_frame(ping).await?;
+                    write_broker_frame(&mut sink, signer.as_deref(), ping).await?;
                 }
             }
             received = now_rx.recv(), if !now_closed => match received {
                 Some(message) => {
-                    sink.send_frame(message).await?;
+                    write_broker_frame(&mut sink, signer.as_deref(), message).await?;
                 }
                 None => now_closed = true,
             },

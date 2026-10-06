@@ -54,6 +54,7 @@ impl AppState {
             broker.broker_room_id(),
             &pairing_credential.token,
             broker.relay_peer_id(),
+            &broker.content_verify_key(),
         );
         relay.push_log(
             "info",
@@ -68,6 +69,14 @@ impl AppState {
 
     pub async fn revoke_device(&self, device_id: &str) -> Result<RevokeDeviceReceipt, String> {
         let broker = BrokerConfig::from_env().await?;
+        self.revoke_device_with(broker.as_ref(), device_id).await
+    }
+
+    pub(crate) async fn revoke_device_with(
+        &self,
+        broker: Option<&BrokerConfig>,
+        device_id: &str,
+    ) -> Result<RevokeDeviceReceipt, String> {
         let mut relay = self.relay.write().await;
         let revoked = relay.revoke_paired_device(device_id, unix_now());
         if revoked {
@@ -429,16 +438,32 @@ impl AppState {
         challenge_id: &str,
         peer_id: &str,
         lease: u64,
-    ) -> Result<super::CompletedRemoteClaim, String> {
+    ) -> Result<super::RequestSessionGrant, String> {
         let mut relay = self.relay.write().await;
         ensure_surface_lease(&relay, peer_id, lease)?;
-        let claim = relay.complete_remote_claim(device_id, challenge_id, peer_id, unix_now())?;
+        relay.complete_remote_claim(device_id, challenge_id, peer_id, unix_now())?;
+        // Same critical section: a departure cannot land between the claim and the
+        // session it opens.
+        let grant = relay.open_request_session(
+            device_id,
+            peer_id,
+            crate::state::relay_clock_ms(),
+            unix_now(),
+        )?;
         relay.notify();
-        Ok(claim)
+        Ok(grant)
     }
 
     /// `lease` is the surface lease the frame carrying this was admitted under, or `None`
     /// for a caller that is not a broker frame at all.
+    #[cfg(test)]
+    pub(crate) async fn insert_paired_device_for_test(&self, device: crate::state::PairedDevice) {
+        let mut relay = self.relay.write().await;
+        relay
+            .paired_devices
+            .insert(device.device_id.clone(), device);
+    }
+
     pub(crate) async fn mark_remote_device_seen(
         &self,
         device_id: &str,

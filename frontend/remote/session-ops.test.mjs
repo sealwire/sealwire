@@ -247,7 +247,7 @@ test("applySessionSnapshot hydrates truncated transcript with full tail entries"
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -257,6 +257,7 @@ test("applySessionSnapshot hydrates truncated transcript with full tail entries"
   state.pendingActions.clear();
   seedTranscriptHydrationState(state);
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -357,9 +358,13 @@ test("applySessionSnapshot hydrates truncated transcript with full tail entries"
     sentPayloads.filter((payload) => payload.request?.type === "fetch_thread_transcript").length,
     1
   );
-  assert.equal(sentPayloads[0].request.input.thread_id, "thread-1");
-  assert.equal(sentPayloads[0].request.input.before, null);
-  assert.equal(sentPayloads[0].session_claim, undefined);
+  // By type, not position: the watch declaration is signed and sent concurrently.
+  const fetchPayload = sentPayloads.find(
+    (payload) => payload.request?.type === "fetch_thread_transcript"
+  );
+  assert.equal(fetchPayload.request.input.thread_id, "thread-1");
+  assert.equal(fetchPayload.request.input.before, null);
+  assert.equal(fetchPayload.request_sid, "session-claim-1");
 
   const resumedSnapshot = {
     ...state.transcriptHydrationBaseSnapshot,
@@ -415,7 +420,7 @@ test("resumeRemoteSession sends only thread id so relay restores per-thread sett
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
     sessionClaim: "session-claim-1",
-    sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
     socketConnected: true,
@@ -423,6 +428,7 @@ test("resumeRemoteSession sends only thread id so relay restores per-thread sett
   });
   state.pendingActions.clear();
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -508,13 +514,14 @@ test("view-only thread stays pinned across live snapshots and review completion"
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
   state.pendingActions.clear();
   seedTranscriptHydrationState(state);
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -781,7 +788,7 @@ test("remote view of an idle saved Codex thread stays composable despite stale a
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -791,6 +798,7 @@ test("remote view of an idle saved Codex thread stays composable despite stale a
   ];
   seedTranscriptHydrationState(state);
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -940,6 +948,7 @@ test("remote send clamps a foreign effort the codex model rejects", async () => 
 
   let sentEffort = "<none>";
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -1005,7 +1014,7 @@ test("stale view-only fetch cannot override a newer resume", async () => {
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -1014,6 +1023,7 @@ test("stale view-only fetch cannot override a newer resume", async () => {
 
   let resolveViewFetch;
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -1081,7 +1091,8 @@ test("stale view-only fetch cannot override a newer resume", async () => {
   ];
 
   const pendingView = viewRemoteThread("parent-view-race");
-  await new Promise((resolve) => setImmediate(resolve));
+  // Signing a request takes a few ticks; wait for the frame rather than for one tick.
+  await waitFor(() => typeof resolveViewFetch === "function").catch(() => {});
   assert.equal(typeof resolveViewFetch, "function", "view transcript fetch is pending");
 
   const resumed = await resumeRemoteSession("thread-new-live");
@@ -1129,7 +1140,7 @@ test("transcript hydration retries after an incomplete entry fetch", async () =>
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -1139,6 +1150,7 @@ test("transcript hydration retries after an incomplete entry fetch", async () =>
   state.pendingActions.clear();
   seedTranscriptHydrationState(state);
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -1217,6 +1229,7 @@ test("transcript hydration retries after an incomplete entry fetch", async () =>
 
   applySessionSnapshot(snapshot);
   await waitFor(() => state.transcriptHydrationPromise === null);
+  await nextTick();
   browser.runTimers();
   assert.equal(state.transcriptHydrationStatus, "idle");
   assert.equal(state.transcriptHydrationTailReady, false);
@@ -1254,7 +1267,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -1264,6 +1277,7 @@ test("hydrated transcript stays expanded when a later snapshot changes only the 
   state.pendingActions.clear();
   seedTranscriptHydrationState(state);
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -1418,7 +1432,7 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -1496,6 +1510,7 @@ test("remote hydration backfills a compact user-only tail until agent text is vi
   ]);
 
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -1618,7 +1633,7 @@ test("reapplying the same compact snapshot while hydration is loading does not r
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -1628,6 +1643,7 @@ test("reapplying the same compact snapshot while hydration is loading does not r
   state.pendingActions.clear();
   seedTranscriptHydrationState(state);
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -1740,7 +1756,7 @@ test("hydration stops automatically once the tail entries are complete", async (
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -1750,6 +1766,7 @@ test("hydration stops automatically once the tail entries are complete", async (
   state.pendingActions.clear();
   seedTranscriptHydrationState(state);
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -1917,7 +1934,7 @@ test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages",
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -1929,6 +1946,7 @@ test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages",
 
   let fetchCount = 0;
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -2036,7 +2054,7 @@ test("maybeLoadOlderTranscriptHistory rebuilds the window when the relay rejects
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -2061,6 +2079,7 @@ test("maybeLoadOlderTranscriptHistory rebuilds the window when the relay rejects
     prev_cursor: prevCursor,
   });
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -2131,7 +2150,7 @@ test("maybeLoadOlderTranscriptHistory asks again, unprompted, while the relay is
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -2156,6 +2175,7 @@ test("maybeLoadOlderTranscriptHistory asks again, unprompted, while the relay is
     prev_cursor: prevCursor,
   });
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -2234,7 +2254,7 @@ test("startRemoteSession re-enables the start button when the relay does not rep
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -2251,12 +2271,14 @@ test("startRemoteSession re-enables the start button when the relay does not rep
     sandbox: "workspace-write",
   };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {},
   };
 
   const pending = startRemoteSession(sessionDraft);
 
+  await nextTick();
   browser.runTimers();
   const result = await pending;
   assert.equal(result.ok, false);
@@ -2284,7 +2306,7 @@ test("startRemoteSession resolves with the relay's reason when the relay refuses
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -2293,6 +2315,7 @@ test("startRemoteSession resolves with the relay's reason when the relay refuses
   const reason =
     "workspace /tmp/demo is outside this relay's allowed roots; choose a directory under /Users/luchi/git";
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(raw) {
       const frame = decodeActionFrame(raw);
@@ -2345,7 +2368,7 @@ test("startRemoteSession carries the chosen project so a phone can file a sessio
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -2353,6 +2376,7 @@ test("startRemoteSession carries the chosen project so a phone can file a sessio
 
   const sent = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(raw) {
       sent.push(decodeActionFrame(raw));
@@ -2368,6 +2392,7 @@ test("startRemoteSession carries the chosen project so a phone can file a sessio
     projectId: "proj_00ff",
     sandbox: "workspace-write",
   });
+  await nextTick();
   browser.runTimers();
   await pending;
 
@@ -2397,7 +2422,7 @@ test("Pi remote Full access does not submit a hidden workspace sandbox", async (
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -2405,6 +2430,7 @@ test("Pi remote Full access does not submit a hidden workspace sandbox", async (
 
   const sent = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(raw) {
       sent.push(decodeActionFrame(raw));
@@ -2421,6 +2447,7 @@ test("Pi remote Full access does not submit a hidden workspace sandbox", async (
     projectId: "proj_00ff",
     sandbox: "workspace-write",
   });
+  await nextTick();
   browser.runTimers();
   await pending;
 
@@ -2453,7 +2480,7 @@ test("an unfiled remote session sends a null project rather than omitting it", a
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -2461,6 +2488,7 @@ test("an unfiled remote session sends a null project rather than omitting it", a
 
   const sent = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(raw) {
       sent.push(decodeActionFrame(raw));
@@ -2476,6 +2504,7 @@ test("an unfiled remote session sends a null project rather than omitting it", a
     projectId: null,
     sandbox: "workspace-write",
   });
+  await nextTick();
   browser.runTimers();
   await pending;
 
@@ -2505,7 +2534,7 @@ test("refreshRemoteThreads clears loading state and records an error when the re
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -2515,12 +2544,14 @@ test("refreshRemoteThreads clears loading state and records an error when the re
   state.pendingActions.clear();
   state.threads = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {},
   };
 
   const pending = refreshRemoteThreads("unit-test refresh").catch((error) => error);
 
+  await nextTick();
   browser.runTimers();
   const result = await pending;
 
@@ -2579,6 +2610,7 @@ test("remote thread list auto-refreshes on a poll without a manual refresh", asy
   ];
   const listThreadsSent = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText, "payload-secret-poll");
@@ -2657,6 +2689,7 @@ test("cancelRemoteThreadsPoll stops the recurring remote thread poll", async () 
 
   const sentTypes = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       sentTypes.push(decodeActionFrame(frameText).payload?.request?.type || null);
@@ -2670,6 +2703,7 @@ test("cancelRemoteThreadsPoll stops the recurring remote thread poll", async () 
   assert.equal(state.remoteThreadsPollTimer, null, "cancel should clear the timer");
 
   // Draining timers must not fire a poll after cancellation.
+  await nextTick();
   browser.runTimers();
   assert.equal(
     sentTypes.filter((type) => type === "list_threads").length,
@@ -2712,6 +2746,7 @@ test("the remote thread poll idles without a network round trip while disconnect
 
   const sentTypes = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       sentTypes.push(decodeActionFrame(frameText).payload?.request?.type || null);
@@ -2762,6 +2797,7 @@ test("sendMessage clears pending state when the relay does not reply", async () 
   });
   state.pendingActions.clear();
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {
       throw new Error("socket write failed");
@@ -2803,6 +2839,7 @@ test("an ordinary send supersedes the NOT SENT line on that thread", async () =>
   state.session = { active_thread_id: "thread-1", available_models: [] };
   state.composerHeld = { "thread-1": "/delegate needs something to say", "thread-2": "keep me" };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {
       throw new Error("socket write failed");
@@ -2857,6 +2894,7 @@ test("a failed remote stop records the reason for the composer, not just the log
     provider: "cursor",
   };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {
       throw new Error("this thread belongs to a running task team; stop the run instead");
@@ -2905,6 +2943,7 @@ test("a failed remote settings change records the reason for the composer, not j
     model: "gpt-5.6-sol",
   };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {
       throw new Error("cannot change session settings while a turn is in progress");
@@ -2957,6 +2996,7 @@ test("a /goal refused by the relay puts its reason on the phone's composer", asy
   state.composerErrors = {};
   state.session = { active_thread_id: "thread-1", available_models: [] };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {
       throw new Error("that thread is busy with a turn");
@@ -3014,6 +3054,7 @@ test("a /goal that works clears the line its own earlier attempt left", async ()
   };
   state.session = { active_thread_id: "thread-1", available_models: [] };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -3139,6 +3180,7 @@ test("a refused Stop from the goal card lands on the card, not behind the modal"
   state.goalErrors = {};
   state.session = { active_thread_id: "thread-1", available_models: [] };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {
       throw new Error("that thread is busy with a turn");
@@ -3213,6 +3255,7 @@ test("a goal card's button goes out as the claimed goal_card action, and its ref
     "this card is out of date — the goal has moved on since; act on it from the Agents panel";
   const sent = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -3249,7 +3292,7 @@ test("a goal card's button goes out as the claimed goal_card action, and its ref
   assert.equal(request.request.seq, 7);
   assert.equal(request.request.action, "keep_going");
   assert.equal(request.request.objective, undefined, "no words travel from this device's copy");
-  assert.equal(request.session_claim, "claim-token-1", "it is claim-gated like set_goal");
+  assert.equal(request.request_sid, "claim-token-1", "it is signed under the claim like set_goal");
   assert.match(goalErrorFrom(state.goalErrors, "thread-1"), /out of date/);
   assert.equal(state.composerErrors?.["thread-1"], undefined);
 });
@@ -3284,6 +3327,7 @@ test("a refused delegate says why on the composer, not only in the log", async (
   state.composerErrors = {};
   state.session = { active_thread_id: "thread-1", available_models: [] };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {
       throw new Error("that thread is busy with a turn");
@@ -3331,7 +3375,7 @@ test("Stop the surface stopped itself retires the previous red line", async () =
   state.composerHeld = {};
   state.composerErrors = { "thread-1": "that thread is busy with a turn", "thread-2": "keep me" };
   state.session = { active_thread_id: "thread-1", active_turn_id: null, available_models: [] };
-  state.socket = { readyState: 1, send() {} };
+  state.socket = { relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId, readyState: 1, send() {} };
 
   assert.equal(await stopActiveTurn(), false);
   assert.match(threadError(state.composerHeld, "thread-1"), /no running .+ turn to stop/i);
@@ -3372,6 +3416,7 @@ test("Stop with no turn id is held, not reported as a failure", async () => {
   state.composerHeld = {};
   state.session = { active_thread_id: "thread-1", active_turn_id: null, available_models: [] };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {
       throw new Error("Stop must not be posted when the surface knows of no turn");
@@ -3420,6 +3465,7 @@ test("a successful remote settings update clears only that thread's composer err
     model: "gpt-5.6-sol",
   };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -3487,6 +3533,7 @@ test("a failed remote send records the reason for the composer, not just the log
   state.composerErrors = {};
   state.session = { active_thread_id: "thread-1", available_models: [], model: "gpt-5.5" };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send() {
       throw new Error("socket write failed");
@@ -3560,6 +3607,7 @@ test("a workspace repair the relay accepted is reported as success, not as a scr
 
   const dispatched = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -4746,7 +4794,7 @@ test("applyTranscriptDelta gap repair fetches the authoritative tail and converg
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -4756,6 +4804,7 @@ test("applyTranscriptDelta gap repair fetches the authoritative tail and converg
   window.__transcriptGapRepairCount = 0;
 
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -4860,7 +4909,7 @@ test("a gap repair page read before a newer change to a row does not undo that c
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -4886,6 +4935,7 @@ test("a gap repair page read before a newer change to a row does not undo that c
   });
   let fetches = 0;
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -4969,7 +5019,7 @@ test("a gap repair for a thread other than the window's leaves the window's row 
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -4980,6 +5030,7 @@ test("a gap repair for a thread other than the window's leaves the window's row 
 
   let fetches = 0;
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -5063,7 +5114,7 @@ test("gap repair updates the live session while preserving a view-only thread", 
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -5109,6 +5160,7 @@ test("gap repair updates the live session while preserving a view-only thread", 
   });
 
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -5172,7 +5224,7 @@ async function cachedRemoteTabFixture() {
   ops.clearSessionRuntime();
   seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
   remoteQueryClient.clear();
-  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload);
+  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload, state);
   state.socket = pages.socket;
   const snapshot = {
     active_thread_id: "thread-a", active_turn_id: null, current_cwd: "/tmp/a", current_status: "idle",
@@ -5305,13 +5357,14 @@ test("a relay restart discards the previous remote tab's cached messages", async
 });
 
 // Answers each transcript page request only when the test says so, with the page it picks.
-function createHeldTranscriptPageSocket(handleRemoteBrokerPayload) {
+function createHeldTranscriptPageSocket(handleRemoteBrokerPayload, state) {
   const held = [];
   return {
     get pending() {
       return held.length;
     },
     socket: {
+      relayPeerId: state.remoteAuth.relayPeerId,
       readyState: 1,
       send(frameText) {
         const frame = decodeActionFrame(frameText);
@@ -5358,7 +5411,7 @@ test("a viewed thread's page read before a newer repair does not undo that repai
   clearSessionRuntime();
   seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
   remoteQueryClient.clear();
-  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload);
+  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload, state);
   state.socket = pages.socket;
   const row = (status, text) => ({
     item_id: "b-1",
@@ -5453,9 +5506,10 @@ test("a viewed thread's page sent before a confirmed model change does not bring
     transcript_revision: 1,
     transcript_truncated: false,
   };
-  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload);
+  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload, state);
   const holdPages = pages.socket.send;
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -5538,9 +5592,10 @@ async function setUpRemoteSettingsRace() {
     transcript_revision: 1,
     transcript_truncated: false,
   };
-  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload);
+  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload, state);
   const holdPages = pages.socket.send;
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -5677,7 +5732,7 @@ test("a background live thread's repair read before a newer snapshot does not un
   assert.equal(await viewRemoteThread("thread-a"), true);
   applySessionSnapshot(liveB(5, edit("rolled_back", "in_progress")));
 
-  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload);
+  const pages = createHeldTranscriptPageSocket(handleRemoteBrokerPayload, state);
   state.socket = pages.socket;
   applyTranscriptDelta({
     thread_id: "thread-b",
@@ -5736,7 +5791,7 @@ test("applyTranscriptDelta gap repair retries after a transient fetch failure an
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -5746,6 +5801,7 @@ test("applyTranscriptDelta gap repair retries after a transient fetch failure an
   window.__transcriptGapRepairCount = 0;
 
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -5855,7 +5911,7 @@ test("applyTranscriptDelta gap repair honors a higher-revision gap that arrives 
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -5873,6 +5929,7 @@ test("applyTranscriptDelta gap repair honors a higher-revision gap that arrives 
 
   let injectedHigherGap = false;
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -5991,7 +6048,7 @@ test("applyTranscriptDelta gap repair retries when fetch returns an incomplete (
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -6001,6 +6058,7 @@ test("applyTranscriptDelta gap repair retries when fetch returns an incomplete (
   window.__transcriptGapRepairCount = 0;
 
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -6493,6 +6551,7 @@ test("sendHeartbeat dispatches a heartbeat when the current device holds control
     active_controller_device_id: "device-1",
   };
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -6501,7 +6560,8 @@ test("sendHeartbeat dispatches a heartbeat when the current device holds control
   };
 
   const pending = sendHeartbeat();
-  await nextTick();
+  // Signing a request takes a few ticks; wait for the frame rather than for one tick.
+  await waitFor(() => sentPayloads.length >= 1).catch(() => {});
 
   assert.equal(sentPayloads.length, 1);
   assert.equal(sentPayloads[0].request.type, "heartbeat");
@@ -6545,7 +6605,7 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, {
@@ -6555,6 +6615,7 @@ test("applySessionSnapshot re-hydrates a long final message added after the firs
   state.pendingActions.clear();
   seedTranscriptHydrationState(state);
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -6860,7 +6921,7 @@ test("a delta for the view-only thread updates the projection, not the live sess
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -6963,7 +7024,7 @@ test("a delta for a thread that is neither live nor pinned is still ignored", as
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -7034,7 +7095,7 @@ function seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth) {
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -7046,7 +7107,7 @@ function seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth) {
   ];
 }
 
-function createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload) {
+function createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload, state) {
   const pending = [];
   let fetchCount = 0;
 
@@ -7055,6 +7116,7 @@ function createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload) {
       return fetchCount;
     },
     socket: {
+      relayPeerId: state.remoteAuth.relayPeerId,
       readyState: 1,
       send(frameText) {
         const frame = decodeActionFrame(frameText);
@@ -7099,12 +7161,15 @@ function createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload) {
         });
       },
     },
-    completeNext() {
+    // Waits for the frame: a request is signed before it is sent, which takes a few ticks.
+    async completeNext() {
+      await waitFor(() => pending.length > 0).catch(() => {});
       const resolve = pending.shift();
       assert.ok(resolve, "expected a pending viewed-thread transcript fetch");
       resolve();
     },
-    failNext() {
+    async failNext() {
+      await waitFor(() => pending.length > 0).catch(() => {});
       const resolve = pending.shift();
       assert.ok(resolve, "expected a pending viewed-thread transcript fetch");
       resolve(true);
@@ -7122,7 +7187,7 @@ test("maybeRefreshRemoteViewedThread triggers viewRemoteThread when background t
 
   clearSessionRuntime();
   seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
-  const transcriptFetch = createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload);
+  const transcriptFetch = createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload, state);
   state.socket = transcriptFetch.socket;
   remoteQueryClient.clear();
 
@@ -7140,7 +7205,7 @@ test("maybeRefreshRemoteViewedThread triggers viewRemoteThread when background t
 
   const initialView = viewRemoteThread("thread-b");
   await nextTick();
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   assert.equal(await initialView, true);
   await nextTick();
   assert.equal(transcriptFetch.fetchCount, 1, "initial view must fetch the background thread");
@@ -7178,7 +7243,7 @@ test("maybeRefreshRemoteViewedThread triggers viewRemoteThread when background t
     "maybeRefreshRemoteViewedThread must refetch when the viewed background thread stops working"
   );
 
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   await nextTick();
   await nextTick();
   assert.equal(
@@ -7202,7 +7267,7 @@ async function viewStreamingThreadB() {
 
   clearSessionRuntime();
   seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
-  const transcriptFetch = createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload);
+  const transcriptFetch = createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload, state);
   state.socket = transcriptFetch.socket;
   remoteQueryClient.clear();
 
@@ -7224,7 +7289,7 @@ async function viewStreamingThreadB() {
 
   const initialView = viewRemoteThread("thread-b");
   await nextTick();
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   assert.equal(await initialView, true);
 
   return {
@@ -7249,7 +7314,7 @@ test("an apparent terminal refresh of the old view cannot cancel a switch to ano
   applyActivity(["thread-c"]);
   assert.equal(transcriptFetch.fetchCount, 2, "the old view must not start a competing refresh");
 
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   assert.equal(await targetView, true, "the user's newer navigation must win");
   assert.equal(state.session.active_thread_id, "thread-c");
 
@@ -7264,11 +7329,11 @@ test("a terminal refresh held back by a switch still runs if that switch fails",
   applyActivity(["thread-c"]);
   assert.equal(transcriptFetch.fetchCount, 2);
 
-  transcriptFetch.failNext();
+  await transcriptFetch.failNext();
   assert.equal(await targetView, false);
   await waitFor(() => transcriptFetch.fetchCount >= 3);
   assert.equal(transcriptFetch.fetchCount, 3, "thread-b is still pinned and owes its terminal refresh");
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   await nextTick();
   assert.equal(state.session.active_thread_id, "thread-b");
 
@@ -7281,19 +7346,19 @@ test("the refresh owed after a failed switch cannot override a newer tap", async
   const failedView = viewRemoteThread("thread-c");
   await waitFor(() => transcriptFetch.fetchCount >= 2);
   applyActivity(["thread-d"]);
-  transcriptFetch.failNext();
+  await transcriptFetch.failNext();
   assert.equal(await failedView, false);
   await waitFor(() => transcriptFetch.fetchCount >= 3);
 
   const newerView = viewRemoteThread("thread-d");
   await waitFor(() => transcriptFetch.fetchCount >= 4);
   // The owed thread-b refresh answers while thread-d is still in flight.
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   await nextTick();
   await nextTick();
   assert.equal(transcriptFetch.fetchCount, 4, "the stale refresh must not start another one");
 
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   assert.equal(await newerView, true, "the newer tap must win");
   assert.equal(state.session.active_thread_id, "thread-d");
 
@@ -7312,11 +7377,11 @@ test("a view a newer navigation replaced resolves null, whether its fetch answer
   const newest = viewRemoteThread("thread-e");
   await waitFor(() => transcriptFetch.fetchCount >= 4);
 
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   assert.equal(await answered, null);
-  transcriptFetch.failNext();
+  await transcriptFetch.failNext();
   assert.equal(await failed, null);
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   assert.equal(await newest, true);
 
   cleanup();
@@ -7331,13 +7396,13 @@ test("a superseded switch does not release the held-back refresh over the newer 
   const newerView = viewRemoteThread("thread-d");
   await waitFor(() => transcriptFetch.fetchCount >= 3);
 
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   assert.equal(await supersededView, null);
   await nextTick();
   await nextTick();
   assert.equal(transcriptFetch.fetchCount, 3, "thread-b's refresh is still owed, but not while thread-d loads");
 
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   assert.equal(await newerView, true, "the newer tap must win");
   assert.equal(state.session.active_thread_id, "thread-d");
 
@@ -7354,7 +7419,7 @@ test("viewOnlyWasWorking seeds from the viewed thread thread_activity, not the l
 
   clearSessionRuntime();
   seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
-  const transcriptFetch = createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload);
+  const transcriptFetch = createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload, state);
   state.socket = transcriptFetch.socket;
   remoteQueryClient.clear();
 
@@ -7373,7 +7438,7 @@ test("viewOnlyWasWorking seeds from the viewed thread thread_activity, not the l
 
   const initialView = viewRemoteThread("thread-b");
   await nextTick();
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   assert.equal(await initialView, true);
   await nextTick();
 
@@ -7416,7 +7481,7 @@ test("a delta during an in-flight terminal viewRemoteThread preserves wasWorking
 
   clearSessionRuntime();
   seedRemoteViewedTerminalRefreshFixture(state, saveRemoteAuth);
-  const transcriptFetch = createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload);
+  const transcriptFetch = createDeferredTranscriptFetchSocket(handleRemoteBrokerPayload, state);
   state.socket = transcriptFetch.socket;
   remoteQueryClient.clear();
 
@@ -7434,7 +7499,7 @@ test("a delta during an in-flight terminal viewRemoteThread preserves wasWorking
 
   const initialView = viewRemoteThread("thread-b");
   await nextTick();
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   assert.equal(await initialView, true);
   await nextTick();
   assert.equal(transcriptFetch.fetchCount, 1);
@@ -7464,7 +7529,8 @@ test("a delta during an in-flight terminal viewRemoteThread preserves wasWorking
     transcript_revision: 3,
     transcript_truncated: false,
   });
-  await nextTick();
+  // Signing a request takes a few ticks; wait for the frame rather than for one tick.
+  await waitFor(() => transcriptFetch.fetchCount >= 2).catch(() => {});
   assert.equal(transcriptFetch.fetchCount, 2, "working→idle must start a terminal refresh");
 
   applyTranscriptDelta({
@@ -7478,7 +7544,7 @@ test("a delta during an in-flight terminal viewRemoteThread preserves wasWorking
     text_offset: 0,
   });
 
-  transcriptFetch.completeNext();
+  await transcriptFetch.completeNext();
   await nextTick();
 
   applySessionSnapshot({
@@ -7532,7 +7598,7 @@ test("applying a snapshot does not force a layout just to build a debug line", a
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -7601,7 +7667,7 @@ test("verbose broker logging restores the snapshot scroll trace", async () => {
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -7803,7 +7869,7 @@ test("repairActiveTranscriptTail resyncs the loaded window to the repaired text 
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -7833,6 +7899,7 @@ test("repairActiveTranscriptTail resyncs the loaded window to the repaired text 
   state.transcriptHydrationOrder = ["item-1"];
 
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -7932,7 +7999,7 @@ test("repairActiveTranscriptTail's order/never-shorten/positionless invariants r
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-order-flip" });
@@ -7971,6 +8038,7 @@ test("repairActiveTranscriptTail's order/never-shorten/positionless invariants r
   state.transcriptHydrationOrder = ["item-before", "item-shared", "item-after"];
 
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -8057,7 +8125,7 @@ test("repairActiveTranscriptTail still invalidates a window entry the repair pag
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-partial" });
@@ -8085,6 +8153,7 @@ test("repairActiveTranscriptTail still invalidates a window entry the repair pag
   state.transcriptHydrationOrder = ["item-older", "item-1"];
 
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -8175,7 +8244,7 @@ test("a delta immediately after a tail repair is checked against the REPAIRED te
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-2" });
@@ -8201,6 +8270,7 @@ test("a delta immediately after a tail repair is checked against the REPAIRED te
   state.transcriptHydrationOrder = ["item-1"];
 
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -8873,7 +8943,7 @@ test("viewRemoteThread settles the outgoing live window before switching hydrati
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -8906,6 +8976,7 @@ test("viewRemoteThread settles the outgoing live window before switching hydrati
   assert.equal(state.realSession.transcript[0].text, "Hello", "still deferred before the pin");
 
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -9015,7 +9086,7 @@ test("a run change releases the view-only pin, refetches once, and re-pins under
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
@@ -9034,6 +9105,7 @@ test("a run change releases the view-only pin, refetches once, and re-pins under
   let generationForPages = "gen-a";
   const transcriptFetches = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -9135,8 +9207,8 @@ for (const [fromGeneration, toGeneration, label] of [
       deviceRefreshToken: null,
       deviceJoinTicket: "device-ws-token",
       deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-      sessionClaim: null,
-      sessionClaimExpiresAt: null,
+      sessionClaim: "session-claim-1",
+      sessionClaimExpiresAt: Math.floor(Date.now() / 1000) + 300,
     });
     seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
     state.pendingActions.clear();
@@ -9154,6 +9226,7 @@ for (const [fromGeneration, toGeneration, label] of [
     let generationForPages = fromGeneration;
     const transcriptFetches = [];
     state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
       readyState: 1,
       send(frameText) {
         const frame = decodeActionFrame(frameText);
@@ -9226,7 +9299,7 @@ test("a relay that left makes the phone declare its watch set again", async () =
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-redeclare" });
@@ -9236,6 +9309,7 @@ test("a relay that left makes the phone declare its watch set again", async () =
 
   const declared = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -9289,7 +9363,7 @@ test("a resync for the pinned thread re-reads it only when the pin is behind", a
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-resync-gate" });
@@ -9309,6 +9383,7 @@ test("a resync for the pinned thread re-reads it only when the pin is behind", a
 
   const fetched = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -9388,7 +9463,7 @@ test("viewing a background thread declares the watch without waiting for a snaps
     deviceRefreshToken: null,
     deviceJoinTicket: "device-ws-token",
     deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
-    sessionClaim: null,
+    sessionClaim: "session-claim-1",
     sessionClaimExpiresAt: null,
   });
   seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-view-declares" });
@@ -9407,6 +9482,7 @@ test("viewing a background thread declares the watch without waiting for a snaps
 
   const declared = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
@@ -9467,16 +9543,15 @@ test("the runtime registers the relay-presence handler with the broker client", 
   );
 });
 
-// A pairing request is sent once and is not a pending action, so nothing resends it. If
-// the relay's own broker session ends between reading that frame and acting on it — which
-// it now can, since the router is torn down with the session — the phone sits on "waiting
-// for approval" forever while the laptop was never asked anything.
+// A pairing request is sent once and is not a pending action. A relay that drops and
+// comes back must prove this socket again; that proof is what asks the laptop once more.
+// Without it the phone sits on "waiting for approval" while the laptop was never asked.
 test("a relay coming back re-sends a pairing request that was still in flight", async () => {
   activeBrowser = installBrowserStubs();
 
   const { state } = await import("./state.js");
   const { seedPairingState } = await import("./test-support/state-fixtures.mjs");
-  const { handleRelayPresence } = await import("./remote-runtime.js");
+  const { handleRelayContentReady } = await import("./remote-runtime.js");
 
   state.remoteAuth = null;
   seedPairingState(state, {
@@ -9486,6 +9561,7 @@ test("a relay coming back re-sends a pairing request that was still in flight", 
       broker_url: "wss://broker.example.test",
       broker_channel_id: "pairing-room",
       relay_peer_id: "relay-1",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) + 300,
     },
   });
@@ -9493,13 +9569,14 @@ test("a relay coming back re-sends a pairing request that was still in flight", 
 
   const sent = [];
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       sent.push(JSON.parse(frameText)?.payload?.kind);
     },
   };
 
-  handleRelayPresence("joined", { role: "relay", peer_id: "relay-1" });
+  handleRelayContentReady({ kind: "pairing" });
   // Polled rather than counted in ticks: the request is several awaits deep (device
   // identity, signing), and a fixed number of turns is a coin flip under a loaded run.
   for (let attempt = 0; attempt < 200 && !sent.includes("pairing_request"); attempt += 1) {
@@ -9558,6 +9635,7 @@ test("a skill-only send reaches the relay with the skill's name and path beside 
 
   let request = null;
   state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);

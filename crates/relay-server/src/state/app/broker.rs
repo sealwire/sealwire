@@ -63,6 +63,7 @@ impl AppState {
         relay.surface_peer_is_online(peer_id)
     }
 
+    #[cfg(test)]
     pub(crate) async fn completed_remote_action(
         &self,
         device_id: &str,
@@ -72,6 +73,7 @@ impl AppState {
         relay.completed_remote_action(device_id, action_id)
     }
 
+    #[cfg(test)]
     pub(crate) async fn remote_action_waiter_is_current(
         &self,
         device_id: &str,
@@ -141,5 +143,75 @@ impl AppState {
     ) {
         let mut relay = self.relay.write().await;
         relay.store_remote_action_result(device_id, action_id, result, unix_now());
+    }
+
+    pub(crate) async fn admit_signed_request(
+        &self,
+        facts: &super::SignedRequestFacts<'_>,
+        lease: u64,
+    ) -> super::RequestAdmission {
+        let mut relay = self.relay.write().await;
+        if !relay.surface_lease_is_current(facts.peer_id, lease) {
+            return super::RequestAdmission::Duplicate;
+        }
+        let now = unix_now();
+        let admission = relay.admit_signed_request(facts, crate::state::relay_clock_ms(), now);
+        if matches!(
+            admission,
+            super::RequestAdmission::Run | super::RequestAdmission::Execute(_)
+        ) {
+            // Keep presence updates inside acceptance, before preparation can wait.
+            let _ = relay.mark_paired_device_seen(facts.device_id, facts.peer_id, Some(lease), now);
+        }
+        admission
+    }
+
+    pub(crate) async fn complete_remote_write(
+        &self,
+        device_id: &str,
+        action_id: &str,
+        token: &crate::state::ReservationToken,
+        result: CachedRemoteActionResult,
+    ) {
+        let mut relay = self.relay.write().await;
+        let (now_secs, now_ms) = (unix_now(), crate::state::relay_clock_ms());
+        relay.complete_remote_write(device_id, action_id, token, result, now_secs, now_ms);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn remote_write_waiter_is_current(
+        &self,
+        device_id: &str,
+        action_id: &str,
+        ticket: u64,
+    ) -> bool {
+        self.relay
+            .read()
+            .await
+            .remote_write_waiter_is_current(device_id, action_id, ticket)
+    }
+
+    pub(crate) async fn remote_write_wait_outcome(
+        &self,
+        device_id: &str,
+        action_id: &str,
+        ticket: u64,
+    ) -> super::WaitOutcome {
+        self.relay
+            .read()
+            .await
+            .remote_write_wait_outcome(device_id, action_id, ticket)
+    }
+
+    pub(crate) async fn remote_action_wait_outcome(
+        &self,
+        device_id: &str,
+        action_id: &str,
+        ticket: u64,
+    ) -> super::WaitOutcome {
+        self.relay
+            .read()
+            .await
+            .remote_action_wait_outcome(device_id, action_id, ticket)
     }
 }

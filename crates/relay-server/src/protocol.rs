@@ -51,6 +51,11 @@ pub enum ClientErrorCode {
     /// The relay read provider history on and found nothing yet; ask again with the same
     /// cursor, which resumes where that read stopped.
     TranscriptHistoryPending,
+    /// The relay cannot say whether a write ran (another boot, or past its retry
+    /// window). Not retried automatically; the person checks the session.
+    OutcomeUnknown,
+    /// The write ran; its reply is no longer kept. Refresh instead of retrying.
+    AlreadyCompleted,
 }
 
 impl ClientErrorCode {
@@ -58,6 +63,8 @@ impl ClientErrorCode {
         match self {
             Self::TranscriptCursorRejected => "transcript_cursor_rejected",
             Self::TranscriptHistoryPending => "transcript_history_pending",
+            Self::OutcomeUnknown => "outcome_unknown",
+            Self::AlreadyCompleted => "already_completed",
         }
     }
 }

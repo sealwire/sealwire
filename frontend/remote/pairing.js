@@ -285,6 +285,7 @@ export async function handleEncryptedPairingResult(payload) {
     brokerUrl: ticket.broker_url,
     brokerChannelId: ticket.broker_channel_id,
     relayPeerId: ticket.relay_peer_id,
+    relayVerifyKey: ticket.relay_verify_key,
     securityMode: ticket.security_mode,
     deviceId: device.device_id,
     deviceLabel: device.label,

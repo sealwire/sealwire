@@ -1,11 +1,56 @@
-import test from "node:test";
+import nodeTest from "node:test";
 import assert from "node:assert/strict";
+
+// This file's broker client is one module-level socket. Node runs tests in a
+// file concurrently, so a later test's configureBrokerClient would steal the
+// hooks of one that is still in flight.
+let brokerClientTestChain = Promise.resolve();
+function test(name, fn) {
+  return nodeTest(name, async (t) => {
+    const previous = brokerClientTestChain;
+    let release;
+    brokerClientTestChain = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      await fn(t);
+    } finally {
+      release();
+    }
+  });
+}
 import { webcrypto } from "node:crypto";
+import nacl from "tweetnacl";
+import { signRelayContent } from "./crypto.js";
+import { bytesToBase64 } from "./encoding.js";
 import {
   seedPairingState,
   seedRemoteAuth,
   seedSocketState,
 } from "./test-support/state-fixtures.mjs";
+
+const CONTENT_SEED = Uint8Array.from({ length: 32 }, () => 7);
+
+function contentVerifyKey() {
+  return bytesToBase64(nacl.sign.keyPair.fromSeed(CONTENT_SEED).publicKey);
+}
+
+function signedRelayPayload(payload, { fromPeerId, brokerRoomId, session, nonce }) {
+  const signature = signRelayContent(CONTENT_SEED, {
+    payload,
+    fromPeerId,
+    brokerRoomId,
+    session,
+    nonce,
+  });
+  return {
+    ...payload,
+    relay_content_session: session,
+    relay_content_nonce: nonce,
+    relay_content_signature: signature,
+  };
+}
 
 const REMOTE_STATE_STORAGE_KEY = "agent-relay.remote-state";
 
@@ -55,7 +100,10 @@ class FakeWebSocket {
     this.readyState = FakeWebSocket.CLOSED;
   }
 
-  send() {}
+  send(data) {
+    this.sent = this.sent || [];
+    this.sent.push(data);
+  }
 
   emit(type, event = {}) {
     if (type === "open") {
@@ -1099,6 +1147,7 @@ test("old pairing links without pairing_join_ticket are rejected with a clear er
     pairing_id: "pair-z55kwjolad",
     pairing_secret: "PdNAR62HZGWivFxf7Wo25rlGFxWH8PSD",
     relay_peer_id: "local-relay",
+    relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
     security_mode: "private",
     version: 1,
   };
@@ -1107,6 +1156,27 @@ test("old pairing links without pairing_join_ticket are rejected with a clear er
   assert.throws(
     () => parsePairingPayload(raw),
     /pairing link is outdated and missing pairing_join_ticket/
+  );
+});
+
+test("a pairing link without the relay identity key must be paired again", async () => {
+  const { parsePairingPayload } = await import("./crypto.js");
+  const payload = {
+    broker_channel_id: "dev-room",
+    broker_url: "ws://192.168.1.105:8788",
+    expires_at: 1774731071,
+    pairing_id: "pair-z55kwjolad",
+    pairing_join_ticket: "join-ticket",
+    pairing_secret: "PdNAR62HZGWivFxf7Wo25rlGFxWH8PSD",
+    relay_peer_id: "local-relay",
+    security_mode: "private",
+    version: 1,
+  };
+  const raw = Buffer.from(JSON.stringify(payload)).toString("base64url");
+
+  assert.throws(
+    () => parsePairingPayload(raw),
+    /missing the relay identity key/
   );
 });
 
@@ -1131,6 +1201,7 @@ test("expired pairing join ticket surfaces a clear QR renewal message", async ()
       broker_channel_id: "dev-room",
       pairing_id: "pair-expired-ticket",
       pairing_join_ticket: "expired-join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) - 10,
     },
   });
@@ -1408,6 +1479,7 @@ test("a superseded pairing ticket is terminal: no reconnect is scheduled and the
       broker_channel_id: "dev-room",
       pairing_id: "pair-superseded",
       pairing_join_ticket: "shared-join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) + 120,
     },
   });
@@ -1491,6 +1563,7 @@ test("booting an expired #pairing fragment scrubs it from the URL and never conn
       broker_url: "ws://broker.example.test",
       broker_channel_id: "dev-room",
       pairing_join_ticket: "expired-join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) - 5,
     }),
     "utf8"
@@ -1562,6 +1635,7 @@ test("a relay-rejected pairing result is terminal: retired, scrubbed, socket rel
       pairing_id: "pair-rejected",
       pairing_secret: pairingSecret,
       pairing_join_ticket: "join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) + 120,
     },
   });
@@ -1572,7 +1646,7 @@ test("a relay-rejected pairing result is terminal: retired, scrubbed, socket rel
   socket.emit("message", {
     data: JSON.stringify({
       type: "welcome",
-      protocol_version: 1,
+      protocol_version: 2,
       channel_id: "dev-room",
       peer_id: "surface-self",
       peers: [],
@@ -1641,6 +1715,7 @@ test("a pairing ticket that expires after the socket opens retires that socket, 
       broker_channel_id: "pairing-room",
       pairing_id: "pair-lapses",
       pairing_join_ticket: "pairing-join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) + 120,
     },
   });
@@ -1665,7 +1740,7 @@ test("a pairing ticket that expires after the socket opens retires that socket, 
   socket.emit("message", {
     data: JSON.stringify({
       type: "welcome",
-      protocol_version: 1,
+      protocol_version: 2,
       channel_id: "pairing-room",
       peer_id: "surface-self",
       peers: [{ peer_id: "relay-peer", role: "relay" }],
@@ -1709,6 +1784,7 @@ test("a superseded error is still honored on a socket whose ticket just lapsed",
       broker_channel_id: "pairing-room",
       pairing_id: "pair-lapse-superseded",
       pairing_join_ticket: "pairing-join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) + 120,
     },
   });
@@ -1775,6 +1851,7 @@ test("scanning an expired QR must not close a healthy device connection", async 
       broker_url: "ws://broker.example.test",
       broker_channel_id: "pairing-room",
       pairing_join_ticket: "stale-join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) - 5,
     }),
     "utf8"
@@ -1823,6 +1900,7 @@ test("a pairing request in flight during retirement is never sent to the wrong r
         pairing_id: "pair-inflight",
         pairing_secret: "secret",
         pairing_join_ticket: "pairing-join-ticket",
+        relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
         expires_at: Math.floor(Date.now() / 1000) + 120,
       },
     });
@@ -2217,6 +2295,7 @@ test("after a successful pairing the same socket keeps working instead of being 
       pairing_id: "pair-success",
       pairing_secret: secret,
       pairing_join_ticket: "pairing-join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) + 120,
     },
   });
@@ -2228,7 +2307,7 @@ test("after a successful pairing the same socket keeps working instead of being 
   socket.emit("message", {
     data: JSON.stringify({
       type: "welcome",
-      protocol_version: 1,
+      protocol_version: 2,
       channel_id: "pairing-room",
       peer_id: "surface-self",
       peers: [{ peer_id: "relay-peer", role: "relay" }],
@@ -2382,6 +2461,7 @@ test("scanning an expired QR while a pairing socket is open releases that socket
       pairing_id: "pair-a-open",
       pairing_secret: "secret",
       pairing_join_ticket: "a-join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) + 120,
     },
   });
@@ -2400,6 +2480,7 @@ test("scanning an expired QR while a pairing socket is open releases that socket
       broker_url: "ws://broker.example.test",
       broker_channel_id: "room-b",
       pairing_join_ticket: "b-join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) - 5,
     }),
     "utf8"
@@ -2462,6 +2543,7 @@ test("retirement during a session request cannot leave a half-paired, disconnect
         pairing_id: "pair-retire-race",
         pairing_secret: secret,
         pairing_join_ticket: "pairing-join-ticket",
+        relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
         expires_at: Math.floor(Date.now() / 1000) + 120,
       },
     });
@@ -2656,6 +2738,7 @@ test("an inbound frame for another surface does not notify the remote store", as
       pairing_id: "pair-inbound-noise",
       pairing_secret: "secret",
       pairing_join_ticket: "pairing-join-ticket",
+      relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
       expires_at: Math.floor(Date.now() / 1000) + 120,
     },
   });
@@ -2667,7 +2750,7 @@ test("an inbound frame for another surface does not notify the remote store", as
   socket.emit("message", {
     data: JSON.stringify({
       type: "welcome",
-      protocol_version: 1,
+      protocol_version: 2,
       channel_id: "pairing-room",
       peer_id: "surface-mine",
       peers: [{ peer_id: "relay-peer", role: "relay" }],
@@ -2690,7 +2773,7 @@ test("an inbound frame for another surface does not notify the remote store", as
           from_role: "relay",
           payload: {
             kind: "encrypted_remote_action_result_chunk",
-            // Relay payload version (3), not the broker frame version above (1). An
+            // Relay payload version (3), not the broker frame version above (2). An
             // unsupported payload version is logged, and logging is what this test counts.
             protocol_version: 3,
             action_id: "action-for-another-surface",
@@ -2738,6 +2821,7 @@ test("a payload from another surface is not treated as if the relay had sent it"
     brokerUrl: "wss://broker.example.test",
     brokerChannelId: "room-a",
     relayPeerId: "relay-peer",
+    relayVerifyKey: contentVerifyKey(),
     securityMode: "managed",
     deviceId: "device-1",
     deviceLabel: "Primary Phone",
@@ -2749,6 +2833,7 @@ test("a payload from another surface is not treated as if the relay had sent it"
     sessionClaim: null,
     sessionClaimExpiresAt: null,
   });
+  seedPairingState(state);
   void connectBroker("sender check");
   await waitFor(() => FakeWebSocket.instances.length > 0);
   const socket = FakeWebSocket.instances.at(-1);
@@ -2756,13 +2841,42 @@ test("a payload from another surface is not treated as if the relay had sent it"
   socket.emit("message", {
     data: JSON.stringify({
       type: "welcome",
-      protocol_version: 1,
+      protocol_version: 2,
       channel_id: "room-a",
       peer_id: "surface-self",
       peers: [{ peer_id: "relay-peer", role: "relay" }],
     }),
   });
   await waitFor(() => state.socketPeerId === "surface-self");
+  await waitFor(() => (socket.sent || []).some((raw) => JSON.parse(raw).payload?.kind === "relay_hello"));
+  const hello = JSON.parse(socket.sent.find((raw) => JSON.parse(raw).payload?.kind === "relay_hello"));
+  const contentSession = "sender-check-session";
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "message",
+      from_peer_id: "relay-peer",
+      from_role: "relay",
+      payload: signedRelayPayload({
+        protocol_version: 5,
+        kind: "relay_hello_proof",
+        target_peer_id: "surface-self",
+        device_id: hello.payload.device_id,
+        hello_nonce: hello.payload.hello_nonce,
+      }, {
+        fromPeerId: "relay-peer",
+        brokerRoomId: "room-a",
+        session: contentSession,
+        nonce: "1",
+      }),
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  socket.emit("message", { data: JSON.stringify({
+    type: "presence", kind: "left", peer: { role: "relay", peer_id: "relay-other" },
+  }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.relayConnected, true, "another relay leaving cannot disconnect the paired relay");
 
   socket.emit("message", {
     data: JSON.stringify({
@@ -2787,16 +2901,519 @@ test("a payload from another surface is not treated as if the relay had sent it"
   socket.emit("message", {
     data: JSON.stringify({
       type: "message",
-      from_peer_id: "relay-peer",
+      from_peer_id: "relay-other",
       from_role: "relay",
       payload: {
-        kind: "session_snapshot",
+        kind: "encrypted_session_snapshot",
         protocol_version: 3,
-        snapshot: { current_status: "idle", transcript: [], logs: [] },
+        target_peer_id: "surface-self",
+        envelope: { nonce: "n", ciphertext: "c" },
       },
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(delivered, [], "another relay in the room cannot impersonate the paired relay");
+
+  for (const target of [undefined, "surface-other"]) {
+    socket.emit("message", { data: JSON.stringify({
+      type: "message", from_peer_id: "relay-peer", from_role: "relay",
+      payload: { kind: "remote_action_pending", protocol_version: 3, target_peer_id: target },
+    }) });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(delivered, [], "missing or different targets cannot extend this surface's pending actions");
+
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "message",
+      from_peer_id: "relay-peer",
+      from_role: "relay",
+      payload: signedRelayPayload({
+        kind: "session_snapshot",
+        protocol_version: 5,
+        target_peer_id: "surface-self",
+        snapshot: { current_status: "idle", transcript: [], logs: [] },
+      }, {
+        fromPeerId: "relay-peer",
+        brokerRoomId: "room-a",
+        session: contentSession,
+        nonce: "2",
+      }),
     }),
   });
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(delivered, ["session_snapshot"], "and the relay's own still does");
+});
+
+test("outbound messages stay pinned to their socket when pairing state or expiry changes", async () => {
+  installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { sendBrokerFrame, connectBroker, closeBrokerSocket, configureBrokerClient } = await import("./broker-client.js");
+  configureBrokerClient({});
+  seedPairingState(state);
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-routing-test",
+    relayPeerId: "relay-approved",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    deviceId: "device-1",
+    payloadSecret: "payload-secret-1",
+    deviceJoinTicket: "device-ticket",
+  });
+  const sent = [];
+  await connectBroker("saved relay");
+  const deviceSocket = FakeWebSocket.instances.at(-1);
+  deviceSocket.emit("open", {});
+  deviceSocket.send = (raw) => sent.push(JSON.parse(raw));
+
+  sendBrokerFrame({ kind: "encrypted_remote_action", target_peer_id: "relay-other", envelope: {} });
+  assert.equal(sent[0].protocol_version, 2);
+  assert.equal(sent[0].payload.target_peer_id, "relay-approved");
+
+  seedPairingState(state, { pairingTicket: {
+    pairing_id: "pair-routing-test",
+    broker_url: "wss://broker.example.test",
+    broker_channel_id: "room-a",
+    pairing_join_ticket: "pair-ticket",
+    relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    relay_peer_id: "relay-from-qr",
+    expires_at: Math.floor(Date.now() / 1000) + 60,
+  } });
+  sendBrokerFrame({ kind: "encrypted_remote_action", envelope: {} });
+  assert.equal(sent[1].payload.target_peer_id, "relay-approved", "a new QR cannot retarget an existing socket");
+
+  await connectBroker("pairing relay");
+  const pairingSocket = FakeWebSocket.instances.at(-1);
+  pairingSocket.emit("open", {});
+  pairingSocket.send = (raw) => sent.push(JSON.parse(raw));
+  assert.throws(() => sendBrokerFrame({kind:"pairing_request"}, deviceSocket), /not connected/);
+  state.pairingTicket.expires_at = Math.floor(Date.now() / 1000) - 1;
+  sendBrokerFrame({ kind: "pairing_request", envelope: {} });
+  assert.equal(sent[2].payload.target_peer_id, "relay-from-qr", "an expired QR cannot retarget its socket to the saved relay");
+
+  pairingSocket.relayPeerId = null;
+  assert.throws(() => sendBrokerFrame({ kind: "pairing_request", envelope: {} }), /relay peer id is missing/);
+  assert.equal(sent.length, 3, "missing routing must never emit a broadcast");
+  closeBrokerSocket();
+  seedPairingState(state);
+  seedSocketState(state);
+});
+
+test("a broker supporting the old broadcast protocol is rejected before recovery", async () => {
+  installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { connectBroker, configureBrokerClient } = await import("./broker-client.js");
+  seedPairingState(state);
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-old-broker-test",
+    relayPeerId: "relay-approved",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    deviceId: "device-1",
+    payloadSecret: "payload-secret-1",
+    deviceJoinTicket: "device-ticket",
+  });
+  let recoveries = 0;
+  configureBrokerClient({ onBrokerReady() { recoveries += 1; } });
+  await connectBroker("old broker");
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.emit("open", {});
+  socket.emit("message", { data: JSON.stringify({
+    type: "welcome", protocol_version: 1, channel_id: "room-a", peer_id: "surface-self",
+    peers: [{ role: "relay", peer_id: "relay-approved" }],
+  }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(socket.readyState, WebSocket.CLOSED);
+  assert.equal(state.socketPeerId, null);
+  assert.equal(recoveries, 0);
+});
+
+test("a stolen payload secret cannot forge relay traffic without the pinned key", async () => {
+  installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { configureBrokerClient, connectBroker, relayContentIsReady } = await import("./broker-client.js");
+  const { handleRelayPresence } = await import("./remote-runtime.js");
+
+  const delivered = [];
+  let contentReady = 0;
+  configureBrokerClient({
+    onBrokerPayload(payload) {
+      delivered.push(payload.kind);
+    },
+    onRelayContentReady() {
+      contentReady += 1;
+    },
+  });
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-content-attack",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-peer",
+    relayVerifyKey: contentVerifyKey(),
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  const sentBeforeProof = () => {
+    const socket = FakeWebSocket.instances.at(-1);
+    return (socket?.sent || []).map((raw) => JSON.parse(raw).payload?.kind);
+  };
+
+  async function openTab(peerId) {
+    void connectBroker("content attack");
+    await waitFor(() => FakeWebSocket.instances.at(-1)?.url);
+    const socket = FakeWebSocket.instances.at(-1);
+    socket.emit("open", {});
+    socket.emit("message", {
+      data: JSON.stringify({
+        type: "welcome",
+        protocol_version: 2,
+        channel_id: "room-a",
+        peer_id: peerId,
+        peers: [{ peer_id: "relay-peer", role: "relay" }],
+      }),
+    });
+    await waitFor(() => state.socketPeerId === peerId);
+    await waitFor(() => sentBeforeProof().includes("relay_hello"));
+    return socket;
+  }
+
+  function emitRelay(socket, payload, fromPeerId = "relay-peer") {
+    socket.emit("message", {
+      data: JSON.stringify({
+        type: "message",
+        from_role: "relay",
+        from_peer_id: fromPeerId,
+        payload,
+      }),
+    });
+  }
+
+  const first = await openTab("surface-a");
+  handleRelayPresence("joined", { role: "relay", peer_id: "relay-peer" });
+  const hello = JSON.parse(first.sent.find((raw) => JSON.parse(raw).payload?.kind === "relay_hello"));
+  assert.deepEqual(
+    sentBeforeProof().filter((kind) => kind !== "relay_hello"),
+    [],
+    "the phone must not send a claim, prompt, or approval before the identity proof"
+  );
+  const business = {
+    protocol_version: 5,
+    kind: "encrypted_session_snapshot",
+    target_peer_id: "surface-a",
+    device_id: "device-1",
+    envelope: { nonce: "n", ciphertext: "c" },
+  };
+  emitRelay(first, signedRelayPayload(business, {
+    fromPeerId: "relay-peer", brokerRoomId: "room-a", session: "session-a", nonce: "2",
+  }));
+  emitRelay(first, {
+    protocol_version: 5,
+    kind: "encrypted_pairing_result",
+    target_peer_id: "surface-a",
+    pairing_id: "pair-forged",
+    envelope: { nonce: "n", ciphertext: "forged" },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(contentReady, 0);
+  assert.deepEqual(delivered, []);
+  assert.equal(relayContentIsReady(), false);
+
+  const wrongSeed = Uint8Array.from({ length: 32 }, () => 9);
+  const wrongProof = {
+    protocol_version: 5,
+    kind: "relay_hello_proof",
+    target_peer_id: "surface-a",
+    device_id: hello.payload.device_id,
+    hello_nonce: hello.payload.hello_nonce,
+  };
+  const wrongSignature = signRelayContent(wrongSeed, {
+    payload: wrongProof,
+    fromPeerId: "relay-peer",
+    brokerRoomId: "room-a",
+    session: "session-a",
+    nonce: "1",
+  });
+  emitRelay(first, {
+    ...wrongProof,
+    relay_content_session: "session-a",
+    relay_content_nonce: "1",
+    relay_content_signature: wrongSignature,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(contentReady, 0, "a different key must not finish the handshake");
+
+  emitRelay(first, signedRelayPayload(wrongProof, {
+    fromPeerId: "relay-peer", brokerRoomId: "room-a", session: "session-a", nonce: "1",
+  }));
+  await waitFor(() => contentReady === 1);
+
+  const good = (payload, nonce, extras = {}) => signedRelayPayload(payload, {
+    fromPeerId: "relay-peer",
+    brokerRoomId: "room-a",
+    session: "session-a",
+    nonce,
+    ...extras,
+  });
+  const snapshot = {
+    protocol_version: 5,
+    kind: "encrypted_session_snapshot",
+    target_peer_id: "surface-a",
+    device_id: "device-1",
+    envelope: { nonce: "snap-n", ciphertext: "snap-c" },
+  };
+  const signedSnapshot = good(snapshot, "2");
+  emitRelay(first, signedSnapshot);
+  emitRelay(first, signedSnapshot);
+  const chunk = good({
+    protocol_version: 5,
+    kind: "encrypted_remote_action_result_chunk",
+    target_peer_id: "surface-a",
+    device_id: "device-1",
+    action_id: "action-1",
+    action: "fetch_workspace_diff",
+    chunk_index: 0,
+    chunk_count: 2,
+    envelope: { nonce: "chunk-n", ciphertext: "chunk-c" },
+  }, "4");
+  const olderChunk = good({
+    protocol_version: 5,
+    kind: "encrypted_remote_action_result_chunk",
+    target_peer_id: "surface-a",
+    device_id: "device-1",
+    action_id: "action-1",
+    action: "fetch_workspace_diff",
+    chunk_index: 1,
+    chunk_count: 2,
+    envelope: { nonce: "chunk-n2", ciphertext: "chunk-c2" },
+  }, "3");
+  emitRelay(first, chunk);
+  emitRelay(first, olderChunk);
+  emitRelay(first, { ...chunk, action: "approve_command" });
+  emitRelay(first, { ...signedSnapshot, target_peer_id: "surface-other" });
+  emitRelay(first, { ...signedSnapshot, device_id: "device-other" });
+  emitRelay(first, signedRelayPayload(snapshot, {
+    fromPeerId: "relay-peer", brokerRoomId: "room-b", session: "session-a", nonce: "7",
+  }));
+  const tamperedSession = good(snapshot, "8");
+  tamperedSession.relay_content_session = "session-other";
+  emitRelay(first, tamperedSession);
+  emitRelay(first, {
+    ...signedSnapshot,
+    envelope: { nonce: "snap-n", ciphertext: "tampered" },
+  });
+  const replayedHello = signedRelayPayload({
+    ...wrongProof,
+    hello_nonce: "00".repeat(18),
+  }, { fromPeerId: "relay-peer", brokerRoomId: "room-a", session: "session-old", nonce: "1" });
+  emitRelay(first, replayedHello);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(delivered, [
+    "encrypted_session_snapshot",
+    "encrypted_session_snapshot",
+    "encrypted_remote_action_result_chunk",
+    "encrypted_remote_action_result_chunk",
+  ]);
+
+  const far = good({
+    protocol_version: 5,
+    kind: "remote_action_pending",
+    target_peer_id: "surface-a",
+    device_id: "device-1",
+    action_id: "later",
+  }, "600");
+  const stillLive = good({
+    protocol_version: 5,
+    kind: "encrypted_transcript_delta",
+    target_peer_id: "surface-a",
+    device_id: "device-1",
+    envelope: { nonce: "live-n", ciphertext: "live-c" },
+  }, "200");
+  emitRelay(first, far);
+  emitRelay(first, signedSnapshot);
+  emitRelay(first, stillLive);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(delivered.slice(-2), ["remote_action_pending", "encrypted_transcript_delta"]);
+
+  const previousSessionFrame = signedSnapshot;
+  const second = await openTab("surface-b");
+  emitRelay(second, previousSessionFrame);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.at(-1), "encrypted_transcript_delta", "an old connection's frame must not apply on the new tab");
+  const secondHello = JSON.parse(second.sent.find((raw) => JSON.parse(raw).payload?.kind === "relay_hello"));
+  emitRelay(second, signedRelayPayload({
+    protocol_version: 5,
+    kind: "relay_hello_proof",
+    target_peer_id: "surface-b",
+    device_id: secondHello.payload.device_id,
+    hello_nonce: secondHello.payload.hello_nonce,
+  }, {
+    fromPeerId: "relay-peer", brokerRoomId: "room-a", session: "session-b", nonce: "1",
+  }));
+  await waitFor(() => contentReady === 2);
+  emitRelay(second, signedRelayPayload({
+    protocol_version: 5,
+    kind: "encrypted_remote_action_result",
+    target_peer_id: "surface-b",
+    device_id: "device-1",
+    action_id: "reply-1",
+    action: "send_message",
+    envelope: { nonce: "reply-n", ciphertext: "reply-c" },
+  }, {
+    fromPeerId: "relay-peer", brokerRoomId: "room-a", session: "session-b", nonce: "2",
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.at(-1), "encrypted_remote_action_result");
+});
+
+test("a new hello drops queued frames from the previous content session", async () => {
+  installBrowserStubs();
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { configureBrokerClient, connectBroker } = await import("./broker-client.js");
+  const delivered = [];
+  configureBrokerClient({
+    onBrokerPayload(payload) {
+      delivered.push(`${payload.kind}:${payload.chunk_index ?? payload.action_id ?? ""}`);
+    },
+  });
+  seedPairingState(state);
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-content-epoch",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-peer",
+    relayVerifyKey: contentVerifyKey(),
+    securityMode: "managed",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  void connectBroker("content epoch");
+  await waitFor(() => FakeWebSocket.instances.at(-1)?.url);
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.emit("open", {});
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "welcome",
+      protocol_version: 2,
+      channel_id: "room-a",
+      peer_id: "surface-a",
+      peers: [{ peer_id: "relay-peer", role: "relay" }],
+    }),
+  });
+  await waitFor(() => state.socketPeerId === "surface-a");
+  await waitFor(() => (socket.sent || []).some((raw) => JSON.parse(raw).payload?.kind === "relay_hello"));
+  const hello = JSON.parse(socket.sent.find((raw) => JSON.parse(raw).payload?.kind === "relay_hello"));
+  const proof = {
+    protocol_version: 5,
+    kind: "relay_hello_proof",
+    target_peer_id: "surface-a",
+    device_id: hello.payload.device_id,
+    hello_nonce: hello.payload.hello_nonce,
+  };
+  const emit = (payload, session, nonce) => {
+    socket.emit("message", {
+      data: JSON.stringify({
+        type: "message",
+        from_role: "relay",
+        from_peer_id: "relay-peer",
+        payload: signedRelayPayload(payload, {
+          fromPeerId: "relay-peer",
+          brokerRoomId: "room-a",
+          session,
+          nonce,
+        }),
+      }),
+    });
+  };
+  emit(proof, "session-a", "1");
+  const chunk = (index, nonce) => emit({
+    protocol_version: 5,
+    kind: "encrypted_remote_action_result_chunk",
+    target_peer_id: "surface-a",
+    device_id: "device-1",
+    action_id: "long-reply",
+    action: "fetch_workspace_diff",
+    chunk_index: index,
+    chunk_count: 2,
+    envelope: { nonce: `n${index}`, ciphertext: `c${index}` },
+  }, "session-a", nonce);
+  chunk(0, "2");
+  emit({
+    protocol_version: 5,
+    kind: "remote_action_pending",
+    target_peer_id: "surface-a",
+    action_id: "other",
+  }, "session-a", "3");
+  chunk(1, "4");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(delivered, [
+    "encrypted_remote_action_result_chunk:0",
+    "remote_action_pending:other",
+    "encrypted_remote_action_result_chunk:1",
+  ]);
+
+  const sentBefore = socket.sent.length;
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "presence",
+      kind: "joined",
+      peer: { role: "relay", peer_id: "relay-peer" },
+    }),
+  });
+  await waitFor(() => socket.sent.length > sentBefore);
+  const hellos = socket.sent
+    .map((raw) => JSON.parse(raw))
+    .filter((frame) => frame.payload?.kind === "relay_hello");
+  const nextHello = hellos.at(-1);
+  emit({
+    protocol_version: 5,
+    kind: "encrypted_remote_action_result",
+    target_peer_id: "surface-a",
+    device_id: "device-1",
+    action_id: "old-session",
+    envelope: { nonce: "old-n", ciphertext: "old-c" },
+  }, "session-a", "5");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.at(-1), "encrypted_remote_action_result_chunk:1");
+
+  emit({
+    protocol_version: 5,
+    kind: "relay_hello_proof",
+    target_peer_id: "surface-a",
+    device_id: nextHello.payload.device_id,
+    hello_nonce: nextHello.payload.hello_nonce,
+  }, "session-b", "1");
+  emit({
+    protocol_version: 5,
+    kind: "encrypted_remote_action_result",
+    target_peer_id: "surface-a",
+    device_id: "device-1",
+    action_id: "after-hello",
+    envelope: { nonce: "new-n", ciphertext: "new-c" },
+  }, "session-b", "2");
+  emit({
+    protocol_version: 5,
+    kind: "remote_action_pending",
+    target_peer_id: "surface-a",
+    action_id: "outside-window",
+  }, "session-b", "600");
+  emit({
+    protocol_version: 5,
+    kind: "encrypted_transcript_delta",
+    target_peer_id: "surface-a",
+    device_id: "device-1",
+    envelope: { nonce: "old-n", ciphertext: "old-c" },
+  }, "session-b", "80");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(delivered.slice(-2), [
+    "encrypted_remote_action_result:after-hello",
+    "remote_action_pending:outside-window",
+  ]);
 });

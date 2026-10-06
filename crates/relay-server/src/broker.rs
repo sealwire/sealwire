@@ -6,10 +6,13 @@ mod crypto;
 mod lifecycle;
 mod protocol;
 mod remote_actions;
-mod session_claim;
+mod request_auth;
+mod signed_control;
 mod writer;
 
 pub use access_release::run_cloud_access_release;
+#[cfg(test)]
+pub(crate) use access_release::with_test_control_challenge;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -22,7 +25,10 @@ use rand::{Rng, RngCore};
 use relay_broker::auth::{BrokerAuthMode, BROKER_AUTH_MODE_ENV};
 use relay_broker::client_version::{MinRelayVersion, UPDATE_INSTRUCTIONS};
 use relay_broker::join_ticket::unix_now;
-use relay_broker::protocol::{PeerRole, PresenceKind, ServerMessage};
+use relay_broker::protocol::{
+    ClientMessage, PeerRole, PresenceKind, ServerMessage, MAX_TARGETED_MESSAGES_PER_PUBLISH,
+};
+use relay_broker::public_control::relay_join_message;
 use relay_util::{trimmed_option_string, trimmed_string};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -55,14 +61,13 @@ use self::lifecycle::{bearer_fingerprint, BrokerLifecycleLock, RegistrationIdent
 #[cfg(test)]
 use self::protocol::summarize_thread_transcript_response;
 use self::protocol::{
-    frame_bytes_for_payload, frame_text_for_payload, parse_inbound_payload,
-    summarize_outbound_payload, validate_broker_protocol_version, InboundBrokerPayload,
-    OutboundBrokerPayload, PairingRequestPlaintext, PairingResultPlaintext, TargetedBrokerMessage,
+    frame_bytes_for_payload, parse_inbound_payload, summarize_outbound_payload,
+    validate_broker_protocol_version, InboundBrokerPayload, OutboundBrokerPayload,
+    PairingRequestPlaintext, PairingResultPlaintext, TargetedBrokerMessage,
 };
 use self::remote_actions::handle_encrypted_remote_action;
 #[cfg(test)]
 use self::remote_actions::RemoteActionRequest;
-use self::session_claim::{issue_session_claim, verify_session_claim};
 use self::writer::{spawn_broker_writer, BrokerWriter};
 #[cfg(test)]
 use relay_broker::protocol::BROKER_PROTOCOL_VERSION;
@@ -253,8 +258,342 @@ const INBOUND_MESSAGE_QUEUE_CAPACITY: usize = 256;
 const SURFACE_MESSAGE_QUEUE_CAPACITY: usize = 64;
 pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
 const MAX_BROKER_TEXT_FRAME_BYTES: usize = 65_536;
-// Version 3 requires the action ID inside the authenticated ciphertext as well as outside.
-const RELAY_PROTOCOL_VERSION: u64 = 3;
+// Version 4 signed every relay payload with the content key; version 5 also has the
+// phone sign every action attempt. Exact match, no fallback.
+const RELAY_PROTOCOL_VERSION: u64 = 5;
+
+/// Session hex from `fresh_content_nonce` (18 bytes). Size estimates use this width.
+const CONTENT_SESSION_HEX_LEN: usize = 36;
+/// Decimal width of a u64. A shorter nonce still fits under an estimate that reserves this.
+const CONTENT_NONCE_MAX_DIGITS: usize = 20;
+/// Standard base64 of a 64-byte Ed25519 signature, including padding.
+const CONTENT_SIGNATURE_B64_LEN: usize = 88;
+
+struct RelayContentCrypto {
+    key: SigningKey,
+    relay_peer_id: String,
+    broker_room_id: String,
+    /// One content session per surface peer. Replaced by a new hello, removed on departure.
+    sessions: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// Next sequence is per recipient and advances only when a frame is actually sealed.
+    next_seq: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl RelayContentCrypto {
+    fn new(key: SigningKey, relay_peer_id: String, broker_room_id: String) -> Self {
+        Self {
+            key,
+            relay_peer_id,
+            broker_room_id,
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            next_seq: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn open_session(&self, peer_id: &str) -> String {
+        let session = fresh_content_nonce();
+        debug_assert_eq!(session.len(), CONTENT_SESSION_HEX_LEN);
+        self.sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(peer_id.to_string(), session.clone());
+        session
+    }
+
+    fn forget_peer(&self, peer_id: &str) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(peer_id);
+        self.next_seq
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(peer_id);
+    }
+
+    fn request_binding(&self) -> request_auth::RelayRequestBinding {
+        request_auth::RelayRequestBinding {
+            relay_verify_key: STANDARD.encode(self.key.verifying_key().to_bytes()),
+            broker_room_id: self.broker_room_id.clone(),
+            relay_peer_id: self.relay_peer_id.clone(),
+        }
+    }
+
+    fn session(&self, peer_id: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(peer_id)
+            .cloned()
+    }
+
+    fn issued(&self, peer_id: &str) -> u64 {
+        self.next_seq
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(peer_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Remember the session this frame is allowed to wear. A later hello must not
+    /// rebind a frame that was already queued for the previous one.
+    fn bind_epochs(&self, payload: &mut serde_json::Value) {
+        if payload.get("kind").and_then(serde_json::Value::as_str) == Some("targeted_messages") {
+            if let Some(messages) = payload
+                .get_mut("messages")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for message in messages {
+                    if let Some(inner) = message.get_mut("payload") {
+                        self.bind_one(inner);
+                    }
+                }
+            }
+            return;
+        }
+        self.bind_one(payload);
+    }
+
+    fn bind_one(&self, payload: &mut serde_json::Value) {
+        let Some(object) = payload.as_object_mut() else {
+            return;
+        };
+        let target = object
+            .get("target_peer_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let session = self.session(target).unwrap_or_default();
+        object.insert(
+            "relay_content_session".to_string(),
+            serde_json::Value::String(session),
+        );
+    }
+
+    /// Sign a publish frame at the moment it is written. `None` means the frame was
+    /// dropped because its queued session is no longer current — it is not sent unsigned.
+    fn seal_frame_text(&self, text: &str) -> Result<Option<String>, String> {
+        let mut frame: serde_json::Value = serde_json::from_str(text)
+            .map_err(|_| "relay content publish could not be read".to_string())?;
+        let kept = {
+            let payload = frame
+                .get_mut("payload")
+                .ok_or_else(|| "relay content publish is missing its payload".to_string())?;
+            self.seal_payload(payload)?
+        };
+        if !kept {
+            return Ok(None);
+        }
+        serde_json::to_string(&frame)
+            .map(Some)
+            .map_err(|error| format!("relay content publish could not be encoded: {error}"))
+    }
+
+    fn seal_payload(&self, payload: &mut serde_json::Value) -> Result<bool, String> {
+        if payload.get("kind").and_then(serde_json::Value::as_str) == Some("targeted_messages") {
+            let Some(messages) = payload
+                .get_mut("messages")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                return Ok(false);
+            };
+            let mut keep = Vec::with_capacity(messages.len());
+            for message in messages.iter_mut() {
+                let kept = match message.get_mut("payload") {
+                    Some(inner) => self.seal_one(inner)?,
+                    None => false,
+                };
+                keep.push(kept);
+            }
+            let mut index = 0;
+            messages.retain(|_| {
+                let kept = keep[index];
+                index += 1;
+                kept
+            });
+            return Ok(!messages.is_empty());
+        }
+        self.seal_one(payload)
+    }
+
+    fn seal_one(&self, payload: &mut serde_json::Value) -> Result<bool, String> {
+        let Some(object) = payload.as_object_mut() else {
+            return Ok(false);
+        };
+        let target = object
+            .get("target_peer_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let epoch = object
+            .get("relay_content_session")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if epoch.is_empty() || self.session(&target).as_deref() != Some(epoch.as_str()) {
+            debug!(
+                target_peer_id = %target,
+                "dropping a relay payload queued for a content session that is no longer current"
+            );
+            return Ok(false);
+        }
+        let seq = self.allocate_seq(&target);
+        let nonce = seq.to_string();
+        object.insert(
+            "relay_content_nonce".to_string(),
+            serde_json::Value::String(nonce.clone()),
+        );
+        let message = relay_content_message(
+            &self.relay_peer_id,
+            &self.broker_room_id,
+            &epoch,
+            &nonce,
+            object,
+        )?;
+        let signature = STANDARD.encode(self.key.sign(&message).to_bytes());
+        object.insert(
+            "relay_content_signature".to_string(),
+            serde_json::Value::String(signature),
+        );
+        Ok(true)
+    }
+
+    fn allocate_seq(&self, target: &str) -> u64 {
+        let mut seqs = self
+            .next_seq
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let entry = seqs.entry(target.to_string()).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    }
+}
+
+fn reserve_content_authentication(payload: &mut serde_json::Value) {
+    if payload.get("kind").and_then(serde_json::Value::as_str) == Some("targeted_messages") {
+        if let Some(messages) = payload
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for message in messages {
+                if let Some(inner) = message.get_mut("payload") {
+                    reserve_one_content_authentication(inner);
+                }
+            }
+        }
+        return;
+    }
+    reserve_one_content_authentication(payload);
+}
+
+fn reserve_one_content_authentication(payload: &mut serde_json::Value) {
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "relay_content_session".to_string(),
+        serde_json::Value::String("0".repeat(CONTENT_SESSION_HEX_LEN)),
+    );
+    object.insert(
+        "relay_content_nonce".to_string(),
+        serde_json::Value::String("9".repeat(CONTENT_NONCE_MAX_DIGITS)),
+    );
+    object.insert(
+        "relay_content_signature".to_string(),
+        serde_json::Value::String("A".repeat(CONTENT_SIGNATURE_B64_LEN)),
+    );
+}
+
+pub(super) fn reserved_publish_frame_len(payload: &serde_json::Value) -> usize {
+    let mut reserved = payload.clone();
+    reserve_content_authentication(&mut reserved);
+    let frame = relay_broker::protocol::ClientMessage::Publish {
+        protocol_version: relay_broker::protocol::BROKER_PROTOCOL_VERSION,
+        payload: reserved,
+    };
+    serde_json::to_string(&frame)
+        .expect("broker client frame should serialize")
+        .len()
+}
+
+fn generate_content_signing_key() -> SigningKey {
+    let mut seed = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    SigningKey::from_bytes(&seed)
+}
+
+fn fresh_content_nonce() -> String {
+    let mut bytes = [0_u8; 18];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn relay_content_message(
+    from_peer_id: &str,
+    broker_room_id: &str,
+    session: &str,
+    nonce: &str,
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<u8>, String> {
+    let text = |name: &str| {
+        object
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let number = |name: &str| {
+        object
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                object
+                    .get(name)
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|value| value as u64)
+            })
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+    };
+    let envelope_nonce = object
+        .get("envelope")
+        .and_then(|value| value.get("nonce"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let envelope_ciphertext = object
+        .get("envelope")
+        .and_then(|value| value.get("ciphertext"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let fields = [
+        number("protocol_version"),
+        text("kind"),
+        session.to_string(),
+        nonce.to_string(),
+        from_peer_id.to_string(),
+        text("target_peer_id"),
+        text("device_id"),
+        text("action_id"),
+        text("action"),
+        text("pairing_id"),
+        number("chunk_index"),
+        number("chunk_count"),
+        text("hello_nonce"),
+        envelope_nonce.to_string(),
+        envelope_ciphertext.to_string(),
+        broker_room_id.to_string(),
+    ];
+    let mut out = Vec::new();
+    out.extend_from_slice(b"agent-relay:relay-content-v1\0");
+    for field in &fields {
+        let bytes = field.as_bytes();
+        let len = u32::try_from(bytes.len())
+            .map_err(|_| "relay content field is too long".to_string())?;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(bytes);
+    }
+    Ok(out)
+}
 
 type BrokerSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -265,6 +604,8 @@ pub struct BrokerConfig {
     broker_room_id: String,
     relay_peer_id: String,
     auth: BrokerAuthConfig,
+    /// Public enrollment key, or the self-hosted content key. Never sent off the host.
+    content_signing_key: SigningKey,
     /// Public-mode only: watch the registration cache so an external `cloud unbind`
     /// stops reconnect retries instead of looping forever on a revoked refresh token.
     registration_watch: Option<RegistrationWatch>,
@@ -614,7 +955,7 @@ impl BrokerConfig {
         // Never forward activation env into provider children: consume-or-scrub
         // happens during resolution / enrollment. Removed RELAY_LICENSE_CODE is
         // scrub-only and never accepted as an activation input.
-        Self::from_parts_resolution_with_startup_context(
+        let resolution = Self::from_parts_resolution_with_startup_context(
             std::env::var("RELAY_BROKER_URL").ok(),
             std::env::var("RELAY_BROKER_PUBLIC_URL").ok(),
             std::env::var(RELAY_BROKER_CONTROL_URL_ENV).ok(),
@@ -629,7 +970,16 @@ impl BrokerConfig {
             std::env::var(self::auth::RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV).ok(),
             startup_context,
         )
-        .await
+        .await?;
+        match resolution {
+            BrokerConfigResolution::Ready(mut config) => {
+                config
+                    .persist_self_hosted_content_key_if_configured()
+                    .await?;
+                Ok(BrokerConfigResolution::Ready(config))
+            }
+            other => Ok(other),
+        }
     }
 
     // Test-only constructor (exercised from `broker/tests.rs`); not yet wired to a
@@ -908,6 +1258,24 @@ impl BrokerConfig {
             return Ok(BrokerConfigResolution::PendingPublicEnrollment(pending));
         }
 
+        let signing_key = if matches!(auth_mode, BrokerAuthMode::PublicControlPlane) {
+            let control_url_string =
+                trimmed_option_string(control_url.clone()).ok_or_else(|| {
+                    format!("{RELAY_BROKER_CONTROL_URL_ENV} is required in public broker auth mode")
+                })?;
+            let parsed = parse_control_plane_url(&control_url_string)?;
+            Some(
+                load_existing_public_relay_identity(&identity_path, parsed.as_str())
+                    .await?
+                    .signing_key,
+            )
+        } else {
+            None
+        };
+
+        let content_signing_key = signing_key
+            .clone()
+            .unwrap_or_else(generate_content_signing_key);
         let auth = BrokerAuthConfig::from_parts(
             Some(auth_mode.as_str().to_string()),
             join_ticket_secret,
@@ -915,6 +1283,7 @@ impl BrokerConfig {
             relay_id.clone(),
             relay_refresh_token.clone(),
             device_join_ttl_secs,
+            signing_key,
         )?;
 
         {
@@ -932,6 +1301,7 @@ impl BrokerConfig {
             broker_room_id,
             relay_peer_id,
             auth,
+            content_signing_key,
             registration_watch,
         }))
     }
@@ -960,10 +1330,39 @@ impl BrokerConfig {
         &self.relay_peer_id
     }
 
+    pub(crate) fn content_verify_key(&self) -> String {
+        STANDARD.encode(self.content_signing_key.verifying_key().to_bytes())
+    }
+
+    pub(crate) fn content_signing_key(&self) -> &SigningKey {
+        &self.content_signing_key
+    }
+
+    async fn persist_self_hosted_content_key_if_configured(&mut self) -> Result<(), String> {
+        if self.auth.relay_identity_key().is_some() {
+            return Ok(());
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let path = crate::state_paths::sibling_state_file(
+            &cwd,
+            "RELAY_CONTENT_IDENTITY_PATH",
+            std::env::var_os("RELAY_CONTENT_IDENTITY_PATH"),
+            crate::state_paths::RELAY_CONTENT_IDENTITY_FILE,
+        );
+        let session_path = crate::state_paths::session_file_path(&cwd);
+        self.content_signing_key =
+            load_or_create_relay_content_identity(&path, &session_path).await?;
+        Ok(())
+    }
+
     pub(crate) async fn relay_connect_url(&self) -> Result<Url, String> {
         let credential = self
             .auth
-            .relay_connect_credential(&self.broker_room_id, &self.relay_peer_id)
+            .relay_connect_credential(
+                &self.broker_room_id,
+                &self.relay_peer_id,
+                &self.content_verify_key(),
+            )
             .await?;
         let mut url = self.url.clone();
         url.query_pairs_mut()
@@ -1489,6 +1888,21 @@ async fn run_broker_session_with_liveness(
     config: &BrokerConfig,
     liveness: BrokerLivenessConfig,
 ) -> Result<Duration, BrokerSessionError> {
+    let content = std::sync::Arc::new(RelayContentCrypto::new(
+        config.content_signing_key().clone(),
+        config.relay_peer_id().to_string(),
+        config.broker_room_id().to_string(),
+    ));
+    run_broker_session_scoped(state, change_rx, config, liveness, content).await
+}
+
+async fn run_broker_session_scoped(
+    state: &AppState,
+    change_rx: &mut watch::Receiver<u64>,
+    config: &BrokerConfig,
+    liveness: BrokerLivenessConfig,
+    content: std::sync::Arc<RelayContentCrypto>,
+) -> Result<Duration, BrokerSessionError> {
     let connect_url = config
         .relay_connect_url()
         .await
@@ -1502,16 +1916,79 @@ async fn run_broker_session_with_liveness(
     // from reading for seconds at a time. See `writer.rs`.
     // The guard aborts the writer on every exit path from this session. The socket is
     // the session: a writer left draining into a dead socket can outlive its reconnect.
-    let (writer, mut writer_error, _writer_guard) = spawn_broker_writer(sink, state.clone());
+    let (writer, mut writer_error, _writer_guard) =
+        spawn_broker_writer(sink, state.clone(), content);
 
-    let welcome = receiver
+    let first = receiver
         .next()
         .await
         .ok_or_else(|| BrokerSessionError::before_connected("broker closed before welcome"))?
         .map_err(|error| {
             BrokerSessionError::before_connected(format!("broker welcome read failed: {error}"))
         })?;
-    match decode_server_frame(welcome).map_err(BrokerSessionError::before_connected)? {
+    let welcome = match decode_server_frame(first).map_err(BrokerSessionError::before_connected)? {
+        Some(ServerMessage::RelayJoinChallenge {
+            challenge_id,
+            challenge,
+            broker_origin,
+            relay_id,
+            broker_room_id,
+            relay_peer_id,
+            ticket_sha256,
+            relay_verify_key,
+        }) => {
+            if relay_verify_key != config.content_verify_key() {
+                return Err(BrokerSessionError::before_connected(
+                    "broker join challenge names a different relay identity".to_string(),
+                ));
+            }
+            let signing_key = config.content_signing_key();
+            let message = relay_join_message(
+                &broker_origin,
+                &challenge_id,
+                &challenge,
+                &ticket_sha256,
+                &relay_id,
+                &broker_room_id,
+                &relay_peer_id,
+            )
+            .map_err(BrokerSessionError::before_connected)?;
+            if broker_room_id != config.broker_room_id() || relay_peer_id != config.relay_peer_id()
+            {
+                return Err(BrokerSessionError::before_connected(
+                    "broker join challenge does not match this relay".to_string(),
+                ));
+            }
+            let signature = STANDARD.encode(signing_key.sign(&message).to_bytes());
+            let proof = serde_json::to_string(&ClientMessage::RelayJoinProof {
+                challenge_id,
+                signature,
+            })
+            .map_err(|error| {
+                BrokerSessionError::before_connected(format!(
+                    "failed to encode relay join proof: {error}"
+                ))
+            })?;
+            writer
+                .send_now(tokio_tungstenite::tungstenite::Message::Text(proof))
+                .await
+                .map_err(BrokerSessionError::before_connected)?;
+            let next = receiver
+                .next()
+                .await
+                .ok_or_else(|| {
+                    BrokerSessionError::before_connected("broker closed before welcome")
+                })?
+                .map_err(|error| {
+                    BrokerSessionError::before_connected(format!(
+                        "broker welcome read failed: {error}"
+                    ))
+                })?;
+            decode_server_frame(next).map_err(BrokerSessionError::before_connected)?
+        }
+        other => other,
+    };
+    match welcome {
         Some(ServerMessage::Welcome {
             protocol_version,
             peers,
@@ -1526,21 +2003,6 @@ async fn run_broker_session_with_liveness(
             state
                 .replace_online_surface_peers(surface_peers.iter().map(|peer| peer.peer_id.clone()))
                 .await;
-            for peer in &surface_peers {
-                if let Some(device_id) = peer.device_id.as_deref() {
-                    if let Err(error) = state
-                        .mark_remote_device_seen(device_id, &peer.peer_id, None)
-                        .await
-                    {
-                        warn!(
-                            peer_id = %peer.peer_id,
-                            device_id,
-                            %error,
-                            "failed to bind broker surface peer from welcome"
-                        );
-                    }
-                }
-            }
         }
         Some(ServerMessage::Error { message, .. }) => {
             return Err(BrokerSessionError::before_connected(message))
@@ -1961,24 +2423,12 @@ async fn handle_server_message(
             peer,
         } => {
             if peer.role == PeerRole::Surface {
+                if matches!(kind, PresenceKind::Left) {
+                    writer.forget_content_peer(&peer.peer_id);
+                }
                 state
                     .update_surface_presence(&peer.peer_id, matches!(kind, PresenceKind::Joined))
                     .await;
-                if matches!(kind, PresenceKind::Joined) {
-                    if let Some(device_id) = peer.device_id.as_deref() {
-                        if let Err(error) = state
-                            .mark_remote_device_seen(device_id, &peer.peer_id, None)
-                            .await
-                        {
-                            warn!(
-                                peer_id = %peer.peer_id,
-                                device_id,
-                                %error,
-                                "failed to bind broker surface peer from presence"
-                            );
-                        }
-                    }
-                }
                 let status = match kind {
                     PresenceKind::Joined => "joined",
                     PresenceKind::Left => "left",
@@ -2022,6 +2472,13 @@ async fn handle_server_message(
             // Errors that genuinely mean the CONNECTION is unusable — a dropped socket, a
             // `rate_limited` admission that a frame was discarded — still end the session
             // below. This narrows only the "one bad message" case.
+            if payload.get("kind").and_then(serde_json::Value::as_str) == Some("relay_hello") {
+                if let Err(error) = handle_relay_hello(state, writer, &from_peer_id, &payload).await
+                {
+                    warn!(from_peer_id, %error, "relay hello was not answered");
+                }
+                return Ok(());
+            }
             let parsed = match parse_inbound_payload(payload) {
                 Ok(parsed) => parsed,
                 Err(error) => {
@@ -2043,18 +2500,35 @@ async fn handle_server_message(
                 }
                 Some(InboundBrokerPayload::EncryptedRemoteAction {
                     action_id,
-                    session_claim,
                     device_id,
+                    action,
+                    request_sid,
+                    request_boot,
+                    request_seq,
+                    request_time,
+                    op_boot,
+                    op_t0,
+                    request_signature,
                     envelope,
                 }) => {
+                    let signed = remote_actions::signed_attempt_from_parts(
+                        action,
+                        request_sid,
+                        request_boot,
+                        request_seq,
+                        request_time,
+                        op_boot,
+                        op_t0,
+                        request_signature,
+                    );
                     handle_encrypted_remote_action(
                         state,
                         writer,
                         origin,
                         from_peer_id,
                         action_id,
-                        session_claim,
                         device_id,
+                        signed,
                         envelope,
                     )
                     .await
@@ -2071,6 +2545,9 @@ async fn handle_server_message(
                 );
             }
             Ok(())
+        }
+        ServerMessage::RelayJoinChallenge { .. } => {
+            Err("broker repeated a relay join challenge after the socket was seated".to_string())
         }
         ServerMessage::Error { code, message } => {
             if code == "rate_limited" {
@@ -2240,6 +2717,7 @@ async fn handle_pairing_request(
 
 fn server_message_name(message: &ServerMessage) -> &'static str {
     match message {
+        ServerMessage::RelayJoinChallenge { .. } => "relay_join_challenge",
         ServerMessage::Welcome { .. } => "welcome",
         ServerMessage::Presence { .. } => "presence",
         ServerMessage::Message { .. } => "message",
@@ -2248,8 +2726,7 @@ fn server_message_name(message: &ServerMessage) -> &'static str {
 }
 
 async fn publish_snapshot(writer: &BrokerWriter, state: &AppState) -> Result<(), String> {
-    // Checked before building: nobody live could read it, and a paired phone's arrival
-    // (welcome or presence join) binds it first and then wakes the loop to publish again.
+    // Presence alone grants no content access; only peers bound by device proof are targets.
     let targets = state.broker_targets().await;
     if targets.is_empty() {
         debug!("no live paired surface; skipping broker session snapshot");
@@ -2620,6 +3097,45 @@ fn pairing_result_targeted_message(
     })
 }
 
+async fn handle_relay_hello(
+    _state: &AppState,
+    writer: &BrokerWriter,
+    from_peer_id: &str,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let version = payload
+        .get("protocol_version")
+        .and_then(serde_json::Value::as_u64);
+    if version != Some(RELAY_PROTOCOL_VERSION) {
+        return Err("relay hello protocol was rejected".to_string());
+    }
+    let hello_nonce = payload
+        .get("hello_nonce")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if !(16..=128).contains(&hello_nonce.len())
+        || !hello_nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("relay hello nonce was rejected".to_string());
+    }
+    let device_id = payload
+        .get("device_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    writer.open_content_session(from_peer_id)?;
+    let mut payload = serde_json::json!({
+        "kind": "relay_hello_proof",
+        "target_peer_id": from_peer_id,
+        "device_id": device_id,
+        "hello_nonce": hello_nonce,
+    });
+    protocol::add_relay_payload_protocol_version(&mut payload);
+    writer.bind_content_epochs(&mut payload);
+    writer
+        .send_now(Message::Text(protocol::publish_frame_text(&payload)))
+        .await
+}
+
 async fn publish_pairing_result(
     writer: &BrokerWriter,
     result: crate::state::PendingPairingResult,
@@ -2632,8 +3148,12 @@ async fn publish_payload(
     payload: OutboundBrokerPayload,
 ) -> Result<(), String> {
     let summary = summarize_outbound_payload(&payload);
-    let frame_text = frame_text_for_payload(&payload);
-    let frame_bytes = frame_text.len();
+    let mut payload_value =
+        serde_json::to_value(&payload).expect("broker payload should serialize");
+    protocol::add_relay_payload_protocol_version(&mut payload_value);
+    writer.bind_content_epochs(&mut payload_value);
+    let frame_bytes = reserved_publish_frame_len(&payload_value);
+    let frame_text = protocol::publish_frame_text(&payload_value);
     info!(
         broker_payload = %summary,
         frame_bytes,
@@ -2657,8 +3177,11 @@ async fn publish_payload(
 
 /// Serialize a payload into the frame the writer will send, without sending it.
 /// Used to build a chunk train up front so the writer can pace it.
-fn frame_message_for_payload(payload: &OutboundBrokerPayload) -> Message {
-    Message::Text(frame_text_for_payload(payload))
+fn frame_message_for_payload(writer: &BrokerWriter, payload: &OutboundBrokerPayload) -> Message {
+    let mut payload_value = serde_json::to_value(payload).expect("broker payload should serialize");
+    protocol::add_relay_payload_protocol_version(&mut payload_value);
+    writer.bind_content_epochs(&mut payload_value);
+    Message::Text(protocol::publish_frame_text(&payload_value))
 }
 
 async fn publish_targeted_messages(
@@ -2669,7 +3192,7 @@ async fn publish_targeted_messages(
         return Ok(());
     }
 
-    let mut batch = Vec::new();
+    let mut batch: Vec<TargetedBrokerMessage> = Vec::new();
     for message in messages {
         let mut candidate = batch.clone();
         candidate.push(message.clone());
@@ -2677,7 +3200,11 @@ async fn publish_targeted_messages(
             messages: candidate,
         };
         if !batch.is_empty()
-            && frame_bytes_for_payload(&candidate_payload) > MAX_BROKER_TEXT_FRAME_BYTES
+            && (batch.len() >= MAX_TARGETED_MESSAGES_PER_PUBLISH
+                || batch
+                    .iter()
+                    .any(|queued| queued.target_peer_id == message.target_peer_id)
+                || frame_bytes_for_payload(&candidate_payload) > MAX_BROKER_TEXT_FRAME_BYTES)
         {
             let payload = OutboundBrokerPayload::TargetedMessages { messages: batch };
             publish_payload(writer, payload)
@@ -2965,49 +3492,120 @@ async fn save_public_relay_registration(
     persist_bytes_atomically(path, payload).await
 }
 
+#[derive(Serialize, Deserialize)]
+struct PersistedRelayContentIdentity {
+    schema_version: u32,
+    content_signing_seed: String,
+}
+
+fn session_has_paired_devices(session_path: &Path) -> Result<bool, String> {
+    if !session_path.exists() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(session_path).map_err(|error| {
+        format!(
+            "relay session at {} could not be read ({error}); refusing to mint a replacement content identity",
+            session_path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+        format!(
+            "relay session at {} is unreadable; refusing to mint a replacement content identity",
+            session_path.display()
+        )
+    })?;
+    let paired = match value.get("paired_devices") {
+        Some(serde_json::Value::Object(devices)) => !devices.is_empty(),
+        Some(serde_json::Value::Array(devices)) => !devices.is_empty(),
+        _ => false,
+    };
+    Ok(paired)
+}
+
+async fn load_or_create_relay_content_identity(
+    path: &Path,
+    session_path: &Path,
+) -> Result<SigningKey, String> {
+    const SCHEMA: u32 = 1;
+    if path.exists() {
+        let text = tokio::fs::read_to_string(path).await.map_err(|error| {
+            format!(
+                "relay content identity at {} could not be read ({error}); refusing to replace it",
+                path.display()
+            )
+        })?;
+        let parsed: PersistedRelayContentIdentity = serde_json::from_str(&text).map_err(|_| {
+            format!(
+                "relay content identity at {} is unreadable; refusing to replace it",
+                path.display()
+            )
+        })?;
+        if parsed.schema_version != SCHEMA {
+            return Err(format!(
+                "relay content identity at {} has schema {}; refusing to replace it",
+                path.display(),
+                parsed.schema_version
+            ));
+        }
+        let seed = STANDARD
+            .decode(parsed.content_signing_seed.trim())
+            .map_err(|_| {
+                format!(
+                    "relay content identity at {} has an unusable seed; refusing to replace it",
+                    path.display()
+                )
+            })?;
+        let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| {
+            format!(
+                "relay content identity at {} has an unusable seed; refusing to replace it",
+                path.display()
+            )
+        })?;
+        return Ok(SigningKey::from_bytes(&seed));
+    }
+    if session_has_paired_devices(session_path)? {
+        return Err(format!(
+            "relay content identity at {} is missing but this relay already has paired devices; restore the identity file or pair the phones again after removing those devices",
+            path.display()
+        ));
+    }
+    let key = generate_content_signing_key();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                format!("relay content identity directory could not be created: {error}")
+            })?;
+        }
+    }
+    let body = serde_json::to_vec(&PersistedRelayContentIdentity {
+        schema_version: SCHEMA,
+        content_signing_seed: STANDARD.encode(key.to_bytes()),
+    })
+    .map_err(|error| format!("relay content identity could not be encoded: {error}"))?;
+    persist_bytes_atomically(path, body).await?;
+    Ok(key)
+}
+
+async fn load_existing_public_relay_identity(
+    path: &Path,
+    control_url: &str,
+) -> Result<PublicRelayIdentity, String> {
+    let loaded = read_public_relay_identity(path).await?;
+    let Some(persisted) = loaded else {
+        return Err(format!(
+            "public broker identity is missing at {}; refusing to generate a new key for an already enrolled relay",
+            path.display()
+        ));
+    };
+    identity_from_persisted(path, control_url, persisted)
+}
+
 async fn load_or_create_public_relay_identity(
     path: &Path,
     control_url: &str,
 ) -> Result<PublicRelayIdentity, String> {
-    let path_owned = path.to_path_buf();
-    let loaded = tokio::task::spawn_blocking(move || load_public_relay_identity_raw(&path_owned))
-        .await
-        .map_err(|error| format!("relay identity read task panicked: {error}"))??;
-
-    if let Some(persisted) = loaded {
-        if persisted.schema_version != PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION {
-            return Err(format!(
-                "unsupported broker relay identity schema {} in {}",
-                persisted.schema_version,
-                path.display()
-            ));
-        }
-        if persisted.control_url != control_url {
-            return Err(format!(
-                "broker relay identity {} was created for {}, expected {}",
-                path.display(),
-                persisted.control_url,
-                control_url
-            ));
-        }
-        let signing_seed: [u8; 32] = STANDARD
-            .decode(&persisted.relay_signing_seed)
-            .map_err(|_| {
-                format!(
-                    "broker relay identity {} contains an invalid signing seed",
-                    path.display()
-                )
-            })?
-            .try_into()
-            .map_err(|_| {
-                format!(
-                    "broker relay identity {} contains an invalid signing seed",
-                    path.display()
-                )
-            })?;
-        return Ok(PublicRelayIdentity {
-            signing_key: SigningKey::from_bytes(&signing_seed),
-        });
+    if let Some(persisted) = read_public_relay_identity(path).await? {
+        return identity_from_persisted(path, control_url, persisted);
     }
 
     let mut signing_seed = [0_u8; 32];
@@ -3017,6 +3615,57 @@ async fn load_or_create_public_relay_identity(
     };
     save_public_relay_identity(path, control_url, &identity).await?;
     Ok(identity)
+}
+
+async fn read_public_relay_identity(
+    path: &Path,
+) -> Result<Option<PersistedPublicRelayIdentity>, String> {
+    let path_owned = path.to_path_buf();
+    tokio::task::spawn_blocking(move || load_public_relay_identity_raw(&path_owned))
+        .await
+        .map_err(|error| format!("relay identity read task panicked: {error}"))?
+}
+
+fn identity_from_persisted(
+    path: &Path,
+    control_url: &str,
+    persisted: PersistedPublicRelayIdentity,
+) -> Result<PublicRelayIdentity, String> {
+    if persisted.schema_version != PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported broker relay identity schema {} in {}",
+            persisted.schema_version,
+            path.display()
+        ));
+    }
+    let persisted_origin = access_release::normalize_control_origin(&persisted.control_url)?;
+    let expected_origin = access_release::normalize_control_origin(control_url)?;
+    if persisted_origin != expected_origin {
+        return Err(format!(
+            "broker relay identity {} was created for {}, expected {}",
+            path.display(),
+            persisted.control_url,
+            control_url
+        ));
+    }
+    let signing_seed: [u8; 32] = STANDARD
+        .decode(&persisted.relay_signing_seed)
+        .map_err(|_| {
+            format!(
+                "broker relay identity {} contains an invalid signing seed",
+                path.display()
+            )
+        })?
+        .try_into()
+        .map_err(|_| {
+            format!(
+                "broker relay identity {} contains an invalid signing seed",
+                path.display()
+            )
+        })?;
+    Ok(PublicRelayIdentity {
+        signing_key: SigningKey::from_bytes(&signing_seed),
+    })
 }
 
 fn load_public_relay_identity_raw(
@@ -3169,7 +3818,6 @@ pub(super) fn verify_device_claim_challenge_proof(
         .map_err(|_| "device claim proof is invalid".to_string())
 }
 
-#[cfg(test)]
 pub(super) fn verify_device_claim_init_proof(
     action_id: &str,
     device_id: &str,
@@ -3215,7 +3863,6 @@ fn device_claim_proof_message(
     format!("agent-relay:claim-challenge:{challenge_id}:{challenge}:{device_id}:{peer_id}")
 }
 
-#[cfg(test)]
 fn device_claim_init_proof_message(action_id: &str, device_id: &str, peer_id: &str) -> String {
     format!("agent-relay:claim-init:{action_id}:{device_id}:{peer_id}")
 }

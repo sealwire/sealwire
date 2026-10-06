@@ -58,10 +58,18 @@ export function parsePairingPayload(rawInput) {
   if (!payload.pairing_join_ticket) {
     missingFields.push("pairing_join_ticket");
   }
+  if (!payload.relay_verify_key) {
+    missingFields.push("relay_verify_key");
+  }
   if (missingFields.length > 0) {
     if (missingFields.length === 1 && missingFields[0] === "pairing_join_ticket") {
       throw new Error(
         "pairing link is outdated and missing pairing_join_ticket; generate a new QR or pairing link from the local relay"
+      );
+    }
+    if (missingFields.includes("relay_verify_key")) {
+      throw new Error(
+        "pairing link is missing the relay identity key; generate a new QR or pairing link from the local relay and pair again"
       );
     }
     throw new Error(`pairing payload is missing required fields: ${missingFields.join(", ")}`);
@@ -400,6 +408,160 @@ function waitForTransaction(transaction) {
     transaction.onerror = () =>
       reject(transaction.error || new Error("device key transaction failed"));
   });
+}
+
+const RELAY_CONTENT_DOMAIN = "agent-relay:relay-content-v1\0";
+
+function contentText(value) {
+  return typeof value === "string" ? value : "";
+}
+
+function contentNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+}
+
+export function relayContentMessageBytes({
+  payload,
+  fromPeerId,
+  brokerRoomId,
+  session,
+  nonce,
+}) {
+  const envelope = payload?.envelope || {};
+  const fields = [
+    contentNumber(payload?.protocol_version),
+    contentText(payload?.kind),
+    contentText(session),
+    contentText(nonce),
+    contentText(fromPeerId),
+    contentText(payload?.target_peer_id),
+    contentText(payload?.device_id),
+    contentText(payload?.action_id),
+    contentText(payload?.action),
+    contentText(payload?.pairing_id),
+    contentNumber(payload?.chunk_index),
+    contentNumber(payload?.chunk_count),
+    contentText(payload?.hello_nonce),
+    contentText(envelope.nonce),
+    contentText(envelope.ciphertext),
+    contentText(brokerRoomId),
+  ];
+  const parts = [new TextEncoder().encode(RELAY_CONTENT_DOMAIN)];
+  for (const field of fields) {
+    const bytes = new TextEncoder().encode(field);
+    const length = new Uint8Array(4);
+    new DataView(length.buffer).setUint32(0, bytes.length, false);
+    parts.push(length, bytes);
+  }
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+export function signRelayContent(seedBytes, fields) {
+  const key = nacl.sign.keyPair.fromSeed(seedBytes);
+  const message = relayContentMessageBytes(fields);
+  return bytesToBase64(nacl.sign.detached(message, key.secretKey));
+}
+
+export function verifyRelayContent(verifyKeyBase64, signatureBase64, fields) {
+  try {
+    const key = base64ToBytes(verifyKeyBase64);
+    const signature = base64ToBytes(signatureBase64);
+    if (key.length !== nacl.sign.publicKeyLength || signature.length !== nacl.sign.signatureLength) {
+      return false;
+    }
+    return nacl.sign.detached.verify(relayContentMessageBytes(fields), signature, key);
+  } catch {
+    return false;
+  }
+}
+
+const REMOTE_REQUEST_DOMAIN = "agent-relay:remote-request-v1\0";
+const REMOTE_REQUEST_ENVELOPE_DOMAIN = "agent-relay:remote-request-envelope-v1\0";
+
+function lengthPrefixed(domain, fields) {
+  const encoder = new TextEncoder();
+  const parts = [encoder.encode(domain)];
+  for (const field of fields) {
+    const bytes = typeof field === "string" ? encoder.encode(field) : field;
+    const length = new Uint8Array(4);
+    new DataView(length.buffer).setUint32(0, bytes.length, false);
+    parts.push(length, bytes);
+  }
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+function decimal(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("remote request numbers must be non-negative safe integers");
+  }
+  return String(value);
+}
+
+// Must match `envelope_digest` in crates/relay-server/src/broker/request_auth.rs: over
+// the decoded bytes, so two base64 spellings of one ciphertext cannot sign differently.
+export function remoteRequestEnvelopeDigest(envelope) {
+  const digest = sha256(
+    lengthPrefixed(REMOTE_REQUEST_ENVELOPE_DOMAIN, [
+      base64ToBytes(envelope.nonce),
+      base64ToBytes(envelope.ciphertext),
+    ])
+  );
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// Must match `remote_request_message` in the same file; one test vector pins both.
+export function remoteRequestMessageBytes({
+  protocolVersion,
+  relayVerifyKey,
+  brokerRoomId,
+  relayPeerId,
+  deviceId,
+  peerId,
+  sid,
+  boot,
+  seq,
+  time,
+  actionId,
+  action,
+  opBoot,
+  opT0,
+  envelope,
+}) {
+  return lengthPrefixed(REMOTE_REQUEST_DOMAIN, [
+    decimal(protocolVersion),
+    relayVerifyKey,
+    brokerRoomId,
+    relayPeerId,
+    deviceId,
+    peerId,
+    sid,
+    boot,
+    decimal(seq),
+    decimal(time),
+    actionId,
+    action,
+    opBoot,
+    decimal(opT0),
+    remoteRequestEnvelopeDigest(envelope),
+  ]);
+}
+
+export async function signRemoteRequest(fields, keypair = null) {
+  const signer = keypair || (await ensureDeviceKeypair());
+  return bytesToBase64(await signer.sign(remoteRequestMessageBytes(fields)));
 }
 
 function wrapRequest(request) {

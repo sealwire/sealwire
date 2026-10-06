@@ -188,8 +188,8 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
   // Keep in step with broker-client.js. It drops a payload whose relay version it
   // does not know via `renderLog`, so a stale fixture reaches no console: the page
   // connects, sends its requests, and silently ignores every answer.
-  const BROKER_PROTOCOL_VERSION = 1;
-  const RELAY_PROTOCOL_VERSION = 3;
+  const BROKER_PROTOCOL_VERSION = 2;
+  const RELAY_PROTOCOL_VERSION = 5;
 
   // What the fake relay currently reports; a test can move the session's folder.
   let liveSnapshot = truncatedSnapshot;
@@ -334,6 +334,8 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
           ok: true,
           session_claim: "session-claim-e2e",
           session_claim_expires_at: Math.floor(Date.now() / 1000) + 3600,
+          session_claim_boot: "boot-e2e",
+          session_claim_relay_ms: 2_000_000_000,
         });
         return;
       }

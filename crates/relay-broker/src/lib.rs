@@ -36,6 +36,7 @@ use std::{
 };
 
 use axum::{
+    body::Bytes,
     extract::{
         connect_info::ConnectInfo,
         ws::{Message, WebSocket},
@@ -54,17 +55,20 @@ use protocol::{
     BROKER_PROTOCOL_VERSION,
 };
 use public_control::{
-    AccessReleaseRequest, AccessReleaseResponse, ClientClaimRequest, ClientClaimResponse,
-    ClientGrantRequest, ClientGrantResponse, ClientIdentityRevokeResponse,
-    ClientIdentityRotateResponse, ClientRelaysResponse, ClientSessionResponse,
-    CredentialRefreshChallengeRequest, CredentialRefreshChallengeResponse,
-    CredentialRefreshRequest, CredentialRefreshResponse, DeviceGrantBulkRevokeRequest,
-    DeviceGrantBulkRevokeResponse, DeviceGrantRequest, DeviceGrantResponse,
-    DeviceGrantRevokeRequest, DeviceGrantRevokeResponse, DeviceSessionResponse,
-    DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse, PublicControlPlane,
+    relay_join_message, verify_relay_control_signature, AccessReleaseRequest,
+    AccessReleaseResponse, ClientClaimRequest, ClientClaimResponse, ClientGrantRequest,
+    ClientGrantResponse, ClientIdentityRevokeResponse, ClientIdentityRotateResponse,
+    ClientRelaysResponse, ClientSessionResponse, CredentialRefreshChallengeRequest,
+    CredentialRefreshChallengeResponse, CredentialRefreshRequest, CredentialRefreshResponse,
+    DeviceGrantBulkRevokeRequest, DeviceGrantBulkRevokeResponse, DeviceGrantRequest,
+    DeviceGrantResponse, DeviceGrantRevokeRequest, DeviceGrantRevokeResponse,
+    DeviceSessionResponse, DeviceWsTokenResponse, PairingWsTokenRequest, PairingWsTokenResponse,
+    PublicControlPlane, RelayControlChallengeRequest, RelayControlChallengeResponse,
     RelayEnrollmentChallengeRequest, RelayEnrollmentChallengeResponse,
     RelayEnrollmentCompleteRequest, RelayEnrollmentResponse, RelayRegistrationSnapshot,
-    RelayWsTokenRequest, RelayWsTokenResponse, DEVICE_LIMIT_REACHED_ERROR_PREFIX,
+    RelayWsTokenChallengeRequest, RelayWsTokenChallengeResponse, RelayWsTokenRequest,
+    RelayWsTokenResponse, DEVICE_LIMIT_REACHED_ERROR_PREFIX, RELAY_CONTROL_CHALLENGE_HEADER,
+    RELAY_CONTROL_SIGNATURE_HEADER,
 };
 use rand::{distributions::Alphanumeric, Rng};
 use relay_http::{
@@ -678,6 +682,7 @@ struct VerifiedBrokerJoin {
     peer_id: Option<String>,
     device_id: Option<String>,
     pairing_id: Option<String>,
+    relay_verify_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1437,6 +1442,7 @@ impl BrokerJoinVerifier {
                 peer_id: claims.peer_id,
                 device_id: claims.device_id,
                 pairing_id: claims.pairing_id,
+                relay_verify_key: claims.relay_verify_key,
             }),
             Self::PublicControlPlane(control_plane) => verify_join_ticket_for_connection(
                 control_plane.issuer_key(),
@@ -1449,6 +1455,7 @@ impl BrokerJoinVerifier {
                 peer_id: claims.peer_id,
                 device_id: claims.device_id,
                 pairing_id: claims.pairing_id,
+                relay_verify_key: claims.relay_verify_key,
             }),
             Self::Misconfigured(error) => Err(error.clone()),
         }
@@ -1605,8 +1612,16 @@ fn app_with_access_strategy_parts(
             post(public_complete_relay_enrollment),
         )
         .route(
+            "/api/public/relay/ws-token/challenge",
+            post(public_create_relay_ws_ticket_challenge),
+        )
+        .route(
             "/api/public/relay/ws-token",
             post(public_issue_relay_ws_token),
+        )
+        .route(
+            "/api/public/relay/control/challenge",
+            post(public_create_relay_control_challenge),
         )
         .route(
             "/api/public/relay/access/release",
@@ -2155,6 +2170,22 @@ async fn public_complete_relay_enrollment(
     Ok(Json(response))
 }
 
+async fn public_create_relay_ws_ticket_challenge(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<BrokerAppState>,
+    headers: HeaderMap,
+    Json(input): Json<RelayWsTokenChallengeRequest>,
+) -> Result<Json<RelayWsTokenChallengeResponse>, (StatusCode, Json<ApiErrorBody>)> {
+    enforce_public_api_rate_limit(&state, remote_addr, "relay_ws_token_challenge").await?;
+    let control_plane = require_public_control_plane(&state)?;
+    let bearer = bearer_token(&headers)?;
+    control_plane
+        .create_relay_ws_ticket_challenge(bearer, input)
+        .await
+        .map(Json)
+        .map_err(public_api_error)
+}
+
 async fn public_issue_relay_ws_token(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<BrokerAppState>,
@@ -2214,15 +2245,65 @@ async fn public_issue_relay_ws_token(
 /// unavailable; clients may retry the same bearer, and an Unauthorized after an
 /// earlier authenticated 503 can be treated as already released (Round 3B will
 /// document the client contract). Internal logs keep a redacted diagnostic.
+async fn public_create_relay_control_challenge(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<BrokerAppState>,
+    headers: HeaderMap,
+    Json(input): Json<RelayControlChallengeRequest>,
+) -> Result<Json<RelayControlChallengeResponse>, (StatusCode, Json<ApiErrorBody>)> {
+    enforce_public_api_rate_limit(&state, remote_addr, "relay_control_challenge").await?;
+    let control_plane = require_public_control_plane(&state)?;
+    let bearer = bearer_token(&headers)?;
+    control_plane
+        .create_relay_control_challenge(bearer, input)
+        .await
+        .map(Json)
+        .map_err(public_api_error)
+}
+
+async fn verified_relay_control_body<T>(
+    control_plane: &PublicControlPlane,
+    bearer: &str,
+    operation: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<T, (StatusCode, Json<ApiErrorBody>)>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let challenge_id = headers
+        .get(RELAY_CONTROL_CHALLENGE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let signature = headers
+        .get(RELAY_CONTROL_SIGNATURE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    control_plane
+        .consume_relay_control_proof(bearer, operation, body, challenge_id, signature)
+        .await
+        .map_err(public_api_error)?;
+    serde_json::from_slice(body)
+        .map_err(|_| public_api_error("relay control body is not json".to_string()))
+}
+
 async fn public_release_relay_access(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
-    Json(input): Json<AccessReleaseRequest>,
+    body: Bytes,
 ) -> Result<Json<AccessReleaseResponse>, (StatusCode, Json<ApiErrorBody>)> {
     enforce_public_api_rate_limit(&state, remote_addr, "relay_access_release").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
+    let input: AccessReleaseRequest = verified_relay_control_body(
+        &control_plane,
+        bearer,
+        "POST /api/public/relay/access/release",
+        &headers,
+        &body,
+    )
+    .await?;
 
     // Discover the opaque same-identity lock key before taking the lock.
     let first_auth = control_plane
@@ -2285,11 +2366,19 @@ async fn public_issue_pairing_ws_token(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
-    Json(input): Json<PairingWsTokenRequest>,
+    body: Bytes,
 ) -> Result<Json<PairingWsTokenResponse>, (StatusCode, Json<ApiErrorBody>)> {
     enforce_public_api_rate_limit(&state, remote_addr, "pairing_ws_token").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
+    let input: PairingWsTokenRequest = verified_relay_control_body(
+        &control_plane,
+        bearer,
+        "POST /api/public/pairing/ws-token",
+        &headers,
+        &body,
+    )
+    .await?;
     let relay = control_plane
         .authenticate_relay_access(bearer, &input.relay_id, &input.broker_room_id)
         .await
@@ -2321,11 +2410,19 @@ async fn public_issue_device_grant(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
-    Json(input): Json<DeviceGrantRequest>,
+    body: Bytes,
 ) -> Result<Json<DeviceGrantResponse>, (StatusCode, Json<ApiErrorBody>)> {
     enforce_public_api_rate_limit(&state, remote_addr, "device_grant").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
+    let input: DeviceGrantRequest = verified_relay_control_body(
+        &control_plane,
+        bearer,
+        "POST /api/public/devices",
+        &headers,
+        &body,
+    )
+    .await?;
     // Authenticate the relay BEFORE consulting access policy, so an unauthenticated
     // caller cannot probe which relays are allowed/denied (the access lookup below
     // returns a distinguishable status vs. the auth 401).
@@ -2366,11 +2463,19 @@ async fn public_issue_client_grant(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
-    Json(input): Json<ClientGrantRequest>,
+    body: Bytes,
 ) -> Result<Json<ClientGrantResponse>, (StatusCode, Json<ApiErrorBody>)> {
     enforce_public_api_rate_limit(&state, remote_addr, "client_grant").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
+    let input: ClientGrantRequest = verified_relay_control_body(
+        &control_plane,
+        bearer,
+        "POST /api/public/clients/grants",
+        &headers,
+        &body,
+    )
+    .await?;
     control_plane
         .issue_client_grant(bearer, input)
         .await
@@ -2797,11 +2902,14 @@ async fn public_revoke_device_grant(
     State(state): State<BrokerAppState>,
     Path(device_id): Path<String>,
     headers: HeaderMap,
-    Json(input): Json<DeviceGrantRevokeRequest>,
+    body: Bytes,
 ) -> Result<Json<DeviceGrantRevokeResponse>, (StatusCode, Json<ApiErrorBody>)> {
     enforce_public_api_rate_limit(&state, remote_addr, "revoke_device_grant").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
+    let operation = format!("POST /api/public/devices/{device_id}/revoke");
+    let input: DeviceGrantRevokeRequest =
+        verified_relay_control_body(&control_plane, bearer, &operation, &headers, &body).await?;
     control_plane
         .revoke_device_grant(bearer, &device_id, input)
         .await
@@ -2813,11 +2921,19 @@ async fn public_revoke_other_device_grants(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
-    Json(input): Json<DeviceGrantBulkRevokeRequest>,
+    body: Bytes,
 ) -> Result<Json<DeviceGrantBulkRevokeResponse>, (StatusCode, Json<ApiErrorBody>)> {
     enforce_public_api_rate_limit(&state, remote_addr, "revoke_other_device_grants").await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
+    let input: DeviceGrantBulkRevokeRequest = verified_relay_control_body(
+        &control_plane,
+        bearer,
+        "POST /api/public/devices/revoke-others",
+        &headers,
+        &body,
+    )
+    .await?;
     control_plane
         .revoke_other_device_grants(bearer, input)
         .await
@@ -2845,7 +2961,7 @@ async fn websocket(
 
 async fn handle_socket(
     state: BrokerAppState,
-    socket: WebSocket,
+    mut socket: WebSocket,
     remote_addr: SocketAddr,
     channel_id: String,
     query: ConnectQuery,
@@ -3004,6 +3120,93 @@ async fn handle_socket(
     } else {
         None
     };
+    if query.role == protocol::PeerRole::Relay {
+        let expected_peer = verified_join.peer_id.clone().unwrap_or_default();
+        if peer_id.as_deref().unwrap_or("") != expected_peer {
+            reject_socket(
+                &state.hardening.publish_metrics,
+                socket,
+                "join_rejected",
+                state.join_verifier.client_join_error_message(),
+            )
+            .await;
+            return;
+        }
+        let proof = if let Some(plane) = state.join_verifier.public_control_plane() {
+            match plane.enrolled_verify_key_for_room(&channel_id).await {
+                Ok(enrolled) => {
+                    if verified_join
+                        .relay_verify_key
+                        .as_deref()
+                        .is_some_and(|ticket_key| ticket_key != enrolled)
+                    {
+                        Err("relay join ticket key was rejected".to_string())
+                    } else {
+                        match plane.relay_id_for_broker_room(&channel_id).await {
+                            Some(relay_id) => {
+                                Ok((plane.ticket_origin().to_string(), relay_id, enrolled))
+                            }
+                            None => Err("relay registration was not found".to_string()),
+                        }
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            match verified_join.relay_verify_key.clone() {
+                Some(key) if !key.is_empty() => {
+                    Ok(("self-hosted".to_string(), expected_peer.clone(), key))
+                }
+                _ => Err("relay join ticket is missing its verify key".to_string()),
+            }
+        };
+        match proof {
+            Ok((origin, relay_id, verify_key)) => {
+                if let Err(message) = prove_relay_socket(
+                    &mut socket,
+                    &origin,
+                    &relay_id,
+                    &channel_id,
+                    &expected_peer,
+                    query.join_ticket.as_deref().unwrap_or(""),
+                    &verify_key,
+                )
+                .await
+                {
+                    debug!(
+                        remote_ip = %remote_addr.ip(),
+                        broker_room_id = %channel_id,
+                        reason = %scrub_sensitive_message(&message),
+                        "broker relay join proof rejected"
+                    );
+                    reject_socket(
+                        &state.hardening.publish_metrics,
+                        socket,
+                        "join_rejected",
+                        state.join_verifier.client_join_error_message(),
+                    )
+                    .await;
+                    return;
+                }
+            }
+            Err(message) => {
+                debug!(
+                    remote_ip = %remote_addr.ip(),
+                    broker_room_id = %channel_id,
+                    reason = %scrub_sensitive_message(&message),
+                    "broker relay join proof rejected"
+                );
+                reject_socket(
+                    &state.hardening.publish_metrics,
+                    socket,
+                    "join_rejected",
+                    state.join_verifier.client_join_error_message(),
+                )
+                .await;
+                return;
+            }
+        }
+    }
     let join = loop {
         let candidate = peer_id
             .clone()
@@ -3277,8 +3480,37 @@ async fn handle_socket(
                                         if error.contains("connection has been replaced") {
                                             break;
                                         }
+                                        if send_message(
+                                            &state.hardening.publish_metrics,
+                                            &mut sender,
+                                            &ServerMessage::Error {
+                                                code: "invalid_publish".to_string(),
+                                                message: error,
+                                            },
+                                        )
+                                        .await.is_err() {
+                                            break;
+                                        }
                                     }
                                 }
+                            }
+                            Ok(ClientMessage::RelayJoinProof { .. }) => {
+                                debug!(
+                                    channel_id,
+                                    peer_id,
+                                    "rejecting relay join proof after the socket was seated"
+                                );
+                                let _ = send_message(
+                                    &state.hardening.publish_metrics,
+                                    &mut sender,
+                                    &ServerMessage::Error {
+                                        code: "invalid_client_frame".to_string(),
+                                        message: "relay join proof is only accepted before the socket is seated"
+                                            .to_string(),
+                                    },
+                                )
+                                .await;
+                                break;
                             }
                             Err(error) => {
                                 debug!(channel_id, peer_id, %error, "rejecting invalid client frame");
@@ -3506,6 +3738,80 @@ fn verify_join_ticket_for_connection(
             Err("join_ticket kind is invalid for surface".to_string())
         }
     }
+}
+
+async fn prove_relay_socket(
+    socket: &mut WebSocket,
+    broker_origin: &str,
+    relay_id: &str,
+    room: &str,
+    peer_id: &str,
+    join_ticket: &str,
+    relay_verify_key: &str,
+) -> Result<(), String> {
+    let challenge_id: String = format!(
+        "jch-{}",
+        rand::thread_rng()
+            .sample_iter(&rand::distributions::Alphanumeric)
+            .take(24)
+            .map(char::from)
+            .collect::<String>()
+            .to_ascii_lowercase()
+    );
+    let challenge: String = format!(
+        "jt-{}",
+        rand::thread_rng()
+            .sample_iter(&rand::distributions::Alphanumeric)
+            .take(40)
+            .map(char::from)
+            .collect::<String>()
+            .to_ascii_lowercase()
+    );
+    let ticket_sha256 = sha256_hex(join_ticket);
+    let frame = serde_json::to_string(&ServerMessage::RelayJoinChallenge {
+        challenge_id: challenge_id.clone(),
+        challenge: challenge.clone(),
+        broker_origin: broker_origin.to_string(),
+        relay_id: relay_id.to_string(),
+        broker_room_id: room.to_string(),
+        relay_peer_id: peer_id.to_string(),
+        ticket_sha256: ticket_sha256.clone(),
+        relay_verify_key: relay_verify_key.to_string(),
+    })
+    .map_err(|error| format!("failed to encode relay join challenge: {error}"))?;
+    socket
+        .send(Message::Text(frame))
+        .await
+        .map_err(|error| format!("failed to send relay join challenge: {error}"))?;
+    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .map_err(|_| "relay join proof timed out".to_string())?
+        .ok_or_else(|| "relay join socket closed before the proof".to_string())?
+        .map_err(|error| format!("relay join proof read failed: {error}"))?;
+    let Message::Text(text) = frame else {
+        return Err("relay join proof was rejected".to_string());
+    };
+    let ClientMessage::RelayJoinProof {
+        challenge_id: got_id,
+        signature,
+    } = serde_json::from_str(&text).map_err(|_| "relay join proof was rejected".to_string())?
+    else {
+        return Err("relay join proof was rejected".to_string());
+    };
+    if got_id != challenge_id {
+        return Err("relay join proof was rejected".to_string());
+    }
+    let message = relay_join_message(
+        &broker_origin,
+        &challenge_id,
+        &challenge,
+        &ticket_sha256,
+        &relay_id,
+        room,
+        peer_id,
+    )?;
+    verify_relay_control_signature(&relay_verify_key, &message, &signature)
+        .map_err(|_| "relay join proof was rejected".to_string())
 }
 
 fn require_public_control_plane(

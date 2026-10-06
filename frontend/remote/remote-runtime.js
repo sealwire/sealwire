@@ -1,5 +1,5 @@
 import { abandonStalledClaim, clearClaimLifecycle, configureRemoteActions, handleRemoteBrokerPayload, recoverRemoteSession, rejectPendingActions, resendPendingActions, suspendPendingActionDeadlines } from "./actions.js";
-import { closeBrokerSocket, configureBrokerClient, connectBroker, refreshRelayDirectory } from "./broker-client.js";
+import { closeBrokerSocket, configureBrokerClient, connectBroker, refreshRelayDirectory, relayContentIsReady } from "./broker-client.js";
 import { replaceRemoteIdentity } from "./identity-change.js";
 import { initializeRemoteNavigation, openRemoteNavigation } from "./navigation.js";
 import { initializeRemotePointerClass } from "./pointer-mode.js";
@@ -17,7 +17,7 @@ let runtimeConfigured = false;
 /// What this browser must do about the RELAY coming and going, as opposed to its own
 /// socket. Exported so the recovery it owes can be tested: none of it is observable
 /// through the socket, and all of it is state the relay drops on its side.
-export function handleRelayPresence(kind, peer) {
+export function handleRelayPresence(kind, peer, options = {}) {
   if (peer?.role !== "relay") {
     return;
   }
@@ -26,7 +26,7 @@ export function handleRelayPresence(kind, peer) {
   // acted on, nothing else ever asks again and this browser waits for an approval the
   // laptop was never shown.
   if (hasActivePairing()) {
-    if (kind === "joined") {
+    if (kind === "joined" && relayContentIsReady()) {
       void sendPairingRequest().catch((error) => {
         renderLog(`Pairing request could not be re-sent: ${error.message}`);
       });
@@ -38,13 +38,18 @@ export function handleRelayPresence(kind, peer) {
   }
   if (kind === "joined") {
     // Before recovery, because recovery awaits the claim and a challenge left over from
-    // the relay's previous session is one nobody will ever answer.
+    // the relay's previous session is one nobody will ever answer. The new identity
+    // proof may still be in flight; the old claim is already dead.
     abandonStalledClaim();
-    void recoverRemoteSession("relay joined");
-    // Anything still unanswered is asked again under its ORIGINAL action id, so a
-    // reply lost while the relay was away is served from its replay cache rather
-    // than by running the action a second time.
-    void resendPendingActions();
+    // A join that is about to prove again must not recover on the session it is
+    // replacing. The proof's ready handler starts the fresh recovery.
+    if (options.helloFollows || !relayContentIsReady()) {
+      return;
+    }
+    // Anything still unanswered is asked again under its ORIGINAL action id once the new
+    // claim is in, so a reply lost while the relay was away is served from its record
+    // rather than by running the action a second time.
+    void recoverRemoteSession("relay joined").then(() => resendPendingActions());
     return;
   }
   // The relay ending its own session — which is what a dropped publish now causes —
@@ -59,6 +64,28 @@ export function handleRelayPresence(kind, peer) {
   resetDeclaredWatchedThreads();
 }
 
+/// The phone may send pairing or restore a session only after this socket's relay
+/// identity proof. A relay that left and came back proves again, and that is the
+/// moment an in-flight pairing request is asked once more.
+export function handleRelayContentReady(connection) {
+  // Decided by what THIS socket was opened for, not by a global predicate. A
+  // retired/expired ticket stays in state for its error card, and when a device
+  // profile also exists a clock-dependent check would flip mid-connection and
+  // recover the old session over the PAIRING room (or send a dead pairing request
+  // into the device's room). `connection.kind` cannot drift.
+  if (connection?.kind === "pairing") {
+    void sendPairingRequest().catch((error) => {
+      renderLog(`Pairing request could not be sent: ${error.message}`);
+    });
+    return;
+  }
+  if (state.remoteAuth) {
+    abandonStalledClaim();
+    // The resend waits for the claim: every action is signed under the new session.
+    void recoverRemoteSession("relay identity proof").then(() => resendPendingActions());
+  }
+}
+
 export function ensureRemoteRuntimeConfigured() {
   if (runtimeConfigured) {
     return;
@@ -66,29 +93,19 @@ export function ensureRemoteRuntimeConfigured() {
 
   configureBrokerClient({
     onBrokerReady(frame, reason, connection) {
-      // Decided by what THIS socket was opened for, not by a global predicate. A
-      // retired/expired ticket stays in state for its error card, and when a device
-      // profile also exists a clock-dependent check would flip mid-connection and
-      // recover the old session over the PAIRING room (or send a dead pairing request
-      // into the device's room). `connection.kind` cannot drift.
-      if (connection?.kind === "pairing") {
-        // Catch rather than `void`: the request re-validates its attempt before
-        // publishing, but a socket torn down underneath it still rejects.
-        void sendPairingRequest().catch((error) => {
-          renderLog(`Pairing request could not be sent: ${error.message}`);
-        });
+      if (!connection?.relayVerifyKey) {
+        renderLog("This phone has no pinned relay key. Pair again before sending anything to this relay.");
         return;
       }
-
-      if (state.remoteAuth) {
-        const relayPresent = Array.isArray(frame?.peers)
-          && frame.peers.some((peer) => peer?.role === "relay");
-        if (!relayPresent) {
-          renderLog("Broker is ready; waiting for the relay peer before recovering this session.");
-          return;
-        }
-        void recoverRemoteSession(`broker ${reason}`);
+      const relayPresent = Array.isArray(frame?.peers)
+        && frame.peers.some((peer) => peer?.role === "relay" && peer.peer_id === connection.relayPeerId);
+      if (!relayPresent) {
+        renderLog("Broker is ready; waiting for the relay identity proof before recovering this session.");
       }
+      void reason;
+    },
+    onRelayContentReady(connection) {
+      handleRelayContentReady(connection);
     },
     onBrokerPayload(payload) {
       return handleBrokerPayload(payload);

@@ -7,7 +7,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use relay_broker::public_control::{AccessReleaseRequest, AccessReleaseResponse};
+use ed25519_dalek::SigningKey;
+#[cfg(test)]
+use relay_broker::public_control::RelayControlChallengeRequest;
+use relay_broker::public_control::{
+    AccessReleaseRequest, AccessReleaseResponse, RelayControlChallengeResponse,
+};
+#[cfg(test)]
+use relay_util::sha256_hex;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -15,11 +22,13 @@ use url::Url;
 use super::activation::scrub_activation_env;
 use super::auth::{RELAY_BROKER_CONTROL_URL_ENV, RELAY_BROKER_REGISTRATION_PATH_ENV};
 use super::lifecycle::{delete_registration_if_matches, BrokerLifecycleLock, RegistrationIdentity};
+use super::signed_control::{SignedControlError, SignedControlRequest, CONTROL_CHALLENGE_PATH};
 use super::{
     load_public_relay_registration_raw, resolve_public_relay_registration_path,
     PersistedPublicRelayRegistration, PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
 };
 
+const ACCESS_RELEASE_PATH: &str = "/api/public/relay/access/release";
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_LOCAL_FILE_BYTES: usize = 256 * 1024;
@@ -183,6 +192,17 @@ pub(crate) async fn release_cloud_access_after_acquire(
         Err(error) => return ReleaseOutcome::Failed(error),
     };
 
+    let identity_path =
+        registration_path.with_file_name(crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE);
+    let identity = match super::load_existing_public_relay_identity(
+        &identity_path,
+        expected_control_url,
+    )
+    .await
+    {
+        Ok(identity) => identity,
+        Err(error) => return ReleaseOutcome::Failed(error),
+    };
     let request = AccessReleaseRequest {
         relay_id: persisted.relay_id.clone(),
         broker_room_id: persisted.broker_room_id.clone(),
@@ -192,6 +212,7 @@ pub(crate) async fn release_cloud_access_after_acquire(
         expected_control_url,
         &persisted.relay_refresh_token,
         &request,
+        &identity.signing_key,
     )
     .await;
 
@@ -237,6 +258,7 @@ pub(crate) async fn release_cloud_access_after_acquire(
                         expected_control_url,
                         &persisted.relay_refresh_token,
                         &request,
+                        &identity.signing_key,
                     )
                     .await
                     {
@@ -397,22 +419,51 @@ async fn post_access_release(
     control_url: &str,
     bearer: &str,
     body: &AccessReleaseRequest,
+    signing_key: &SigningKey,
 ) -> Result<(), ReleaseHttpError> {
-    let mut url = Url::parse(control_url).map_err(|e| {
+    let control = Url::parse(control_url).map_err(|e| {
         ReleaseHttpError::Network(format!("invalid control URL `{control_url}`: {e}"))
     })?;
-    if !url.username().is_empty() || url.password().is_some() {
+    if !control.username().is_empty() || control.password().is_some() {
         return Err(ReleaseHttpError::Network(
             "control URL must not include userinfo credentials".to_string(),
         ));
     }
-    url.set_path("/api/public/relay/access/release");
-    url.set_query(None);
-
-    let response = client
-        .post(url.clone())
+    let call = SignedControlRequest::new(
+        &control,
+        ACCESS_RELEASE_PATH,
+        &body.relay_id,
+        &body.broker_room_id,
+        body,
+    )
+    .map_err(|error| {
+        ReleaseHttpError::Network(format!("failed to encode release body: {error}"))
+    })?;
+    let mut challenge_url = control;
+    challenge_url.set_path(CONTROL_CHALLENGE_PATH);
+    challenge_url.set_query(None);
+    let challenge_response = client
+        .post(challenge_url)
         .bearer_auth(bearer)
-        .json(body)
+        .json(&call.challenge_request())
+        .send()
+        .await
+        .map_err(|error| ReleaseHttpError::Network(format!("request failed: {error}")))?;
+    if !challenge_response.status().is_success() {
+        return Err(map_failed_release(challenge_response).await);
+    }
+    let challenge: RelayControlChallengeResponse =
+        challenge_response.json().await.map_err(|error| {
+            ReleaseHttpError::Network(format!("failed to decode control challenge: {error}"))
+        })?;
+    let response = call
+        .sign(client, bearer, signing_key, challenge)
+        .map_err(|error| match error {
+            SignedControlError::ChallengeMismatch => ReleaseHttpError::Network(
+                "broker control challenge was not issued for this release".to_string(),
+            ),
+            SignedControlError::Message(message) => ReleaseHttpError::Network(message),
+        })?
         .send()
         .await
         .map_err(|error| ReleaseHttpError::Network(format!("request failed: {error}")))?;
@@ -472,6 +523,37 @@ async fn post_access_release(
     }
 }
 
+async fn map_failed_release(response: reqwest::Response) -> ReleaseHttpError {
+    let status = response.status();
+    if status.is_redirection() {
+        return ReleaseHttpError::Redirect;
+    }
+    let bytes = match read_body_bounded(response, MAX_RESPONSE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => return ReleaseHttpError::Network(error),
+    };
+    let parsed: ReleaseErrorBody = serde_json::from_slice(&bytes).unwrap_or(ReleaseErrorBody {
+        error: None,
+        message: None,
+        access_released: None,
+    });
+    let code = parsed.error.as_deref().unwrap_or("unavailable");
+    let safe = explain_release_status(status.as_u16(), code);
+    match status.as_u16() {
+        401 => ReleaseHttpError::Unauthorized,
+        403 => ReleaseHttpError::Forbidden { message: safe },
+        429 => ReleaseHttpError::RateLimited { message: safe },
+        503 => ReleaseHttpError::Unavailable {
+            access_released: parsed.access_released == Some(true),
+            message: safe,
+        },
+        other => ReleaseHttpError::Other {
+            status: other,
+            message: safe,
+        },
+    }
+}
+
 async fn read_body_bounded(
     response: reqwest::Response,
     max_bytes: usize,
@@ -515,7 +597,7 @@ fn known_release_error_code(code: &str) -> Option<&'static str> {
     }
 }
 
-fn normalize_control_origin(raw: &str) -> Result<String, String> {
+pub(crate) fn normalize_control_origin(raw: &str) -> Result<String, String> {
     let mut url = Url::parse(raw)
         .map_err(|_| "invalid control URL: could not parse control origin".to_string())?;
     let scheme = url.scheme().to_ascii_lowercase();
@@ -663,6 +745,40 @@ pub(crate) fn bearer_fingerprint_for_test(token: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn with_test_control_challenge<S>(router: axum::Router<S>) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.route(
+        "/api/public/relay/control/challenge",
+        axum::routing::post(test_control_challenge),
+    )
+}
+
+#[cfg(test)]
+async fn test_control_challenge(
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<RelayControlChallengeRequest>,
+) -> axum::Json<RelayControlChallengeResponse> {
+    let header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let token = header.strip_prefix("Bearer ").unwrap_or(header).trim();
+    axum::Json(RelayControlChallengeResponse {
+        challenge_id: "cch-test".to_string(),
+        challenge: "ct-test".to_string(),
+        operation: body.operation,
+        relay_id: body.relay_id,
+        broker_room_id: body.broker_room_id,
+        broker_origin: "sealwire-broker".to_string(),
+        refresh_token_hash: sha256_hex(token),
+        request_sha256: body.request_sha256,
+        expires_at: 4_000_000_000,
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::{
@@ -679,6 +795,28 @@ mod tests {
     struct MockState {
         calls: Arc<Mutex<u32>>,
         mode: Arc<Mutex<&'static str>>,
+    }
+
+    async fn mock_control_challenge(
+        headers: HeaderMap,
+        Json(body): Json<RelayControlChallengeRequest>,
+    ) -> Json<RelayControlChallengeResponse> {
+        let header = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        let token = header.strip_prefix("Bearer ").unwrap_or(header).trim();
+        Json(RelayControlChallengeResponse {
+            challenge_id: "cch-test".to_string(),
+            challenge: "ct-test".to_string(),
+            operation: body.operation,
+            relay_id: body.relay_id,
+            broker_room_id: body.broker_room_id,
+            broker_origin: "sealwire-broker".to_string(),
+            refresh_token_hash: sha256_hex(token),
+            request_sha256: body.request_sha256,
+            expires_at: 4_000_000_000,
+        })
     }
 
     async fn mock_release(
@@ -752,6 +890,10 @@ mod tests {
             mode: Arc::new(Mutex::new(mode)),
         };
         let app = Router::new()
+            .route(
+                "/api/public/relay/control/challenge",
+                post(mock_control_challenge),
+            )
             .route("/api/public/relay/access/release", post(mock_release))
             .with_state(state.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -768,6 +910,22 @@ mod tests {
     }
 
     fn write_reg(path: &Path, control_url: &str, token: &str) {
+        let identity_path = path.with_file_name(crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE);
+        let control = url::Url::parse(control_url).expect("control url");
+        let identity = serde_json::json!({
+            "schema_version": 1,
+            "control_url": control.as_str(),
+            "relay_signing_seed": base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                [7_u8; 32],
+            ),
+        });
+        std::fs::write(
+            &identity_path,
+            serde_json::to_vec_pretty(&identity).expect("identity json"),
+        )
+        .expect("identity should save");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let payload = serde_json::to_vec_pretty(&PersistedPublicRelayRegistration {
             schema_version: PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
             control_url: control_url.to_string(),
@@ -776,7 +934,6 @@ mod tests {
             relay_refresh_token: token.into(),
         })
         .unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, payload).unwrap();
     }
 
@@ -796,14 +953,15 @@ mod tests {
         let reg = dir.path().join("public-broker-registration.json");
         let marker = dir.path().join(PENDING_RELEASE_FILE);
         write_reg(&reg, &origin, "refresh-token-abc");
-        // Identity sibling should be preserved (we never touch it).
         let identity = dir.path().join("public-broker-identity.json");
-        std::fs::write(&identity, b"{\"keep\":true}").unwrap();
 
         let outcome = release_cloud_access(&origin, &reg, &marker).await;
         assert_eq!(outcome, ReleaseOutcome::Released);
         assert!(!reg.exists());
-        assert!(identity.exists());
+        assert!(
+            identity.exists(),
+            "unbind must not delete the relay identity"
+        );
         assert!(!marker.exists());
         assert_eq!(*state.calls.lock().unwrap(), 1);
     }
@@ -928,7 +1086,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let app = Router::new().route(
+            let app = super::with_test_control_challenge(Router::new()).route(
                 "/api/public/relay/access/release",
                 axum::routing::post(|| async {
                     let body = "x".repeat(MAX_RESPONSE_BYTES + 8);
@@ -961,7 +1119,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let app = Router::new().route(
+            let app = super::with_test_control_challenge(Router::new()).route(
                 "/api/public/relay/access/release",
                 axum::routing::post(|| async {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1050,7 +1208,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let secret_owned = secret.to_string();
         tokio::spawn(async move {
-            let app = Router::new().route(
+            let app = super::with_test_control_challenge(Router::new()).route(
                 "/api/public/relay/access/release",
                 axum::routing::post(move || {
                     let secret_owned = secret_owned.clone();
@@ -1091,7 +1249,7 @@ mod tests {
         let started = Arc::new(std::sync::Barrier::new(2));
         let started_server = started.clone();
         tokio::spawn(async move {
-            let app = Router::new().route(
+            let app = super::with_test_control_challenge(Router::new()).route(
                 "/api/public/relay/access/release",
                 axum::routing::post(move || {
                     let started_server = started_server.clone();

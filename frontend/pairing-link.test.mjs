@@ -22,6 +22,7 @@ function encodePayload(overrides = {}) {
     pairing_secret: "secret-must-never-hit-the-wire",
     broker_url: "wss://broker.example.com",
     pairing_join_ticket: "join-ticket",
+    relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
     ...overrides,
   };
   return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");

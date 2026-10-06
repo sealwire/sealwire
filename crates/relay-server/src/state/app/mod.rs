@@ -42,10 +42,10 @@ use super::{
     expire_controller_if_needed, load_or_generate_vapid, non_empty, normalize_allowed_roots,
     normalize_cwd, require_device_id, short_device_id, sort_threads_by_recency,
     thread_status_is_working, unix_now, vapid_key_path, BrokerPendingMessage,
-    CachedRemoteActionResult, ClaimChallenge, CompletedRemoteClaim, IssuedClaimChallenge,
-    PendingPairingResult, PushDispatcher, PushSubscriptionInput, RelayState,
-    RemoteActionReplayDecision, SecurityProfile, WorkspaceScope, DEFAULT_EFFORT, DEFAULT_MODEL,
-    STALE_TURN_PROGRESS_TIMEOUT_SECS,
+    CachedRemoteActionResult, ClaimChallenge, IssuedClaimChallenge, PendingPairingResult,
+    PushDispatcher, PushSubscriptionInput, RelayState, RemoteActionReplayDecision,
+    RequestAdmission, RequestSessionGrant, SecurityProfile, SignedRequestFacts, WaitOutcome,
+    WorkspaceScope, DEFAULT_EFFORT, DEFAULT_MODEL, STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 /// Drive the server-side push attention tracker once per (debounced) state

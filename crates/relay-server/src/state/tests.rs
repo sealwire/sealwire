@@ -221,6 +221,7 @@ fn issue_test_pairing_ticket_with_scope(
         broker.broker_room_id(),
         "test-pairing-join-ticket",
         broker.relay_peer_id(),
+        &broker.content_verify_key(),
     )
 }
 
@@ -445,6 +446,8 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
         ask_detail: None,
         session_claim: Some("claim-1".to_string()),
         session_claim_expires_at: Some(120),
+        session_claim_boot: None,
+        session_claim_relay_ms: None,
         claim_challenge_id: None,
         claim_challenge: None,
         claim_challenge_expires_at: None,
@@ -3016,6 +3019,10 @@ fn broker_targets_require_online_surface_presence() {
     assert!(relay.broker_targets().is_empty());
 
     assert!(relay.mark_surface_peer_online("surface-a"));
+    assert!(relay.broker_targets().is_empty());
+    relay
+        .mark_paired_device_seen(&device.device_id, "surface-a", None, 101)
+        .unwrap();
     assert_eq!(
         relay.broker_targets(),
         vec![(
@@ -3038,6 +3045,9 @@ fn broker_targets_require_online_surface_presence() {
     );
 
     assert!(relay.mark_surface_peer_online("surface-b"));
+    relay
+        .mark_paired_device_seen(&device.device_id, "surface-b", None, 102)
+        .unwrap();
     let mut targets = relay.broker_targets();
     targets.sort();
     assert_eq!(
@@ -3089,6 +3099,10 @@ fn broker_disconnect_clears_online_surface_targets() {
 
     relay.set_broker_connection(true);
     relay.mark_surface_peer_online("surface-a");
+    assert!(relay.broker_targets().is_empty());
+    relay
+        .mark_paired_device_seen(&device.device_id, "surface-a", None, 101)
+        .unwrap();
     assert_eq!(
         relay.broker_targets(),
         vec![(device.device_id, "surface-a".to_string(), payload_secret,)]
@@ -3099,7 +3113,7 @@ fn broker_disconnect_clears_online_surface_targets() {
 }
 
 #[test]
-fn replacing_online_surface_peers_restores_targets_for_reconnected_broker_sessions() {
+fn reconnected_broker_sessions_require_device_authentication_before_delivery() {
     let mut relay = test_state();
     let ticket = issue_test_pairing_ticket(
         &mut relay,
@@ -3124,6 +3138,10 @@ fn replacing_online_surface_peers_restores_targets_for_reconnected_broker_sessio
 
     relay.set_broker_connection(true);
     relay.replace_online_surface_peers(["surface-a".to_string()]);
+    assert!(relay.broker_targets().is_empty());
+    relay
+        .mark_paired_device_seen(&device.device_id, "surface-a", None, 101)
+        .unwrap();
     assert_eq!(
         relay.broker_targets(),
         vec![(
@@ -3141,6 +3159,10 @@ fn replacing_online_surface_peers_restores_targets_for_reconnected_broker_sessio
         .mark_paired_device_seen(&device.device_id, "surface-b", None, 101)
         .unwrap();
     relay.replace_online_surface_peers(["surface-b".to_string()]);
+    assert!(relay.broker_targets().is_empty());
+    relay
+        .mark_paired_device_seen(&device.device_id, "surface-b", None, 102)
+        .unwrap();
     assert_eq!(
         relay.broker_targets(),
         vec![(device.device_id, "surface-b".to_string(), payload_secret,)]
@@ -3150,6 +3172,8 @@ fn replacing_online_surface_peers_restores_targets_for_reconnected_broker_sessio
 #[test]
 fn claim_challenge_enforces_peer_binding_and_replaces_older_challenges() {
     let mut relay = test_state();
+    relay.mark_surface_peer_online("surface-a");
+    relay.mark_surface_peer_online("surface-b");
     let ticket = issue_test_pairing_ticket(
         &mut relay,
         "ws://127.0.0.1:8789",
@@ -3174,6 +3198,9 @@ fn claim_challenge_enforces_peer_binding_and_replaces_older_challenges() {
     let first = relay
         .issue_claim_challenge(&device.device_id, "surface-a", 101)
         .expect("first challenge should issue");
+    let other_tab = relay
+        .issue_claim_challenge(&device.device_id, "surface-b", 101)
+        .expect("another tab should have an independent challenge");
     let second = relay
         .issue_claim_challenge(&device.device_id, "surface-a", 102)
         .expect("second challenge should issue");
@@ -3188,12 +3215,40 @@ fn claim_challenge_enforces_peer_binding_and_replaces_older_challenges() {
         .expect_err("challenge should stay bound to the broker peer");
     assert!(wrong_peer.contains("broker peer"));
 
+    relay
+        .complete_remote_claim(&device.device_id, &other_tab.challenge_id, "surface-b", 103)
+        .expect("another tab's challenge must survive challenge replacement");
+    relay
+        .claim_challenge(&device.device_id, &second.challenge_id, "surface-a", 103)
+        .expect("completing one tab's claim must preserve the other tab's challenge");
+
+    let last = relay
+        .issue_claim_challenge(&device.device_id, "surface-b", 103)
+        .unwrap();
+    relay
+        .complete_remote_claim(&device.device_id, &second.challenge_id, "surface-a", 104)
+        .unwrap();
+    relay
+        .complete_remote_claim(&device.device_id, &last.challenge_id, "surface-b", 104)
+        .unwrap();
+    let targets = relay.broker_targets();
+    assert!(targets
+        .iter()
+        .any(|(device_id, peer_id, _)| device_id == &device.device_id && peer_id == "surface-a"));
+    assert!(targets
+        .iter()
+        .any(|(device_id, peer_id, _)| device_id == &device.device_id && peer_id == "surface-b"));
+
+    let expiring = relay
+        .issue_claim_challenge(&device.device_id, "surface-a", 104)
+        .unwrap();
+
     let expired = relay
         .claim_challenge(
             &device.device_id,
-            &second.challenge_id,
+            &expiring.challenge_id,
             "surface-a",
-            102 + 61,
+            104 + 61,
         )
         .expect_err("challenge should expire quickly");
     assert!(expired.contains("missing or expired"));
@@ -5958,6 +6013,8 @@ mod watched_threads {
         relay.set_watched_threads("peer-tablet", "tablet", vec!["thread-x".to_string()]);
 
         relay.replace_online_surface_peers(vec!["peer-tablet".to_string()]);
+        assert!(relay.broker_targets_for_thread("thread-x").is_empty());
+        relay.bind_surface_peer_to_device("tablet", "peer-tablet");
 
         let targets = relay.broker_targets_for_thread("thread-x");
         assert_eq!(

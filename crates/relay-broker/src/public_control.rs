@@ -1,3 +1,16 @@
+mod relay_proofs;
+pub(crate) use relay_proofs::verify_relay_control_signature;
+use relay_proofs::{configured_ticket_origin, PendingRelayProofChallenge};
+pub use relay_proofs::{
+    relay_control_message, relay_control_operation, relay_control_request_sha256,
+    relay_join_message, relay_ws_ticket_message,
+};
+
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+use test_support::{save_public_control_postgres_full_rebuild, SIMULATED_DATABASE_ERROR};
+
 use std::{
     collections::{BTreeSet, HashMap},
     future::Future,
@@ -46,6 +59,13 @@ pub const PUBLIC_DEVICE_WS_TTL_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_DEVICE_WS_T
 /// Pairing only delivers new credentials to the completing session, so other sessions need grace.
 /// A fixed deadline bounds stolen old credentials; explicit revocation cuts access immediately.
 pub const PUBLIC_ROTATION_GRACE_SECS_ENV: &str = "RELAY_BROKER_PUBLIC_ROTATION_GRACE_SECS";
+/// Operator-configured origin bound into relay websocket ticket proofs.
+/// Request Host / forwarded headers are not a source for this value.
+pub const PUBLIC_ORIGIN_ENV: &str = "RELAY_BROKER_PUBLIC_ORIGIN";
+/// Used when `RELAY_BROKER_PUBLIC_ORIGIN` is unset or empty. Callers cannot
+/// choose it. An explicit value that is not an http(s) host origin fails
+/// broker startup instead of falling back to this string.
+pub const DEFAULT_RELAY_WS_TICKET_ORIGIN: &str = "sealwire-broker";
 
 const DEFAULT_PUBLIC_RELAY_WS_TTL_SECS: u64 = 300;
 const DEFAULT_PUBLIC_DEVICE_WS_TTL_SECS: u64 = 300;
@@ -82,9 +102,13 @@ const MAX_ID_BYTES: usize = 128;
 /// Above the ~3000 the default global API budget can create in one 300s TTL, so it only
 /// binds if that budget is raised.
 const MAX_PENDING_RELAY_ENROLLMENT_CHALLENGES: usize = 4096;
+const DEFAULT_RELAY_WS_TICKET_CHALLENGE_TTL_SECS: u64 = 60;
+const MAX_PENDING_RELAY_WS_TICKET_CHALLENGES: usize = 4096;
+const MAX_PENDING_RELAY_CONTROL_CHALLENGES: usize = 4096;
+pub const RELAY_CONTROL_CHALLENGE_HEADER: &str = "x-relay-control-challenge-id";
+pub const RELAY_CONTROL_SIGNATURE_HEADER: &str = "x-relay-control-signature";
+const MAX_TICKET_ORIGIN_BYTES: usize = 256;
 /// Test-only: reads like a real driver error, including a word the HTTP layer maps to 401.
-#[cfg(test)]
-const SIMULATED_DATABASE_ERROR: &str = "error returned from database: invalid input syntax";
 const RELOAD_FAILED_ERROR: &str = "public control-plane state reload failed; retry shortly";
 const PROBE_FAILED_ERROR: &str = "public control-plane database unavailable; retry shortly";
 /// The longest pairing window the official relay asks for (`MAX_PAIRING_TTL_SECS`).
@@ -241,83 +265,8 @@ impl Default for PublicControlDbGate {
 }
 
 #[cfg(test)]
-mod public_control_db_gate_tests {
-    use super::*;
-
-    #[test]
-    fn public_db_config_rejects_unbounded_values() {
-        let invalid_connections = PublicControlDbConfig {
-            max_connections: 0,
-            ..PublicControlDbConfig::default()
-        };
-        assert!(invalid_connections.validate().is_err());
-
-        let invalid_concurrency = PublicControlDbConfig {
-            concurrency: 129,
-            ..PublicControlDbConfig::default()
-        };
-        assert!(invalid_concurrency.validate().is_err());
-
-        let invalid_timeout = PublicControlDbConfig {
-            query_timeout: Duration::ZERO,
-            ..PublicControlDbConfig::default()
-        };
-        assert!(invalid_timeout.validate().is_err());
-    }
-
-    #[tokio::test]
-    async fn public_db_gate_refuses_when_full_without_queueing() {
-        let gate = PublicControlDbGate::new(1, Duration::from_secs(1)).expect("valid gate");
-        let _held = gate
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .expect("first permit");
-        let result = gate.run(async { Ok::<_, String>(()) }).await;
-        assert!(matches!(result, Err(PublicControlDbGateError::Busy)));
-    }
-
-    #[tokio::test]
-    async fn concurrent_spare_work_never_holds_more_than_a_quarter_of_the_gate() {
-        let gate = PublicControlDbGate::new(8, Duration::from_secs(5)).expect("valid gate");
-        let release = Arc::new(tokio::sync::Notify::new());
-        let probes = (0..8)
-            .map(|_| {
-                let gate = gate.clone();
-                let release = release.clone();
-                tokio::spawn(async move {
-                    gate.run_spare(async move {
-                        release.notified().await;
-                        Ok::<_, String>(())
-                    })
-                    .await
-                })
-            })
-            .collect::<Vec<_>>();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let free = gate.permits.available_permits();
-        release.notify_waiters();
-        for probe in probes {
-            let _ = probe.await;
-        }
-        assert!(
-            free >= 6,
-            "concurrent spare work left {free} of 8 permits for writes and reloads"
-        );
-    }
-
-    #[tokio::test]
-    async fn public_db_gate_bounds_operation_time() {
-        let gate = PublicControlDbGate::new(1, Duration::from_millis(5)).expect("valid gate");
-        let result = gate
-            .run(async {
-                std::future::pending::<()>().await;
-                Ok::<_, String>(())
-            })
-            .await;
-        assert!(matches!(result, Err(PublicControlDbGateError::Timeout)));
-    }
-}
+#[path = "public_control/tests/public_control_db_gate_tests.rs"]
+mod public_control_db_gate_tests;
 
 /// Stable prefix on the per-relay device-cap error, so the HTTP layer can map
 /// it to a machine-readable `device_limit_reached` code (and callers/UI can match
@@ -329,6 +278,28 @@ pub struct RelayRegistrationConfig {
     pub relay_id: String,
     pub broker_room_id: String,
     pub refresh_token: String,
+    /// Enrolled Ed25519 verify key. Absent means relay websocket tickets are refused.
+    #[serde(default)]
+    pub relay_verify_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayWsTokenChallengeRequest {
+    pub relay_id: String,
+    pub broker_room_id: String,
+    pub relay_peer_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayWsTokenChallengeResponse {
+    pub challenge_id: String,
+    pub challenge: String,
+    pub relay_id: String,
+    pub broker_room_id: String,
+    pub relay_peer_id: String,
+    pub broker_origin: String,
+    pub refresh_token_hash: String,
+    pub expires_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +307,32 @@ pub struct RelayWsTokenRequest {
     pub relay_id: String,
     pub broker_room_id: String,
     pub relay_peer_id: String,
+    pub challenge_id: String,
+    pub challenge_signature: String,
+}
+
+/// Fresh proof request for a privileged relay-refresh operation.
+/// `operation` is `METHOD path` (the revoke path includes the device id).
+/// `request_sha256` is the hex sha256 of the exact JSON body that will be posted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayControlChallengeRequest {
+    pub operation: String,
+    pub relay_id: String,
+    pub broker_room_id: String,
+    pub request_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayControlChallengeResponse {
+    pub challenge_id: String,
+    pub challenge: String,
+    pub operation: String,
+    pub relay_id: String,
+    pub broker_room_id: String,
+    pub broker_origin: String,
+    pub refresh_token_hash: String,
+    pub request_sha256: String,
+    pub expires_at: u64,
 }
 
 /// Authenticated request to tear down relay access (release binding + revoke registration).
@@ -438,23 +435,8 @@ impl std::fmt::Debug for RelayEnrollmentResponse {
 }
 
 #[cfg(test)]
-mod enrollment_response_debug_tests {
-    use super::*;
-
-    #[test]
-    fn relay_enrollment_response_debug_redacts_refresh_token() {
-        let response = RelayEnrollmentResponse {
-            relay_id: "r1".into(),
-            broker_room_id: "room".into(),
-            relay_refresh_token: "secret-refresh-token".into(),
-            created_at: 1,
-            relay_label: None,
-        };
-        let rendered = format!("{response:?}");
-        assert!(!rendered.contains("secret-refresh-token"));
-        assert!(rendered.contains("redacted"));
-    }
-}
+#[path = "public_control/tests/enrollment_response_debug_tests.rs"]
+mod enrollment_response_debug_tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairingWsTokenRequest {
@@ -674,6 +656,10 @@ struct PublicControlPlaneInner {
     persistence: PublicControlPersistence,
     state: Mutex<PublicControlStateStore>,
     relay_enrollment_challenges: Mutex<HashMap<String, PendingRelayEnrollmentChallenge>>,
+    relay_ws_ticket_challenges: Mutex<HashMap<String, PendingRelayProofChallenge>>,
+    relay_control_challenges: Mutex<HashMap<String, PendingRelayProofChallenge>>,
+    ticket_origin: String,
+    relay_ws_ticket_challenge_ttl_secs: u64,
     pending_client_claims: Mutex<HashMap<String, PendingClientClaim>>,
     pending_credential_refreshes: Mutex<HashMap<String, PendingCredentialRefresh>>,
     last_full_load: std::sync::Mutex<Option<FullLoad>>,
@@ -1004,6 +990,10 @@ impl PublicControlPlane {
                 persistence,
                 state: Mutex::new(state),
                 relay_enrollment_challenges: Mutex::new(HashMap::new()),
+                relay_ws_ticket_challenges: Mutex::new(HashMap::new()),
+                relay_control_challenges: Mutex::new(HashMap::new()),
+                ticket_origin: configured_ticket_origin()?,
+                relay_ws_ticket_challenge_ttl_secs: DEFAULT_RELAY_WS_TICKET_CHALLENGE_TTL_SECS,
                 pending_client_claims: Mutex::new(HashMap::new()),
                 pending_credential_refreshes: Mutex::new(HashMap::new()),
                 last_full_load: std::sync::Mutex::new(Some(initial_load)),
@@ -1197,29 +1187,6 @@ impl PublicControlPlane {
         }
     }
 
-    pub async fn issue_relay_ws_token(
-        &self,
-        bearer_token: &str,
-        request: RelayWsTokenRequest,
-    ) -> Result<RelayWsTokenResponse, String> {
-        let registration = self
-            .authenticate_relay(bearer_token, &request.relay_id, &request.broker_room_id)
-            .await?;
-        let expires_at = unix_now().saturating_add(self.inner.relay_ws_ttl_secs);
-        Ok(RelayWsTokenResponse {
-            relay_id: registration.relay_id.clone(),
-            broker_room_id: registration.broker_room_id.clone(),
-            relay_ws_token: self.inner.issuer_key.mint(
-                &JoinTicketClaims::relay_join_with_expiry(
-                    &registration.broker_room_id,
-                    &request.relay_peer_id,
-                    Some(expires_at),
-                ),
-            )?,
-            relay_ws_token_expires_at: expires_at,
-        })
-    }
-
     /// Mint for a relay the caller has already authenticated, leaving room for a per-relay
     /// budget between the two. The relay picks the expiry, so it is capped here.
     pub(crate) fn mint_pairing_ws_token(
@@ -1287,6 +1254,28 @@ impl PublicControlPlane {
         })
     }
 
+    pub fn ticket_origin(&self) -> &str {
+        &self.inner.ticket_origin
+    }
+
+    /// Enrolled verify key for a room. Callers must not accept a key supplied
+    /// by the joining socket.
+    pub async fn enrolled_verify_key_for_room(
+        &self,
+        broker_room_id: &str,
+    ) -> Result<String, String> {
+        let store = self
+            .lock_state()
+            .await
+            .map_err(|_| "relay registration could not be read".to_string())?;
+        let registration = store
+            .relay_registrations_by_hash
+            .values()
+            .find(|registration| registration.broker_room_id == broker_room_id)
+            .ok_or_else(|| "relay registration was not found".to_string())?;
+        enrolled_relay_verify_key(registration)
+    }
+
     /// Look up the relay id currently registered for `broker_room_id`, if any.
     /// Used after join-ticket verification so socket access checks bind to the
     /// authenticated registration rather than a caller-chosen victim id.
@@ -1297,68 +1286,6 @@ impl PublicControlPlane {
             .values()
             .find(|registration| registration.broker_room_id == broker_room_id)
             .map(|registration| registration.relay_id.clone())
-    }
-
-    /// Whether any registration still exists for this relay/room pair.
-    #[cfg(test)]
-    pub async fn has_relay_registration(&self, relay_id: &str, broker_room_id: &str) -> bool {
-        let Ok(store) = self.lock_state().await else {
-            return true; // fail closed: assume still present if we cannot check
-        };
-        store
-            .relay_registrations_by_hash
-            .values()
-            .any(|reg| reg.relay_id == relay_id && reg.broker_room_id == broker_room_id)
-    }
-
-    /// Count device grants for a relay/room (test/assertion helper).
-    #[cfg(test)]
-    pub async fn device_grant_count_for_test(&self, relay_id: &str, broker_room_id: &str) -> usize {
-        let store = self.lock_state().await.expect("lock");
-        store
-            .grants_by_hash
-            .values()
-            .filter(|g| g.relay_id == relay_id && g.broker_room_id == broker_room_id)
-            .count()
-    }
-
-    /// Count client↔relay grants for a relay/room (test/assertion helper).
-    #[cfg(test)]
-    pub async fn client_relay_grant_count_for_test(
-        &self,
-        relay_id: &str,
-        broker_room_id: &str,
-    ) -> usize {
-        let store = self.lock_state().await.expect("lock");
-        store
-            .client_relay_grants_by_key
-            .values()
-            .filter(|g| g.relay_id == relay_id && g.broker_room_id == broker_room_id)
-            .count()
-    }
-
-    /// Arm N failing persistence saves (test-only).
-    #[cfg(test)]
-    pub fn arm_save_failpoint_for_test(&self, count: u64) {
-        self.inner
-            .save_fail_remaining
-            .store(count, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Arm N shared save+reload-unknown failures (test-only). Leaves memory as
-    /// the intended next state (typically target-cleared) and returns
-    /// reload-uncertain — never success.
-    #[cfg(test)]
-    pub fn arm_reload_uncertain_failpoint_for_test(&self, count: u64) {
-        self.inner
-            .reload_uncertain_fail_remaining
-            .store(count, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Install a one-shot pause at the start of revoke cleanup (test-only).
-    #[cfg(test)]
-    pub fn arm_cleanup_pause_for_test(&self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) {
-        *self.inner.cleanup_pause.lock().expect("cleanup pause lock") = Some(hook);
     }
 
     /// After a successful access-strategy release: drop the authenticated relay
@@ -1638,24 +1565,6 @@ impl PublicControlPlane {
             totals,
             relays: rows,
         })
-    }
-
-    /// Test-only: seed a client→relay grant directly, bypassing enrollment, to
-    /// simulate an orphaned grant (no registration, no device grant) — the state a
-    /// dangling `client_relay_grant` leaves behind.
-    #[cfg(test)]
-    async fn seed_client_relay_grant_for_test(&self, relay_id: &str, client_id: &str) {
-        let mut store = self.lock_state().await.expect("lock state");
-        store.upsert_client_relay_grant(PersistedClientRelayGrant {
-            client_id: client_id.to_string(),
-            relay_id: relay_id.to_string(),
-            broker_room_id: format!("room-{relay_id}"),
-            device_id: format!("dev-{client_id}"),
-            granted_at: 0,
-            relay_label: None,
-            device_label: None,
-        });
-        self.persist(&mut store).await.expect("save");
     }
 
     pub async fn issue_client_grant(
@@ -3102,13 +3011,19 @@ impl PublicControlStateStore {
                 .relay_registrations_by_hash
                 .entry(refresh_token_hash.clone())
             {
+                let relay_verify_key = registration
+                    .relay_verify_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_string);
                 entry.insert(PersistedRelayRegistration {
                     relay_id: registration.relay_id,
                     broker_room_id: registration.broker_room_id,
                     refresh_token_hash,
                     created_at: 0,
                     relay_label: None,
-                    relay_verify_key: None,
+                    relay_verify_key,
                 });
                 seeded = true;
             }
@@ -3314,76 +3229,28 @@ fn target_access_fully_cleared(
 }
 
 #[cfg(test)]
-mod release_cleanup_helpers {
-    use super::{
-        sanitize_persistence_error, shared_release_cleanup_after_save_error,
-        target_access_fully_cleared, PersistedRelayRegistration, PublicControlStateStore,
-    };
-
-    #[test]
-    fn shared_release_cleanup_checks_reload_forced_before_target_cleared() {
-        // Reload-unknown + in-memory target-absent must NOT succeed.
-        assert!(shared_release_cleanup_after_save_error(true, true)
-            .unwrap_err()
-            .contains("reload-uncertain"));
-        assert!(shared_release_cleanup_after_save_error(true, false)
-            .unwrap_err()
-            .contains("reload-uncertain"));
-        // Successful reconcile + target gone ⇒ effective success.
-        assert!(shared_release_cleanup_after_save_error(false, true).is_ok());
-        // Successful reconcile + target still present ⇒ unavailable/retry.
-        assert!(shared_release_cleanup_after_save_error(false, false)
-            .unwrap_err()
-            .contains("target still present"));
-    }
-
-    #[test]
-    fn target_access_fully_cleared_is_true_only_when_reg_and_grants_gone() {
-        let empty = PublicControlStateStore::default();
-        assert!(target_access_fully_cleared(&empty, "relay-a", "room-a"));
-
-        let mut with_reg = PublicControlStateStore::default();
-        with_reg.relay_registrations_by_hash.insert(
-            "hash".to_string(),
-            PersistedRelayRegistration {
-                relay_id: "relay-a".to_string(),
-                broker_room_id: "room-a".to_string(),
-                refresh_token_hash: "hash".to_string(),
-                created_at: 1,
-                relay_label: None,
-                relay_verify_key: None,
-            },
-        );
-        assert!(!target_access_fully_cleared(&with_reg, "relay-a", "room-a"));
-        assert!(target_access_fully_cleared(&with_reg, "relay-b", "room-a"));
-    }
-
-    #[test]
-    fn sanitize_persistence_error_keeps_redacted_operator_class() {
-        assert!(sanitize_persistence_error(
-            "failed to write /var/lib/secret/state.json: permission denied".into()
-        )
-        .contains("public control-plane persistence failed"));
-        assert!(!sanitize_persistence_error(
-            "failed to write /var/lib/secret/state.json: permission denied".into()
-        )
-        .contains("/var/lib"));
-        assert_eq!(
-            sanitize_persistence_error(
-                "public control-plane persistence failed (reload-uncertain)".into()
-            ),
-            "public control-plane persistence failed (reload-uncertain)"
-        );
-        assert_eq!(
-            sanitize_persistence_error(
-                "public control-plane persistence failed (target still present)".into()
-            ),
-            "public control-plane persistence failed (target still present)"
-        );
-    }
-}
+#[path = "public_control/tests/release_cleanup_helpers.rs"]
+mod release_cleanup_helpers;
 
 async fn initialize_postgres_public_control_schema(pool: &PgPool) -> Result<(), String> {
+    initialize_postgres_control_version(pool).await?;
+    create_postgres_control_tables(pool).await?;
+    // Additive columns for the rotation grace window (JSON-encoded
+    // Vec<SupersededToken>; NULL/absent = empty). ADD COLUMN IF NOT EXISTS keeps
+    // pre-existing deployments loadable without a schema-version bump.
+    for table in ["public_client_identities", "public_device_grants"] {
+        sqlx::query(&format!(
+            "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS superseded_tokens TEXT"
+        ))
+        .execute(pool)
+        .await
+        .map_err(|error| format!("failed to add superseded_tokens to {table}: {error}"))?;
+        ensure_superseded_index(pool, table).await?;
+    }
+    Ok(())
+}
+
+async fn initialize_postgres_control_version(pool: &PgPool) -> Result<(), String> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS public_control_schema (
@@ -3418,7 +3285,10 @@ async fn initialize_postgres_public_control_schema(pool: &PgPool) -> Result<(), 
             "unsupported Postgres public control-plane schema {schema_version}"
         ));
     }
+    Ok(())
+}
 
+async fn create_postgres_control_tables(pool: &PgPool) -> Result<(), String> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS public_relay_registrations (
@@ -3481,18 +3351,6 @@ async fn initialize_postgres_public_control_schema(pool: &PgPool) -> Result<(), 
     .execute(pool)
     .await
     .map_err(|error| format!("failed to create public_client_relay_grants: {error}"))?;
-    // Additive columns for the rotation grace window (JSON-encoded
-    // Vec<SupersededToken>; NULL/absent = empty). ADD COLUMN IF NOT EXISTS keeps
-    // pre-existing deployments loadable without a schema-version bump.
-    for table in ["public_client_identities", "public_device_grants"] {
-        sqlx::query(&format!(
-            "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS superseded_tokens TEXT"
-        ))
-        .execute(pool)
-        .await
-        .map_err(|error| format!("failed to add superseded_tokens to {table}: {error}"))?;
-        ensure_superseded_index(pool, table).await?;
-    }
     Ok(())
 }
 
@@ -3661,83 +3519,91 @@ async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStat
         schema_version: PUBLIC_CONTROL_STATE_VERSION,
         relay_registrations: relay_rows
             .into_iter()
-            .map(|row| {
-                Ok(PersistedRelayRegistration {
-                    relay_id: row.try_get("relay_id").map_err(postgres_decode_error)?,
-                    broker_room_id: row
-                        .try_get("broker_room_id")
-                        .map_err(postgres_decode_error)?,
-                    refresh_token_hash: row
-                        .try_get("refresh_token_hash")
-                        .map_err(postgres_decode_error)?,
-                    created_at: row_i64_to_u64(&row, "created_at")?,
-                    relay_label: row.try_get("relay_label").map_err(postgres_decode_error)?,
-                    relay_verify_key: row
-                        .try_get("relay_verify_key")
-                        .map_err(postgres_decode_error)?,
-                })
-            })
+            .map(decode_relay_registration)
             .collect::<Result<Vec<_>, String>>()?,
         client_registrations: client_rows
             .into_iter()
-            .map(|row| {
-                Ok(PersistedClientIdentity {
-                    client_id: row.try_get("client_id").map_err(postgres_decode_error)?,
-                    client_verify_key: row
-                        .try_get("client_verify_key")
-                        .map_err(postgres_decode_error)?,
-                    refresh_token_hash: row
-                        .try_get("refresh_token_hash")
-                        .map_err(postgres_decode_error)?,
-                    created_at: row_i64_to_u64(&row, "created_at")?,
-                    client_label: row.try_get("client_label").map_err(postgres_decode_error)?,
-                    superseded: decode_superseded(
-                        row.try_get("superseded_tokens")
-                            .map_err(postgres_decode_error)?,
-                    )?,
-                })
-            })
+            .map(decode_client_identity)
             .collect::<Result<Vec<_>, String>>()?,
         device_grants: device_rows
             .into_iter()
-            .map(|row| {
-                Ok(PersistedDeviceGrant {
-                    relay_id: row.try_get("relay_id").map_err(postgres_decode_error)?,
-                    broker_room_id: row
-                        .try_get("broker_room_id")
-                        .map_err(postgres_decode_error)?,
-                    device_id: row.try_get("device_id").map_err(postgres_decode_error)?,
-                    refresh_token_hash: row
-                        .try_get("refresh_token_hash")
-                        .map_err(postgres_decode_error)?,
-                    created_at: row_i64_to_u64(&row, "created_at")?,
-                    last_seen: row
-                        .try_get::<Option<i64>, _>("last_seen")
-                        .map_err(postgres_decode_error)?
-                        .and_then(|value| u64::try_from(value).ok()),
-                    superseded: decode_superseded(
-                        row.try_get("superseded_tokens")
-                            .map_err(postgres_decode_error)?,
-                    )?,
-                })
-            })
+            .map(decode_device_grant)
             .collect::<Result<Vec<_>, String>>()?,
         client_relay_grants: client_grant_rows
             .into_iter()
-            .map(|row| {
-                Ok(PersistedClientRelayGrant {
-                    client_id: row.try_get("client_id").map_err(postgres_decode_error)?,
-                    relay_id: row.try_get("relay_id").map_err(postgres_decode_error)?,
-                    broker_room_id: row
-                        .try_get("broker_room_id")
-                        .map_err(postgres_decode_error)?,
-                    device_id: row.try_get("device_id").map_err(postgres_decode_error)?,
-                    granted_at: row_i64_to_u64(&row, "granted_at")?,
-                    relay_label: row.try_get("relay_label").map_err(postgres_decode_error)?,
-                    device_label: row.try_get("device_label").map_err(postgres_decode_error)?,
-                })
-            })
+            .map(decode_client_relay_grant)
             .collect::<Result<Vec<_>, String>>()?,
+    })
+}
+
+fn decode_relay_registration(row: PgRow) -> Result<PersistedRelayRegistration, String> {
+    Ok(PersistedRelayRegistration {
+        relay_id: row.try_get("relay_id").map_err(postgres_decode_error)?,
+        broker_room_id: row
+            .try_get("broker_room_id")
+            .map_err(postgres_decode_error)?,
+        refresh_token_hash: row
+            .try_get("refresh_token_hash")
+            .map_err(postgres_decode_error)?,
+        created_at: row_i64_to_u64(&row, "created_at")?,
+        relay_label: row.try_get("relay_label").map_err(postgres_decode_error)?,
+        relay_verify_key: row
+            .try_get("relay_verify_key")
+            .map_err(postgres_decode_error)?,
+    })
+}
+
+fn decode_client_identity(row: PgRow) -> Result<PersistedClientIdentity, String> {
+    Ok(PersistedClientIdentity {
+        client_id: row.try_get("client_id").map_err(postgres_decode_error)?,
+        client_verify_key: row
+            .try_get("client_verify_key")
+            .map_err(postgres_decode_error)?,
+        refresh_token_hash: row
+            .try_get("refresh_token_hash")
+            .map_err(postgres_decode_error)?,
+        created_at: row_i64_to_u64(&row, "created_at")?,
+        client_label: row.try_get("client_label").map_err(postgres_decode_error)?,
+        superseded: decode_superseded(
+            row.try_get("superseded_tokens")
+                .map_err(postgres_decode_error)?,
+        )?,
+    })
+}
+
+fn decode_device_grant(row: PgRow) -> Result<PersistedDeviceGrant, String> {
+    Ok(PersistedDeviceGrant {
+        relay_id: row.try_get("relay_id").map_err(postgres_decode_error)?,
+        broker_room_id: row
+            .try_get("broker_room_id")
+            .map_err(postgres_decode_error)?,
+        device_id: row.try_get("device_id").map_err(postgres_decode_error)?,
+        refresh_token_hash: row
+            .try_get("refresh_token_hash")
+            .map_err(postgres_decode_error)?,
+        created_at: row_i64_to_u64(&row, "created_at")?,
+        last_seen: row
+            .try_get::<Option<i64>, _>("last_seen")
+            .map_err(postgres_decode_error)?
+            .and_then(|value| u64::try_from(value).ok()),
+        superseded: decode_superseded(
+            row.try_get("superseded_tokens")
+                .map_err(postgres_decode_error)?,
+        )?,
+    })
+}
+
+fn decode_client_relay_grant(row: PgRow) -> Result<PersistedClientRelayGrant, String> {
+    Ok(PersistedClientRelayGrant {
+        client_id: row.try_get("client_id").map_err(postgres_decode_error)?,
+        relay_id: row.try_get("relay_id").map_err(postgres_decode_error)?,
+        broker_room_id: row
+            .try_get("broker_room_id")
+            .map_err(postgres_decode_error)?,
+        device_id: row.try_get("device_id").map_err(postgres_decode_error)?,
+        granted_at: row_i64_to_u64(&row, "granted_at")?,
+        relay_label: row.try_get("relay_label").map_err(postgres_decode_error)?,
+        device_label: row.try_get("device_label").map_err(postgres_decode_error)?,
     })
 }
 
@@ -3786,25 +3652,31 @@ async fn save_public_control_postgres(
         .await
         .map_err(|error| format!("failed to begin public control-plane transaction: {error}"))?;
 
-    // ORDER MATTERS: delete every removed row across ALL tables FIRST, then upsert
-    // added/changed rows. A credential rotation (relay re-enroll, client rotation,
-    // device re-registration) changes the PK `refresh_token_hash` but keeps a
-    // SECONDARY unique column (relay_id / broker_room_id / relay_verify_key /
-    // client_id / client_verify_key / `(relay_id, broker_room_id, device_id)`). If
-    // the new row were inserted before the old one is deleted, that insert would
-    // collide with the surviving old row on the secondary unique index and abort
-    // the whole transaction — wedging the control plane. Deleting up front makes
-    // rotation a clean delete-then-insert.
+    // Rotations reuse unique identity columns, so all deletes must precede all upserts.
+    // Conditional deletes prevent a stale broker from restoring revoked credentials.
+    delete_removed_public_control_rows(&mut tx, prev, next).await?;
+    upsert_relay_registrations(&mut tx, prev, next).await?;
+    upsert_client_identities(&mut tx, prev, next).await?;
+    upsert_device_grants(&mut tx, prev, next).await?;
+    upsert_client_relay_grants(&mut tx, prev, next).await?;
 
-    // --- Phase 1: DELETE rows present in the snapshot but gone from live state ---
-    // A missing old credential means another broker already rotated or revoked it.
-    // Abort stale writes so they cannot restore access or claim a revoke succeeded.
+    tx.commit()
+        .await
+        .map_err(|error| format!("failed to commit public control-plane transaction: {error}"))?;
+    Ok(())
+}
+
+async fn delete_removed_public_control_rows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    prev: &PublicControlStateStore,
+    next: &PublicControlStateStore,
+) -> Result<(), String> {
     for hash in prev.relay_registrations_by_hash.keys() {
         if !next.relay_registrations_by_hash.contains_key(hash) {
             let deleted =
                 sqlx::query("DELETE FROM public_relay_registrations WHERE refresh_token_hash = $1")
                     .bind(hash)
-                    .execute(&mut *tx)
+                    .execute(&mut **tx)
                     .await
                     .map_err(|error| {
                         format!("failed to delete public_relay_registrations: {error}")
@@ -3817,7 +3689,7 @@ async fn save_public_control_postgres(
             let deleted =
                 sqlx::query("DELETE FROM public_client_identities WHERE refresh_token_hash = $1")
                     .bind(hash)
-                    .execute(&mut *tx)
+                    .execute(&mut **tx)
                     .await
                     .map_err(|error| {
                         format!("failed to delete public_client_identities: {error}")
@@ -3830,7 +3702,7 @@ async fn save_public_control_postgres(
             let deleted =
                 sqlx::query("DELETE FROM public_device_grants WHERE refresh_token_hash = $1")
                     .bind(hash)
-                    .execute(&mut *tx)
+                    .execute(&mut **tx)
                     .await
                     .map_err(|error| format!("failed to delete public_device_grants: {error}"))?;
             require_deleted_credential(deleted.rows_affected())?;
@@ -3843,14 +3715,19 @@ async fn save_public_control_postgres(
             )
             .bind(&grant.client_id)
             .bind(&grant.relay_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| format!("failed to delete public_client_relay_grants: {error}"))?;
         }
     }
+    Ok(())
+}
 
-    // --- Phase 2: UPSERT rows that were added or changed ---
-    // public_relay_registrations (PK: refresh_token_hash)
+async fn upsert_relay_registrations(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    prev: &PublicControlStateStore,
+    next: &PublicControlStateStore,
+) -> Result<(), String> {
     for (hash, reg) in &next.relay_registrations_by_hash {
         if prev.relay_registrations_by_hash.get(hash) != Some(reg) {
             sqlx::query(
@@ -3873,12 +3750,19 @@ async fn save_public_control_postgres(
             .bind(u64_to_i64(reg.created_at, "created_at")?)
             .bind(&reg.relay_label)
             .bind(&reg.relay_verify_key)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| format!("failed to upsert public_relay_registrations: {error}"))?;
         }
     }
-    // public_client_identities (PK: refresh_token_hash)
+    Ok(())
+}
+
+async fn upsert_client_identities(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    prev: &PublicControlStateStore,
+    next: &PublicControlStateStore,
+) -> Result<(), String> {
     for (hash, client) in &next.client_registrations_by_hash {
         if prev.client_registrations_by_hash.get(hash) != Some(client) {
             sqlx::query(
@@ -3902,12 +3786,19 @@ async fn save_public_control_postgres(
             .bind(u64_to_i64(client.created_at, "created_at")?)
             .bind(&client.client_label)
             .bind(encode_superseded(&client.superseded)?)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| format!("failed to upsert public_client_identities: {error}"))?;
         }
     }
-    // public_device_grants (PK: refresh_token_hash)
+    Ok(())
+}
+
+async fn upsert_device_grants(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    prev: &PublicControlStateStore,
+    next: &PublicControlStateStore,
+) -> Result<(), String> {
     for (hash, grant) in &next.grants_by_hash {
         if prev.grants_by_hash.get(hash) != Some(grant) {
             sqlx::query(
@@ -3933,12 +3824,19 @@ async fn save_public_control_postgres(
             .bind(u64_to_i64(grant.created_at, "created_at")?)
             .bind(grant.last_seen.and_then(|value| i64::try_from(value).ok()))
             .bind(encode_superseded(&grant.superseded)?)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| format!("failed to upsert public_device_grants: {error}"))?;
         }
     }
-    // public_client_relay_grants (PK: (client_id, relay_id))
+    Ok(())
+}
+
+async fn upsert_client_relay_grants(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    prev: &PublicControlStateStore,
+    next: &PublicControlStateStore,
+) -> Result<(), String> {
     for (key, grant) in &next.client_relay_grants_by_key {
         if prev.client_relay_grants_by_key.get(key) != Some(grant) {
             sqlx::query(
@@ -3962,15 +3860,11 @@ async fn save_public_control_postgres(
             .bind(u64_to_i64(grant.granted_at, "granted_at")?)
             .bind(&grant.relay_label)
             .bind(&grant.device_label)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| format!("failed to upsert public_client_relay_grants: {error}"))?;
         }
     }
-
-    tx.commit()
-        .await
-        .map_err(|error| format!("failed to commit public control-plane transaction: {error}"))?;
     Ok(())
 }
 
@@ -3980,118 +3874,6 @@ fn require_deleted_credential(rows: u64) -> Result<(), String> {
     } else {
         Err("public control-plane credential changed before save; retry".to_string())
     }
-}
-
-/// Pre-optimization full wipe-and-rebuild save. Kept ONLY so the persistence
-/// benchmark can measure the targeted diff-save against the old behavior; it is
-/// not wired into any live code path.
-#[cfg(test)]
-async fn save_public_control_postgres_full_rebuild(
-    pool: &PgPool,
-    state: &PublicControlStateStore,
-) -> Result<(), String> {
-    let persisted = state.to_persisted();
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| format!("failed to begin public control-plane transaction: {error}"))?;
-    sqlx::query("DELETE FROM public_client_relay_grants")
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("failed to clear public_client_relay_grants: {error}"))?;
-    sqlx::query("DELETE FROM public_device_grants")
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("failed to clear public_device_grants: {error}"))?;
-    sqlx::query("DELETE FROM public_client_identities")
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("failed to clear public_client_identities: {error}"))?;
-    sqlx::query("DELETE FROM public_relay_registrations")
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("failed to clear public_relay_registrations: {error}"))?;
-
-    for registration in persisted.relay_registrations {
-        sqlx::query(
-            r#"
-            INSERT INTO public_relay_registrations (
-                refresh_token_hash, relay_id, broker_room_id, created_at, relay_label, relay_verify_key
-            )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            "#,
-        )
-        .bind(registration.refresh_token_hash)
-        .bind(registration.relay_id)
-        .bind(registration.broker_room_id)
-        .bind(u64_to_i64(registration.created_at, "created_at")?)
-        .bind(registration.relay_label)
-        .bind(registration.relay_verify_key)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("failed to insert public_relay_registrations: {error}"))?;
-    }
-    for client in persisted.client_registrations {
-        sqlx::query(
-            r#"
-            INSERT INTO public_client_identities (
-                refresh_token_hash, client_id, client_verify_key, created_at, client_label
-            )
-            VALUES ($1, $2, $3, $4, $5)
-            "#,
-        )
-        .bind(client.refresh_token_hash)
-        .bind(client.client_id)
-        .bind(client.client_verify_key)
-        .bind(u64_to_i64(client.created_at, "created_at")?)
-        .bind(client.client_label)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("failed to insert public_client_identities: {error}"))?;
-    }
-    for grant in persisted.device_grants {
-        sqlx::query(
-            r#"
-            INSERT INTO public_device_grants (
-                refresh_token_hash, relay_id, broker_room_id, device_id, created_at, last_seen
-            )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            "#,
-        )
-        .bind(grant.refresh_token_hash)
-        .bind(grant.relay_id)
-        .bind(grant.broker_room_id)
-        .bind(grant.device_id)
-        .bind(u64_to_i64(grant.created_at, "created_at")?)
-        .bind(grant.last_seen.and_then(|value| i64::try_from(value).ok()))
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("failed to insert public_device_grants: {error}"))?;
-    }
-    for grant in persisted.client_relay_grants {
-        sqlx::query(
-            r#"
-            INSERT INTO public_client_relay_grants (
-                client_id, relay_id, broker_room_id, device_id, granted_at, relay_label, device_label
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            "#,
-        )
-        .bind(grant.client_id)
-        .bind(grant.relay_id)
-        .bind(grant.broker_room_id)
-        .bind(grant.device_id)
-        .bind(u64_to_i64(grant.granted_at, "granted_at")?)
-        .bind(grant.relay_label)
-        .bind(grant.device_label)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("failed to insert public_client_relay_grants: {error}"))?;
-    }
-    tx.commit()
-        .await
-        .map_err(|error| format!("failed to commit public control-plane transaction: {error}"))?;
-    Ok(())
 }
 
 fn parse_relay_registrations(
@@ -4117,6 +3899,15 @@ fn parse_relay_registrations(
             return Err(format!(
                 "{PUBLIC_RELAY_REGISTRATIONS_ENV} entries must include refresh_token"
             ));
+        }
+        if let Some(verify_key) = registration
+            .relay_verify_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+        {
+            validate_relay_verify_key(verify_key)
+                .map_err(|error| format!("{PUBLIC_RELAY_REGISTRATIONS_ENV}: {error}"))?;
         }
     }
     Ok(parsed)
@@ -4412,6 +4203,19 @@ fn relay_enrollment_challenge_message(challenge_id: &str, challenge: &str) -> St
     format!("agent-relay:relay-enroll:{challenge_id}:{challenge}")
 }
 
+fn enrolled_relay_verify_key(registration: &PersistedRelayRegistration) -> Result<String, String> {
+    let Some(verify_key) = registration
+        .relay_verify_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    else {
+        return Err("relay registration has no enrolled verify key".to_string());
+    };
+    validate_relay_verify_key(verify_key)?;
+    Ok(verify_key.to_string())
+}
+
 /// Domain-separated and bound to the relay: a signature harvested from one
 /// relay's pairing cannot be replayed to claim against a different one.
 pub fn client_claim_message(claim_id: &str, nonce: &str, relay_id: &str) -> String {
@@ -4449,1388 +4253,16 @@ fn verify_client_claim_signature(
 ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://user:pw@127.0.0.1:5433/throwaway \
 ///     cargo test -p relay-broker postgres -- --test-threads=1
 #[cfg(test)]
-mod postgres_round_trip_tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    /// Live-Postgres round-trip: a relay registration written by one instance
-    /// must survive a "restart" and load in a fresh instance against the same
-    /// database. Closes the gap that the JSON path was the only backend with
-    /// automated coverage.
-    ///
-    /// Env-gated so plain `cargo test` stays offline. Run ONLY against a
-    /// DISPOSABLE database, serially (see the module-level SAFETY note):
-    ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://user:pw@127.0.0.1:5433/throwaway \
-    ///     cargo test -p relay-broker postgres_relay_registration -- --test-threads=1
-    #[tokio::test]
-    async fn postgres_relay_registration_persists_across_reload() {
-        let Some((url, _serial)) = crate::postgres_test_url().await else {
-            eprintln!(
-                "skipping postgres round-trip: set RELAY_BROKER_TEST_POSTGRES_URL to a live DB"
-            );
-            return;
-        };
-
-        let issuer = Some("test-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string());
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let verify_key = format!("test-verify-key-{unique}");
-
-        // Plane A writes a relay registration -> exercises the Postgres SAVE path.
-        let plane_a = PublicControlPlane::from_parts_with_postgres(
-            issuer.clone(),
-            None,
-            None,
-            Some(url.clone()),
-            None,
-            None,
-        )
-        .await
-        .expect("plane A should connect to postgres");
-        let enrolled = plane_a
-            .issue_relay_registration_for_verify_key(&verify_key, Some("round-trip".to_string()))
-            .await
-            .expect("registration should save to postgres");
-
-        // Plane B is a brand-new instance against the same DB; its constructor
-        // load()s from Postgres -> exercises the LOAD path after a "restart".
-        let plane_b = PublicControlPlane::from_parts_with_postgres(
-            issuer,
-            None,
-            None,
-            Some(url.clone()),
-            None,
-            None,
-        )
-        .await
-        .expect("plane B should connect to postgres");
-
-        let loaded = plane_b
-            .inner
-            .state
-            .lock()
-            .await
-            .registration_for_verify_key(&verify_key)
-            .expect("registration written by plane A must survive reload in plane B");
-
-        // Row-scoped cleanup: a targeted DELETE of only THIS run's registration
-        // before asserting, so failures still clean up without touching any other
-        // rows in the (disposable) database.
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("aux pool");
-        sqlx::query("DELETE FROM public_relay_registrations WHERE relay_id = $1")
-            .bind(&enrolled.relay_id)
-            .execute(&pool)
-            .await
-            .expect("cleanup relay registration");
-
-        assert_eq!(loaded.relay_id, enrolled.relay_id);
-        assert_eq!(loaded.broker_room_id, enrolled.broker_room_id);
-        assert_eq!(loaded.relay_label.as_deref(), Some("round-trip"));
-    }
-
-    /// Live-Postgres round-trip for device grants: a grant (with `last_seen`) must
-    /// survive reload, and a throttled ws-token refresh must bump `last_seen` via
-    /// the targeted single-row UPDATE (`touch_device_last_seen`). Env-gated.
-    ///
-    /// DANGER: this test writes and deletes public-control rows (`issue_*` →
-    /// targeted `save()`, plus row-scoped cleanup). Point `RELAY_BROKER_TEST_POSTGRES_URL`
-    /// at a DISPOSABLE database ONLY, and run with `--test-threads=1`. Never point
-    /// it at a shared or running broker's database — a concurrent writer's rows can
-    /// be lost. Cleanup below is row-scoped (targeted DELETEs, not a whole-state
-    /// save) to minimise blast radius.
-    #[tokio::test]
-    async fn postgres_device_grant_last_seen_round_trips_and_touches() {
-        let Some((url, _serial)) = crate::postgres_test_url().await else {
-            eprintln!(
-                "skipping postgres device-grant round-trip: set RELAY_BROKER_TEST_POSTGRES_URL"
-            );
-            return;
-        };
-        let issuer = Some("test-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string());
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let verify_key = format!("test-verify-key-devgrant-{unique}");
-        let device_id = format!("device-{unique}");
-
-        let plane_a = PublicControlPlane::from_parts_with_postgres(
-            issuer.clone(),
-            None,
-            None,
-            Some(url.clone()),
-            None,
-            None,
-        )
-        .await
-        .expect("plane A should connect");
-        let enrolled = plane_a
-            .issue_relay_registration_for_verify_key(&verify_key, None)
-            .await
-            .expect("relay enroll");
-        let grant = plane_a
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                DeviceGrantRequest {
-                    relay_id: enrolled.relay_id.clone(),
-                    broker_room_id: enrolled.broker_room_id.clone(),
-                    device_id: device_id.clone(),
-                },
-                Some(5),
-            )
-            .await
-            .expect("device grant should save to postgres");
-
-        // (1) A fresh instance loads the grant (with last_seen) from Postgres.
-        let plane_b = PublicControlPlane::from_parts_with_postgres(
-            issuer.clone(),
-            None,
-            None,
-            Some(url.clone()),
-            None,
-            None,
-        )
-        .await
-        .expect("plane B should connect");
-        let reloaded_last_seen = {
-            let guard = plane_b.inner.state.lock().await;
-            guard
-                .grants_by_hash
-                .values()
-                .find(|candidate| candidate.device_id == device_id)
-                .map(|candidate| candidate.last_seen)
-        };
-
-        // (2) Age last_seen, then a ws-token refresh must bump it via the targeted
-        // UPDATE (touch_device_last_seen), not the whole-state save. The throttle
-        // decision reads the IN-MEMORY last_seen, so with reload-before-use off
-        // (single-instance default) we must age the in-memory value — not just the
-        // DB row — to simulate a device unseen for longer than the throttle window.
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("aux pool");
-        sqlx::query("UPDATE public_device_grants SET last_seen = 1 WHERE device_id = $1")
-            .bind(&device_id)
-            .execute(&pool)
-            .await
-            .expect("age last_seen");
-        {
-            let mut store = plane_a.inner.state.lock().await;
-            for grant in store.grants_by_hash.values_mut() {
-                if grant.device_id == device_id {
-                    grant.last_seen = Some(1); // epoch 1 = well past the throttle window
-                }
-            }
-        }
-        plane_a
-            .issue_device_ws_token(&grant.device_refresh_token)
-            .await
-            .expect("ws-token refresh");
-        let (bumped,): (Option<i64>,) =
-            sqlx::query_as("SELECT last_seen FROM public_device_grants WHERE device_id = $1")
-                .bind(&device_id)
-                .fetch_one(&pool)
-                .await
-                .expect("read last_seen");
-
-        // Row-scoped cleanup before asserting — targeted DELETEs so we only touch
-        // THIS test's rows in the (disposable) database.
-        sqlx::query("DELETE FROM public_device_grants WHERE relay_id = $1")
-            .bind(&enrolled.relay_id)
-            .execute(&pool)
-            .await
-            .expect("cleanup device grants");
-        sqlx::query("DELETE FROM public_relay_registrations WHERE relay_id = $1")
-            .bind(&enrolled.relay_id)
-            .execute(&pool)
-            .await
-            .expect("cleanup relay registration");
-
-        assert!(
-            reloaded_last_seen
-                .expect("device grant must survive reload")
-                .is_some(),
-            "last_seen (set at grant time) must persist across reload"
-        );
-        assert!(
-            bumped.unwrap_or(0) > 1,
-            "a ws-token refresh must bump last_seen via the targeted UPDATE, got {bumped:?}"
-        );
-    }
-}
+#[path = "public_control/tests/postgres_round_trip_tests.rs"]
+mod postgres_round_trip_tests;
 
 #[cfg(test)]
-mod device_revoke_tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Regression: a client_relay_grant with no matching device grant must still be
-    // removed AND persisted by revoke_device_grant. The save guard previously only
-    // checked the device-grant count, so an orphan client grant removal was dropped.
-    #[tokio::test]
-    async fn revoke_device_grant_persists_orphan_client_relay_grant_removal() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("agent-relay-revoke-{unique}.json"));
-        let path_str = path.to_str().expect("temp path is utf8").to_string();
-        let issuer = Some("revoke-test-issuer-a3f76b4c2089d15e6b0fa873c4e9521d".to_string());
-
-        let plane = PublicControlPlane::from_parts(
-            issuer.clone(),
-            None,
-            Some(path_str.clone()),
-            None,
-            None,
-        )
-        .await
-        .expect("plane should build");
-
-        // Enroll a relay so we have a valid bearer token + relay_id/room.
-        let enrolled = plane
-            .issue_relay_registration_for_verify_key(&format!("vk-{unique}"), None)
-            .await
-            .expect("enroll should succeed");
-
-        // Inject an ORPHAN client_relay_grant (no matching device grant), then persist.
-        let device_id = "device-orphan";
-        {
-            let mut store = plane.lock_state().await.expect("lock");
-            let grant = PersistedClientRelayGrant {
-                client_id: "client-orphan".to_string(),
-                relay_id: enrolled.relay_id.clone(),
-                broker_room_id: enrolled.broker_room_id.clone(),
-                device_id: device_id.to_string(),
-                granted_at: 0,
-                relay_label: None,
-                device_label: None,
-            };
-            store.client_relay_grants_by_key.insert(
-                client_relay_grant_key(&grant.client_id, &grant.relay_id),
-                grant,
-            );
-            plane
-                .inner
-                .persistence
-                .save(&mut store)
-                .await
-                .expect("seed save");
-        }
-
-        // Revoke the device: no device grant to remove, but the orphan client grant
-        // must be removed AND persisted.
-        plane
-            .revoke_device_grant(
-                &enrolled.relay_refresh_token,
-                device_id,
-                DeviceGrantRevokeRequest {
-                    relay_id: enrolled.relay_id.clone(),
-                    broker_room_id: enrolled.broker_room_id.clone(),
-                },
-            )
-            .await
-            .expect("revoke should succeed");
-
-        // Reload from disk: the orphan grant must be gone (i.e. the removal persisted).
-        let reloaded = PublicControlPlane::from_parts(issuer, None, Some(path_str), None, None)
-            .await
-            .expect("reload should build");
-        let remaining = reloaded
-            .lock_state()
-            .await
-            .expect("lock reloaded")
-            .client_relay_grants_by_key
-            .len();
-        let _ = std::fs::remove_file(&path);
-
-        assert_eq!(
-            remaining, 0,
-            "orphan client_relay_grant removal must be persisted"
-        );
-    }
-}
+#[path = "public_control/tests/device_revoke_tests.rs"]
+mod device_revoke_tests;
 
 #[cfg(test)]
-mod device_limit_tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    async fn in_memory_plane() -> PublicControlPlane {
-        PublicControlPlane::from_parts(
-            Some("device-limit-test-issuer-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect("in-memory plane should build")
-    }
-
-    fn grant_request(enrolled: &RelayEnrollmentResponse, device_id: &str) -> DeviceGrantRequest {
-        DeviceGrantRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            device_id: device_id.to_string(),
-        }
-    }
-
-    async fn enroll(plane: &PublicControlPlane, tag: &str) -> RelayEnrollmentResponse {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        plane
-            .issue_relay_registration_for_verify_key(&format!("vk-{tag}-{unique}"), None)
-            .await
-            .expect("enroll should succeed")
-    }
-
-    fn test_client_verify_key(seed: u8) -> String {
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
-        STANDARD.encode(signing_key.verifying_key().to_bytes())
-    }
-
-    /// The exact bytes the browser signs. This literal is duplicated in
-    /// `frontend/remote/crypto.test.mjs`; both sides assert against it, so a
-    /// change to either format drifts loudly instead of silently rejecting
-    /// every pairing at runtime.
-    #[test]
-    fn the_client_claim_message_matches_the_frontend_contract() {
-        assert_eq!(
-            client_claim_message("ccl-abc", "cn-def", "relay-1"),
-            "agent-relay:client-claim:ccl-abc:cn-def:relay-1"
-        );
-    }
-
-    /// A full pairing: the relay attests, then the key holder redeems. Most
-    /// tests only care about the resulting credential, not the two-step shape.
-    async fn attest_and_claim(
-        plane: &PublicControlPlane,
-        enrolled: &RelayEnrollmentResponse,
-        device_id: &str,
-        seed: u8,
-    ) -> ClientClaimResponse {
-        let claim = plane
-            .issue_client_grant(
-                &enrolled.relay_refresh_token,
-                client_grant_request(enrolled, device_id, &test_client_verify_key(seed)),
-            )
-            .await
-            .expect("relay attests the client key");
-        plane
-            .claim_client_identity(ClientClaimRequest {
-                claim_id: claim.claim_id.clone(),
-                claim_signature: sign_client_claim(seed, &claim),
-            })
-            .await
-            .expect("key holder redeems the attestation")
-    }
-
-    /// Sign a claim the way the browser does: over the domain-separated message
-    /// binding claim id, nonce and relay.
-    fn sign_client_claim(seed: u8, claim: &ClientGrantResponse) -> String {
-        use ed25519_dalek::Signer;
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
-        let message = client_claim_message(&claim.claim_id, &claim.claim_nonce, &claim.relay_id);
-        STANDARD.encode(signing_key.sign(message.as_bytes()).to_bytes())
-    }
-
-    fn client_grant_request(
-        enrolled: &RelayEnrollmentResponse,
-        device_id: &str,
-        verify_key: &str,
-    ) -> ClientGrantRequest {
-        ClientGrantRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            device_id: device_id.to_string(),
-            client_verify_key: verify_key.to_string(),
-            client_label: None,
-            device_label: None,
-        }
-    }
-
-    /// A client identity belongs to the key holder, never to a relay.
-    ///
-    /// `client_id` is derived from the client key alone and is therefore global,
-    /// so a relay that merely *names* someone's public key must gain nothing by
-    /// it. Knowing the key is not a secret: every relay a browser pairs with
-    /// learns it. What separates them is proof of possession.
-    ///
-    /// Three things this pins, in order of how much they cost if lost:
-    ///   1. the attestation call hands back no credential at all,
-    ///   2. an attestation cannot be redeemed without the key holder's signature,
-    ///   3. no grant row exists until that signature lands, so a hostile relay
-    ///      cannot insert itself into someone's relay directory.
-    #[tokio::test]
-    async fn a_relay_must_not_mint_a_credential_for_another_relays_client() {
-        let plane = in_memory_plane().await;
-        let victim_relay = enroll(&plane, "victim").await;
-        let attacker_relay = enroll(&plane, "attacker").await;
-        let client_seed = 77;
-        let client_verify_key = test_client_verify_key(client_seed);
-
-        // The legitimate pairing: attest, then the key holder redeems it.
-        let victim_claim = plane
-            .issue_client_grant(
-                &victim_relay.relay_refresh_token,
-                client_grant_request(&victim_relay, "victim-phone", &client_verify_key),
-            )
-            .await
-            .expect("the victim relay attests its own phone");
-        let victim = plane
-            .claim_client_identity(ClientClaimRequest {
-                claim_id: victim_claim.claim_id.clone(),
-                claim_signature: sign_client_claim(client_seed, &victim_claim),
-            })
-            .await
-            .expect("the key holder redeems its own attestation");
-
-        // The attacker presents the SAME client verify key under its own bearer.
-        // It gets an attestation — that much is unavoidable, anyone may attest a
-        // public key — but it must be worthless without the private half.
-        let stolen = plane
-            .issue_client_grant(
-                &attacker_relay.relay_refresh_token,
-                client_grant_request(&attacker_relay, "attacker-phone", &client_verify_key),
-            )
-            .await
-            .expect("attacker attestation call");
-
-        // 1. Nothing usable came back.
-        assert!(
-            !stolen.claim_id.is_empty() && !stolen.claim_nonce.is_empty(),
-            "an attestation is a claim reference, not a credential"
-        );
-
-        // 2. Redeeming it needs a signature the attacker cannot produce. A
-        //    signature lifted from the victim's own claim must not transfer,
-        //    which is why the message binds the claim id and the relay.
-        let replayed = sign_client_claim(client_seed, &victim_claim);
-        let forged = plane
-            .claim_client_identity(ClientClaimRequest {
-                claim_id: stolen.claim_id.clone(),
-                claim_signature: replayed,
-            })
-            .await;
-        assert!(
-            forged.is_err(),
-            "a signature bound to another claim must not redeem this one"
-        );
-
-        // 3. The victim's directory must be untouched: no grant row was created
-        //    for the attacker's relay, because no key holder ever signed for it.
-        let visible = plane
-            .list_client_relays(&victim.client_refresh_token)
-            .await
-            .expect("the victim lists its own relays");
-        assert!(
-            !visible
-                .relays
-                .iter()
-                .any(|entry| entry.relay_id == attacker_relay.relay_id),
-            "an unredeemed attestation must not appear in the client's relay directory; saw {:?}",
-            visible.relays
-        );
-        assert!(
-            visible
-                .relays
-                .iter()
-                .any(|entry| entry.relay_id == victim_relay.relay_id),
-            "the legitimately claimed relay must still be listed"
-        );
-    }
-
-    /// A claim reference is single-use: redeeming it twice must not mint a
-    /// second credential. Without this, an observer of the sealed pairing result
-    /// could re-run the claim and rotate the phone's token out from under it —
-    /// the same lockout shape as `reapprove_must_not_brick_previous_client_token`.
-    #[tokio::test]
-    async fn a_client_claim_reference_cannot_be_redeemed_twice() {
-        let plane = in_memory_plane().await;
-        let relay = enroll(&plane, "single-use").await;
-        let seed = 88;
-        let claim = plane
-            .issue_client_grant(
-                &relay.relay_refresh_token,
-                client_grant_request(&relay, "phone", &test_client_verify_key(seed)),
-            )
-            .await
-            .expect("attest");
-        let signature = sign_client_claim(seed, &claim);
-
-        plane
-            .claim_client_identity(ClientClaimRequest {
-                claim_id: claim.claim_id.clone(),
-                claim_signature: signature.clone(),
-            })
-            .await
-            .expect("first redemption succeeds");
-
-        let replay = plane
-            .claim_client_identity(ClientClaimRequest {
-                claim_id: claim.claim_id.clone(),
-                claim_signature: signature,
-            })
-            .await;
-        assert!(replay.is_err(), "a claim reference must be single-use");
-    }
-
-    /// The signature must be over the broker's nonce, not merely *a* valid
-    /// signature by the right key. Guards against a verifier that checks the key
-    /// but forgets to bind the challenge.
-    #[tokio::test]
-    async fn a_client_claim_rejects_a_signature_over_the_wrong_message() {
-        let plane = in_memory_plane().await;
-        let relay = enroll(&plane, "wrong-message").await;
-        let seed = 99;
-        let claim = plane
-            .issue_client_grant(
-                &relay.relay_refresh_token,
-                client_grant_request(&relay, "phone", &test_client_verify_key(seed)),
-            )
-            .await
-            .expect("attest");
-
-        use ed25519_dalek::Signer;
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
-        let wrong = STANDARD.encode(
-            signing_key
-                .sign(b"agent-relay:client-claim:whatever")
-                .to_bytes(),
-        );
-
-        assert!(
-            plane
-                .claim_client_identity(ClientClaimRequest {
-                    claim_id: claim.claim_id,
-                    claim_signature: wrong,
-                })
-                .await
-                .is_err(),
-            "the signature must cover the broker's own nonce"
-        );
-    }
-
-    /// Approving a pairing rotates the client identity token; the fresh token is
-    /// only delivered to the session that completes THAT pairing handshake. When a
-    /// relay re-approves (duplicate tap, stale request, "re-authorizing" a device
-    /// that seems broken), the already-paired phone never sees the new token — so
-    /// its stored credential must keep authenticating for a grace window instead
-    /// of getting bricked by the very action meant to restore its access.
-    #[tokio::test]
-    async fn reapprove_must_not_brick_previous_client_token() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "regrant-client").await;
-
-        let first = attest_and_claim(&plane, &enrolled, "phone-1", 21).await;
-        // The phone holds `first.client_refresh_token`. Pairing runs again — a
-        // duplicate tap, a re-authorize — and rotates the identity. The phone
-        // that completed the FIRST handshake never receives the new credential.
-        attest_and_claim(&plane, &enrolled, "phone-1", 21).await;
-
-        plane
-            .issue_client_session(&first.client_refresh_token)
-            .await
-            .expect(
-                "a client token superseded by a re-approve the client never received \
-                 must keep authenticating within the rotation grace window",
-            );
-    }
-
-    /// Same invariant for the device chain: re-issuing a grant for the same
-    /// device_id rotates the device refresh token; the previous token must keep
-    /// working within the grace window.
-    #[tokio::test]
-    async fn reapprove_must_not_brick_previous_device_token() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "regrant-device").await;
-        let bearer = &enrolled.relay_refresh_token;
-
-        let first = plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
-            .await
-            .expect("first approve");
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
-            .await
-            .expect("re-approve");
-
-        plane
-            .issue_device_session(&first.device_refresh_token)
-            .await
-            .expect(
-                "a device token superseded by a re-approve the device never received \
-                 must keep authenticating within the rotation grace window",
-            );
-    }
-
-    #[tokio::test]
-    async fn superseded_client_token_use_does_not_extend_grace() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "fixed-client-grace").await;
-        let first = attest_and_claim(&plane, &enrolled, "phone-1", 24).await;
-        let second = attest_and_claim(&plane, &enrolled, "phone-1", 24).await;
-        let old_hash = sha256_hex(&first.client_refresh_token);
-        let deadline = unix_now().saturating_add(3600);
-        {
-            let mut store = plane.inner.state.lock().await;
-            for identity in store.client_registrations_by_hash.values_mut() {
-                for token in &mut identity.superseded {
-                    token.expires_at = deadline;
-                }
-            }
-        }
-
-        for _ in 0..3 {
-            plane
-                .issue_client_session(&first.client_refresh_token)
-                .await
-                .expect("old token remains usable before its deadline");
-            let store = plane.inner.state.lock().await;
-            let (_, identity) = find_client_identity_for_token(&store, &old_hash, deadline - 1)
-                .expect("old token remains usable until its deadline");
-            assert_eq!(identity.superseded[0].expires_at, deadline);
-            assert!(find_client_identity_for_token(&store, &old_hash, deadline).is_none());
-            assert!(find_client_identity_for_token(
-                &store,
-                &sha256_hex(&second.client_refresh_token),
-                deadline,
-            )
-            .is_some());
-        }
-    }
-
-    #[tokio::test]
-    async fn superseded_device_session_use_does_not_extend_grace() {
-        assert_device_token_use_does_not_extend_grace(false).await;
-    }
-
-    #[tokio::test]
-    async fn superseded_device_ws_token_use_does_not_extend_grace() {
-        assert_device_token_use_does_not_extend_grace(true).await;
-    }
-
-    #[tokio::test]
-    async fn signed_refresh_cannot_restore_a_device_revoked_on_another_broker() {
-        assert_signed_refresh_respects_shared_revocation(true).await;
-    }
-
-    #[tokio::test]
-    async fn signed_refresh_cannot_restore_a_client_revoked_on_another_broker() {
-        assert_signed_refresh_respects_shared_revocation(false).await;
-    }
-
-    #[tokio::test]
-    async fn refresh_challenge_capacity_covers_the_default_api_budget() {
-        use ed25519_dalek::Signer;
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "refresh-capacity").await;
-        let client = attest_and_claim(&plane, &enrolled, "phone-1", 89).await;
-        let key = ed25519_dalek::SigningKey::from_bytes(&[89; 32]);
-        let origin = "https://broker.test";
-        let mut request = CredentialRefreshChallengeRequest {
-            client_id: client.client_id,
-            broker_room_id: None,
-            device_id: None,
-            nonce: "refresh-capacity-init".into(),
-            signature: String::new(),
-        };
-        request.signature = STANDARD.encode(
-            key.sign(credential_refresh_init_message(&request, origin).as_bytes())
-                .to_bytes(),
-        );
-        let challenge = plane
-            .create_credential_refresh_challenge(request.clone(), origin)
-            .await
-            .unwrap();
-        let budget = crate::DEFAULT_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE
-            * DEFAULT_CLIENT_CLAIM_TTL_SECS.div_ceil(crate::RATE_LIMIT_WINDOW_SECS) as usize;
-        {
-            let mut pending = plane.inner.pending_credential_refreshes.lock().await;
-            pending.clear();
-            for index in 0..budget - 1 {
-                let mut busy = challenge.clone();
-                busy.challenge_id = format!("busy-challenge-{index}");
-                busy.client_id =
-                    format!("busy-client-{}", index / MAX_PENDING_REFRESHES_PER_CLIENT);
-                pending.insert(
-                    busy.challenge_id.clone(),
-                    PendingCredentialRefresh {
-                        challenge: busy,
-                        client_verify_key: STANDARD.encode(key.verifying_key().to_bytes()),
-                        request_nonce: format!("busy-nonce-{index}"),
-                    },
-                );
-            }
-        }
-        let result = plane
-            .create_credential_refresh_challenge(request, origin)
-            .await;
-        assert!(
-            result.is_ok(),
-            "pending challenges within the API's default TTL budget must not block another client: {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn signed_refresh_rejects_an_expired_challenge() {
-        use ed25519_dalek::Signer;
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "expired-refresh").await;
-        let client = attest_and_claim(&plane, &enrolled, "phone-1", 87).await;
-        let key = ed25519_dalek::SigningKey::from_bytes(&[87; 32]);
-        let origin = "https://broker.test";
-        let mut request = CredentialRefreshChallengeRequest {
-            client_id: client.client_id,
-            broker_room_id: None,
-            device_id: None,
-            nonce: "expired-refresh-init".into(),
-            signature: String::new(),
-        };
-        request.signature = STANDARD.encode(
-            key.sign(credential_refresh_init_message(&request, origin).as_bytes())
-                .to_bytes(),
-        );
-        let challenge = plane
-            .create_credential_refresh_challenge(request, origin)
-            .await
-            .unwrap();
-        plane
-            .inner
-            .pending_credential_refreshes
-            .lock()
-            .await
-            .get_mut(&challenge.challenge_id)
-            .unwrap()
-            .challenge
-            .expires_at = 0;
-        let result = plane
-            .refresh_credentials(
-                CredentialRefreshRequest {
-                    challenge_id: challenge.challenge_id.clone(),
-                    signature: STANDARD.encode(
-                        key.sign(credential_refresh_message(&challenge).as_bytes())
-                            .to_bytes(),
-                    ),
-                },
-                origin,
-            )
-            .await;
-        assert!(
-            result.is_err(),
-            "an expired challenge cannot issue credentials"
-        );
-        plane
-            .issue_client_session(&client.client_refresh_token)
-            .await
-            .expect("rejected recovery leaves the current token intact");
-    }
-
-    async fn assert_signed_refresh_respects_shared_revocation(device: bool) {
-        use ed25519_dalek::Signer;
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("broker-refresh-revoke-{unique}.json"));
-        let issuer = Some("shared-refresh-test-a3f76b4c2089d15e6b0fa873c4e9521d".into());
-        let owner = PublicControlPlane::from_parts(
-            issuer.clone(),
-            None,
-            Some(path.to_string_lossy().into_owned()),
-            None,
-            None,
-        )
-        .await
-        .expect("owner plane");
-        let enrolled = enroll(&owner, "shared-refresh-revoke").await;
-        owner
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                grant_request(&enrolled, "phone-1"),
-                None,
-            )
-            .await
-            .expect("device grant");
-        let client = attest_and_claim(&owner, &enrolled, "phone-1", 35).await;
-        let mut peer = PublicControlPlane::from_parts(
-            issuer,
-            None,
-            Some(path.to_string_lossy().into_owned()),
-            None,
-            None,
-        )
-        .await
-        .expect("peer plane");
-        Arc::get_mut(&mut peer.inner).unwrap().force_shared_backend = true;
-        let origin = "http://broker.test";
-        let key = ed25519_dalek::SigningKey::from_bytes(&[35; 32]);
-        let mut request = CredentialRefreshChallengeRequest {
-            client_id: client.client_id,
-            broker_room_id: device.then(|| enrolled.broker_room_id.clone()),
-            device_id: None,
-            nonce: "shared-revoke-init".into(),
-            signature: String::new(),
-        };
-        request.signature = STANDARD.encode(
-            key.sign(credential_refresh_init_message(&request, origin).as_bytes())
-                .to_bytes(),
-        );
-        let challenge = peer
-            .create_credential_refresh_challenge(request, origin)
-            .await
-            .expect("challenge before revocation");
-        if device {
-            owner
-                .revoke_device_grant(
-                    &enrolled.relay_refresh_token,
-                    "phone-1",
-                    DeviceGrantRevokeRequest {
-                        relay_id: enrolled.relay_id,
-                        broker_room_id: enrolled.broker_room_id,
-                    },
-                )
-                .await
-                .expect("revoke device on owner");
-        } else {
-            owner
-                .revoke_client_identity(&client.client_refresh_token)
-                .await
-                .expect("revoke client on owner");
-        }
-        let result = peer
-            .refresh_credentials(
-                CredentialRefreshRequest {
-                    challenge_id: challenge.challenge_id.clone(),
-                    signature: STANDARD.encode(
-                        key.sign(credential_refresh_message(&challenge).as_bytes())
-                            .to_bytes(),
-                    ),
-                },
-                origin,
-            )
-            .await;
-        let _ = fs::remove_file(path).await;
-        assert!(
-            result.is_err(),
-            "a stale broker must not restore a revoked credential"
-        );
-    }
-
-    async fn assert_device_token_use_does_not_extend_grace(ws_token: bool) {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "fixed-device-grace").await;
-        let first = plane
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                grant_request(&enrolled, "phone-1"),
-                None,
-            )
-            .await
-            .expect("first grant");
-        let second = plane
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                grant_request(&enrolled, "phone-1"),
-                None,
-            )
-            .await
-            .expect("second grant");
-        let old_hash = sha256_hex(&first.device_refresh_token);
-        let deadline = unix_now().saturating_add(3600);
-        {
-            let mut store = plane.inner.state.lock().await;
-            for grant in store.grants_by_hash.values_mut() {
-                for token in &mut grant.superseded {
-                    token.expires_at = deadline;
-                }
-            }
-        }
-
-        for _ in 0..3 {
-            if ws_token {
-                plane
-                    .issue_device_ws_token(&first.device_refresh_token)
-                    .await
-                    .expect("old token remains usable before its deadline");
-            } else {
-                plane
-                    .issue_device_session(&first.device_refresh_token)
-                    .await
-                    .expect("old token remains usable before its deadline");
-            }
-            let store = plane.inner.state.lock().await;
-            let (_, grant) = find_device_grant_for_token(&store, &old_hash, deadline - 1)
-                .expect("old token remains usable until its deadline");
-            assert_eq!(grant.superseded[0].expires_at, deadline);
-            assert!(find_device_grant_for_token(&store, &old_hash, deadline).is_none());
-            assert!(find_device_grant_for_token(
-                &store,
-                &sha256_hex(&second.device_refresh_token),
-                deadline,
-            )
-            .is_some());
-        }
-    }
-
-    /// A room-scoped ws-token must only authenticate against its OWN relay's room,
-    /// and a mismatch must have zero side effects (no `last_seen` touch) — this is
-    /// what keeps a legacy/sibling token from silently refreshing the wrong relay.
-    #[tokio::test]
-    async fn issue_device_ws_token_scoped_verifies_room_without_side_effects() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "scoped-room").await;
-        let bearer = &enrolled.relay_refresh_token;
-        let grant = plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
-            .await
-            .expect("device grant");
-        let room = &enrolled.broker_room_id;
-
-        let ok = plane
-            .issue_device_ws_token_scoped(&grant.device_refresh_token, room)
-            .await
-            .expect("matching room must authenticate");
-        assert_eq!(&ok.broker_room_id, room);
-
-        {
-            let mut store = plane.inner.state.lock().await;
-            for grant in store.grants_by_hash.values_mut() {
-                if grant.device_id == "phone-1" {
-                    grant.last_seen = Some(0);
-                }
-            }
-        }
-        let before = last_seen_for(&plane, "phone-1").await;
-        let err = plane
-            .issue_device_ws_token_scoped(&grant.device_refresh_token, "room-someone-else")
-            .await
-            .expect_err("mismatched room must be rejected");
-        assert_eq!(err, "device refresh token is invalid");
-        assert_eq!(
-            last_seen_for(&plane, "phone-1").await,
-            before,
-            "a rejected room mismatch must not touch last_seen"
-        );
-    }
-
-    /// A wrong-room request must not affect a sibling relay's credential.
-    #[tokio::test]
-    async fn issue_device_session_scoped_room_mismatch_does_not_renew_grace() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "scoped-session-grace").await;
-        let bearer = &enrolled.relay_refresh_token;
-        let first = plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
-            .await
-            .expect("first grant");
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
-            .await
-            .expect("re-grant supersedes the first token");
-
-        // Pin the superseded token's grace expiry to a known value.
-        let pinned = unix_now().saturating_add(3600);
-        {
-            let mut store = plane.inner.state.lock().await;
-            for grant in store.grants_by_hash.values_mut() {
-                for token in &mut grant.superseded {
-                    token.expires_at = pinned;
-                }
-            }
-        }
-
-        let err = plane
-            .issue_device_session_scoped(&first.device_refresh_token, "room-not-mine")
-            .await
-            .expect_err("wrong-room establish must be rejected");
-        assert_eq!(err, "device refresh token is invalid");
-
-        let after = {
-            let store = plane.inner.state.lock().await;
-            store
-                .grants_by_hash
-                .values()
-                .flat_map(|grant| grant.superseded.iter())
-                .map(|token| token.expires_at)
-                .max()
-        };
-        assert_eq!(
-            after,
-            Some(pinned),
-            "a wrong-room establish must not renew the grace window"
-        );
-    }
-
-    /// The grace window is a window, not immortality: once a superseded token's
-    /// expiry passes, it must be rejected.
-    #[tokio::test]
-    async fn superseded_token_expires_after_grace_window() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "grace-expiry").await;
-        let bearer = &enrolled.relay_refresh_token;
-
-        let first = plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
-            .await
-            .expect("first approve");
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "phone-1"), None)
-            .await
-            .expect("re-approve");
-        {
-            let mut store = plane.inner.state.lock().await;
-            for grant in store.grants_by_hash.values_mut() {
-                for token in &mut grant.superseded {
-                    token.expires_at = 0;
-                }
-            }
-        }
-
-        plane
-            .issue_device_session(&first.device_refresh_token)
-            .await
-            .expect_err("an expired superseded token must be rejected");
-    }
-
-    /// Explicit revocation is the immediate-cutoff path: it must kill the
-    /// current token AND every superseded token in the same stroke.
-    #[tokio::test]
-    async fn revoke_kills_superseded_tokens_immediately() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "grace-revoke").await;
-
-        let first = attest_and_claim(&plane, &enrolled, "phone-1", 23).await;
-        let second = attest_and_claim(&plane, &enrolled, "phone-1", 23).await;
-
-        plane
-            .revoke_client_identity(&second.client_refresh_token)
-            .await
-            .expect("revoke with the current token");
-
-        plane
-            .issue_client_session(&first.client_refresh_token)
-            .await
-            .expect_err("a superseded token must not survive an explicit revoke");
-        plane
-            .issue_client_session(&second.client_refresh_token)
-            .await
-            .expect_err("the revoked current token must be rejected");
-    }
-
-    #[tokio::test]
-    async fn device_grant_rejected_once_limit_reached() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "cap").await;
-        let bearer = &enrolled.relay_refresh_token;
-        let limit = Some(2);
-
-        for i in 1..=2 {
-            plane
-                .issue_device_grant(
-                    bearer,
-                    grant_request(&enrolled, &format!("device-{i}")),
-                    limit,
-                )
-                .await
-                .unwrap_or_else(|error| panic!("device {i} under the cap should succeed: {error}"));
-        }
-        let error = plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "device-3"), limit)
-            .await
-            .expect_err("the third device must be rejected at the cap");
-        assert!(
-            error.contains("device limit"),
-            "expected a device-limit error, got: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn admin_stats_counts_devices_per_relay_sorted() {
-        let plane = in_memory_plane().await;
-
-        // Busy relay: 3 devices.
-        let busy = enroll(&plane, "busy").await;
-        for device in ["d1", "d2", "d3"] {
-            plane
-                .issue_device_grant(
-                    &busy.relay_refresh_token,
-                    grant_request(&busy, device),
-                    None,
-                )
-                .await
-                .expect("busy grant");
-        }
-        // Re-granting an existing device must NOT inflate the count.
-        plane
-            .issue_device_grant(&busy.relay_refresh_token, grant_request(&busy, "d1"), None)
-            .await
-            .expect("regrant");
-
-        // Quiet relay: 1 device.
-        let quiet = enroll(&plane, "quiet").await;
-        plane
-            .issue_device_grant(
-                &quiet.relay_refresh_token,
-                grant_request(&quiet, "only"),
-                None,
-            )
-            .await
-            .expect("quiet grant");
-
-        let stats = plane.admin_stats(10).await.expect("admin_stats");
-
-        assert_eq!(stats.totals.relays, 2, "two relays are registered");
-        assert_eq!(stats.totals.devices, 4, "3 + 1 device grants total");
-        assert_eq!(stats.relays.len(), 2);
-        // Busiest relay first.
-        assert_eq!(stats.relays[0].relay_id, busy.relay_id);
-        assert_eq!(stats.relays[0].device_count, 3, "dedupe keeps it at 3");
-        assert_eq!(stats.relays[1].relay_id, quiet.relay_id);
-        assert_eq!(stats.relays[1].device_count, 1);
-    }
-
-    #[tokio::test]
-    async fn admin_stats_includes_client_only_orphan_relays() {
-        // Regression: a relay with a dangling client_relay_grant but NO registration
-        // and NO device grant must still surface (and count in totals), or the abuse
-        // signal for orphaned grants is silently dropped.
-        let plane = in_memory_plane().await;
-        plane
-            .seed_client_relay_grant_for_test("orphan-relay", "client-1")
-            .await;
-
-        let stats = plane.admin_stats(10).await.expect("admin_stats");
-        assert_eq!(stats.totals.relays, 1, "the orphan relay must be counted");
-        let row = stats
-            .relays
-            .iter()
-            .find(|r| r.relay_id == "orphan-relay")
-            .expect("orphan relay should appear in the rows");
-        assert_eq!(row.device_count, 0, "it has no device grants");
-        assert_eq!(row.client_count, 1, "its client grant is surfaced");
-    }
-
-    #[tokio::test]
-    async fn admin_stats_top_n_caps_rows() {
-        let plane = in_memory_plane().await;
-        for tag in ["a", "b", "c"] {
-            let relay = enroll(&plane, tag).await;
-            plane
-                .issue_device_grant(&relay.relay_refresh_token, grant_request(&relay, "d"), None)
-                .await
-                .expect("grant");
-        }
-        let stats = plane.admin_stats(2).await.expect("admin_stats");
-        assert_eq!(stats.totals.relays, 3, "totals count all relays");
-        assert_eq!(stats.relays.len(), 2, "but only top_n rows are returned");
-    }
-
-    #[tokio::test]
-    async fn regrant_existing_device_at_limit_succeeds() {
-        // Re-registering an EXISTING device_id while at the cap must succeed:
-        // the same-device dedupe frees its slot before the count check runs.
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "regrant").await;
-        let bearer = &enrolled.relay_refresh_token;
-        let limit = Some(2);
-
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "device-a"), limit)
-            .await
-            .expect("device-a");
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "device-b"), limit)
-            .await
-            .expect("device-b");
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "device-a"), limit)
-            .await
-            .expect("re-granting an existing device at the cap should succeed");
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "device-c"), limit)
-            .await
-            .expect_err("a genuinely new third device is still rejected");
-    }
-
-    #[tokio::test]
-    async fn no_limit_means_unlimited() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "unlimited").await;
-        let bearer = &enrolled.relay_refresh_token;
-        for i in 0..5 {
-            plane
-                .issue_device_grant(bearer, grant_request(&enrolled, &format!("d-{i}")), None)
-                .await
-                .expect("with no cap, every grant should succeed");
-        }
-    }
-
-    #[tokio::test]
-    async fn downgrade_grandfathers_existing_devices_but_blocks_new_ones() {
-        // Seed 3 devices with no cap (pre-downgrade state), then apply limit 2.
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "grandfather").await;
-        let bearer = &enrolled.relay_refresh_token;
-        for device in ["g1", "g2", "g3"] {
-            plane
-                .issue_device_grant(bearer, grant_request(&enrolled, device), None)
-                .await
-                .unwrap_or_else(|error| panic!("seed {device}: {error}"));
-        }
-
-        let limit = Some(2); // downgraded cap, already exceeded (3 > 2)
-
-        // Re-registering an EXISTING device is grandfathered: no net seat, allowed
-        // even while over-limit.
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "g1"), limit)
-            .await
-            .expect("re-registering an existing device must be allowed over-limit");
-
-        // A genuinely new device is rejected...
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "g4"), limit)
-            .await
-            .expect_err("a new device over the cap must be rejected");
-
-        // ...and that rejection must NOT have dropped any existing grant.
-        let count = plane
-            .lock_state()
-            .await
-            .expect("lock")
-            .count_device_grants_for_relay(&enrolled.relay_id);
-        assert_eq!(
-            count, 3,
-            "grandfathered grants must survive a re-register and a rejected new grant"
-        );
-    }
-
-    #[tokio::test]
-    async fn revoking_a_device_frees_a_slot() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "revoke").await;
-        let bearer = &enrolled.relay_refresh_token;
-        let limit = Some(2);
-
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "d1"), limit)
-            .await
-            .expect("d1");
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "d2"), limit)
-            .await
-            .expect("d2");
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "d3"), limit)
-            .await
-            .expect_err("at the cap");
-
-        plane
-            .revoke_device_grant(
-                bearer,
-                "d1",
-                DeviceGrantRevokeRequest {
-                    relay_id: enrolled.relay_id.clone(),
-                    broker_room_id: enrolled.broker_room_id.clone(),
-                },
-            )
-            .await
-            .expect("revoke d1");
-
-        plane
-            .issue_device_grant(bearer, grant_request(&enrolled, "d3"), limit)
-            .await
-            .expect("revoking a device frees a slot for a new one");
-    }
-
-    #[test]
-    fn should_touch_last_seen_respects_throttle() {
-        assert!(
-            should_touch_last_seen(None, 100),
-            "never-recorded always touches"
-        );
-        assert!(
-            !should_touch_last_seen(Some(100), 100 + LAST_SEEN_THROTTLE_SECS - 1),
-            "within the throttle window it must NOT touch"
-        );
-        assert!(
-            should_touch_last_seen(Some(100), 100 + LAST_SEEN_THROTTLE_SECS),
-            "at/after the throttle window it must touch"
-        );
-    }
-
-    async fn last_seen_for(plane: &PublicControlPlane, device_id: &str) -> Option<u64> {
-        plane
-            .lock_state()
-            .await
-            .expect("lock")
-            .grants_by_hash
-            .values()
-            .find(|grant| grant.device_id == device_id)
-            .and_then(|grant| grant.last_seen)
-    }
-
-    #[tokio::test]
-    async fn last_seen_is_set_on_grant_and_throttled_on_refresh() {
-        let plane = in_memory_plane().await;
-        let enrolled = enroll(&plane, "lastseen").await;
-        let issued = plane
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                grant_request(&enrolled, "dev"),
-                None,
-            )
-            .await
-            .expect("grant");
-
-        let at_grant = last_seen_for(&plane, "dev").await;
-        assert!(at_grant.is_some(), "last_seen must be set at grant time");
-
-        // Refresh immediately: still inside the throttle window → unchanged.
-        plane
-            .issue_device_ws_token(&issued.device_refresh_token)
-            .await
-            .expect("refresh within window");
-        assert_eq!(
-            last_seen_for(&plane, "dev").await,
-            at_grant,
-            "a refresh inside the throttle window must not bump last_seen"
-        );
-
-        // Age last_seen far into the past, then refresh → it must bump forward.
-        {
-            let mut store = plane.lock_state().await.expect("lock");
-            for grant in store.grants_by_hash.values_mut() {
-                if grant.device_id == "dev" {
-                    grant.last_seen = Some(1); // epoch 1 = well past the throttle window
-                }
-            }
-        }
-        plane
-            .issue_device_ws_token(&issued.device_refresh_token)
-            .await
-            .expect("refresh after window");
-        let bumped = last_seen_for(&plane, "dev")
-            .await
-            .expect("last_seen still present");
-        assert!(
-            bumped > 1,
-            "a refresh after the throttle window must bump last_seen; got {bumped}"
-        );
-    }
-}
+#[path = "public_control/tests/device_limit_tests.rs"]
+mod device_limit_tests;
 
 /// Correctness + performance coverage for the single-instance Postgres
 /// optimization: targeted diff-save (`save_public_control_postgres`) and the
@@ -5838,1807 +4270,21 @@ mod device_limit_tests {
 /// like the other pg tests, MUST run against a DISPOSABLE database with
 /// `--test-threads=1` (these helpers DELETE every public-control row).
 #[cfg(test)]
-mod postgres_persistence_opt_tests {
-    use super::*;
-    use std::time::Instant;
-
-    fn relay_reg(hash: &str, label: Option<&str>) -> PersistedRelayRegistration {
-        PersistedRelayRegistration {
-            relay_id: format!("relay-{hash}"),
-            broker_room_id: format!("room-{hash}"),
-            refresh_token_hash: hash.to_string(),
-            created_at: 100,
-            relay_label: label.map(|s| s.to_string()),
-            relay_verify_key: Some(format!("vk-{hash}")),
-        }
-    }
-    fn client_ident(hash: &str) -> PersistedClientIdentity {
-        PersistedClientIdentity {
-            client_id: format!("client-{hash}"),
-            client_verify_key: format!("cvk-{hash}"),
-            refresh_token_hash: hash.to_string(),
-            created_at: 300,
-            client_label: None,
-            superseded: Vec::new(),
-        }
-    }
-    fn device_grant(hash: &str, last_seen: Option<u64>) -> PersistedDeviceGrant {
-        PersistedDeviceGrant {
-            relay_id: format!("relay-{hash}"),
-            broker_room_id: format!("room-{hash}"),
-            device_id: format!("dev-{hash}"),
-            refresh_token_hash: hash.to_string(),
-            created_at: 200,
-            last_seen,
-            superseded: Vec::new(),
-        }
-    }
-    fn client_relay_grant(client_id: &str, relay_id: &str) -> PersistedClientRelayGrant {
-        PersistedClientRelayGrant {
-            client_id: client_id.to_string(),
-            relay_id: relay_id.to_string(),
-            broker_room_id: format!("room-{relay_id}"),
-            device_id: format!("dev-{client_id}"),
-            granted_at: 400,
-            relay_label: None,
-            device_label: None,
-        }
-    }
-    fn store_from(
-        regs: Vec<PersistedRelayRegistration>,
-        clients: Vec<PersistedClientIdentity>,
-        grants: Vec<PersistedDeviceGrant>,
-        crg: Vec<PersistedClientRelayGrant>,
-    ) -> PublicControlStateStore {
-        let mut s = PublicControlStateStore::default();
-        for r in regs {
-            s.relay_registrations_by_hash
-                .insert(r.refresh_token_hash.clone(), r);
-        }
-        for c in clients {
-            s.client_registrations_by_hash
-                .insert(c.refresh_token_hash.clone(), c);
-        }
-        for g in grants {
-            s.grants_by_hash.insert(g.refresh_token_hash.clone(), g);
-        }
-        for g in crg {
-            s.client_relay_grants_by_key
-                .insert(client_relay_grant_key(&g.client_id, &g.relay_id), g);
-        }
-        s
-    }
-    async fn truncate_all(pool: &PgPool) {
-        for table in [
-            "public_client_relay_grants",
-            "public_device_grants",
-            "public_client_identities",
-            "public_relay_registrations",
-        ] {
-            sqlx::query(&format!("DELETE FROM {table}"))
-                .execute(pool)
-                .await
-                .expect("truncate table");
-        }
-    }
-    async fn connect_and_init(url: &str) -> PgPool {
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(url)
-            .await
-            .expect("connect test postgres");
-        initialize_postgres_public_control_schema(&pool)
-            .await
-            .expect("init schema");
-        pool
-    }
-    async fn test_url() -> Option<(String, tokio::sync::MutexGuard<'static, ()>)> {
-        crate::postgres_test_url().await
-    }
-
-    #[tokio::test]
-    async fn postgres_rotation_cannot_restore_a_concurrently_revoked_device() {
-        assert_postgres_rotation_revoke_conflict(false).await;
-    }
-
-    #[tokio::test]
-    async fn postgres_revoke_cannot_report_success_after_a_concurrent_rotation() {
-        assert_postgres_rotation_revoke_conflict(true).await;
-    }
-
-    async fn assert_postgres_rotation_revoke_conflict(rotation_first: bool) {
-        let Some((url, _serial)) = test_url().await else {
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        truncate_all(&pool).await;
-        let original = store_from(
-            vec![relay_reg("race", None)],
-            vec![client_ident("race")],
-            vec![device_grant("race", None)],
-            vec![],
-        );
-        save_public_control_postgres(&pool, &PublicControlStateStore::default(), &original)
-            .await
-            .expect("seed originals");
-        let mut rotated = original.clone();
-        let mut grant = rotated.grants_by_hash.remove("race").unwrap();
-        grant.refresh_token_hash = "race-new".into();
-        rotated
-            .grants_by_hash
-            .insert(grant.refresh_token_hash.clone(), grant);
-        let mut revoked = original.clone();
-        revoked.grants_by_hash.clear();
-        let (first, second) = if rotation_first {
-            (&rotated, &revoked)
-        } else {
-            (&revoked, &rotated)
-        };
-        save_public_control_postgres(&pool, &original, first)
-            .await
-            .expect("first writer commits");
-        let result = save_public_control_postgres(&pool, &original, second).await;
-        let actual = load_public_control_postgres(&pool)
-            .await
-            .expect("load final state");
-        truncate_all(&pool).await;
-        assert!(
-            result.is_err(),
-            "a stale write must fail instead of restoring access or reporting a false revoke"
-        );
-        assert_eq!(
-            &actual, first,
-            "a failed stale write must leave committed authorization intact"
-        );
-    }
-
-    /// The diff-save must apply adds, in-place updates, AND deletes so a reload
-    /// reproduces the live state exactly — this is the regression guard that the
-    /// switch away from wipe-and-rebuild did not silently drop or stale any row.
-    #[tokio::test]
-    async fn postgres_targeted_save_applies_add_update_delete() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        truncate_all(&pool).await;
-
-        // (1) ADD from empty.
-        let empty = PublicControlStateStore::default();
-        let v1 = store_from(
-            vec![relay_reg("r1", Some("first"))],
-            vec![client_ident("c1")],
-            vec![device_grant("g1", Some(7))],
-            vec![client_relay_grant("client-c1", "relay-r1")],
-        );
-        save_public_control_postgres(&pool, &empty, &v1)
-            .await
-            .expect("save v1");
-        let loaded1 = load_public_control_postgres(&pool).await.expect("load v1");
-        assert_eq!(
-            loaded1.relay_registrations_by_hash, v1.relay_registrations_by_hash,
-            "add relay registration"
-        );
-        assert_eq!(
-            loaded1.client_registrations_by_hash, v1.client_registrations_by_hash,
-            "add client identity"
-        );
-        assert_eq!(
-            loaded1.grants_by_hash, v1.grants_by_hash,
-            "add device grant"
-        );
-        assert_eq!(
-            loaded1.client_relay_grants_by_key, v1.client_relay_grants_by_key,
-            "add client-relay grant"
-        );
-
-        // (2) One save carrying an add/update/delete for EVERY table:
-        //   relay:        in-place label update (r1)
-        //   client:       in-place label update (c1)
-        //   device grant: delete g1 + add g2
-        //   client-relay: delete the only grant
-        let updated_client = PersistedClientIdentity {
-            client_label: Some("renamed-client".to_string()),
-            ..client_ident("c1")
-        };
-        let v2 = store_from(
-            vec![relay_reg("r1", Some("renamed"))],
-            vec![updated_client],
-            vec![device_grant("g2", None)],
-            vec![], // client-relay grant removed
-        );
-        save_public_control_postgres(&pool, &v1, &v2)
-            .await
-            .expect("save v2");
-        let loaded2 = load_public_control_postgres(&pool).await.expect("load v2");
-        assert_eq!(
-            loaded2.relay_registrations_by_hash, v2.relay_registrations_by_hash,
-            "in-place relay label update must persist"
-        );
-        assert_eq!(
-            loaded2.client_registrations_by_hash, v2.client_registrations_by_hash,
-            "in-place client label update must persist"
-        );
-        assert!(
-            !loaded2.grants_by_hash.contains_key("g1"),
-            "removed device grant must be deleted, not left stale"
-        );
-        assert_eq!(
-            loaded2.grants_by_hash, v2.grants_by_hash,
-            "delete g1 + add g2 must both persist"
-        );
-        assert!(
-            loaded2.client_relay_grants_by_key.is_empty(),
-            "removed client-relay grant must be deleted"
-        );
-
-        truncate_all(&pool).await;
-    }
-
-    /// Credential rotation (relay re-enroll, client rotation, device re-registration)
-    /// changes the PK `refresh_token_hash` while KEEPING a secondary UNIQUE column
-    /// (relay_id / broker_room_id / relay_verify_key / client_id / client_verify_key /
-    /// `(relay_id, broker_room_id, device_id)`). The diff-save must delete the old row
-    /// BEFORE inserting the new one, or the insert collides with the surviving old row
-    /// on that secondary unique index and the whole transaction aborts — wedging the
-    /// control plane. This is the regression guard for that ordering.
-    #[tokio::test]
-    async fn postgres_targeted_save_handles_credential_rotation() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        truncate_all(&pool).await;
-
-        // Seed one row per rotating table.
-        let v1 = store_from(
-            vec![relay_reg("rot1", Some("v1"))],
-            vec![client_ident("rotc1")],
-            vec![device_grant("rotg1", Some(1))],
-            vec![],
-        );
-        save_public_control_postgres(&pool, &PublicControlStateStore::default(), &v1)
-            .await
-            .expect("seed rotation baseline");
-
-        // Rotate the PK (refresh_token_hash) while every secondary UNIQUE column
-        // stays identical — exactly what re-enrollment / rotation / re-grant do.
-        let mut rotated_relay = relay_reg("rot1", Some("v2"));
-        rotated_relay.refresh_token_hash = "rot1-NEW".to_string();
-        let mut rotated_client = client_ident("rotc1");
-        rotated_client.refresh_token_hash = "rotc1-NEW".to_string();
-        let mut rotated_grant = device_grant("rotg1", Some(2));
-        rotated_grant.refresh_token_hash = "rotg1-NEW".to_string();
-        let v2 = store_from(
-            vec![rotated_relay],
-            vec![rotated_client],
-            vec![rotated_grant],
-            vec![],
-        );
-
-        save_public_control_postgres(&pool, &v1, &v2)
-            .await
-            .expect("rotation must not violate secondary unique constraints");
-
-        let loaded = load_public_control_postgres(&pool).await.expect("load");
-        assert_eq!(
-            loaded.relay_registrations_by_hash.len(),
-            1,
-            "old relay row must be gone, only the rotated one remains"
-        );
-        assert!(loaded.relay_registrations_by_hash.contains_key("rot1-NEW"));
-        assert!(loaded
-            .client_registrations_by_hash
-            .contains_key("rotc1-NEW"));
-        assert!(loaded.grants_by_hash.contains_key("rotg1-NEW"));
-        assert!(!loaded.relay_registrations_by_hash.contains_key("rot1"));
-
-        truncate_all(&pool).await;
-    }
-
-    /// Rotation exercised through the real `PublicControlPlane` save path (not just
-    /// the low-level diff helper): re-enrolling the same relay verify key rotates the
-    /// refresh token but keeps relay_id/room/verify_key, which must persist.
-    #[tokio::test]
-    async fn postgres_relay_reenrollment_through_save_path_persists() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let verify_key = format!("reenroll-vk-{unique}");
-
-        let plane = PublicControlPlane::from_parts_with_postgres(
-            Some("test-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
-            None,
-            None,
-            Some(url.clone()),
-            None,
-            None,
-        )
-        .await
-        .expect("plane connects");
-
-        let first = plane
-            .issue_relay_registration_for_verify_key(&verify_key, Some("first".to_string()))
-            .await
-            .expect("initial enroll");
-        // Second enroll with the SAME verify key = re-enrollment: rotates the refresh
-        // token, keeps relay_id/room. With insert-before-delete this aborted on the
-        // relay_verify_key / relay_id unique index.
-        let second = plane
-            .issue_relay_registration_for_verify_key(&verify_key, Some("second".to_string()))
-            .await
-            .expect("re-enrollment must succeed through the save path");
-        assert_eq!(second.relay_id, first.relay_id, "re-enroll keeps relay_id");
-
-        // Fresh instance loads from Postgres → the rotated registration survived.
-        let plane_b = PublicControlPlane::from_parts_with_postgres(
-            Some("test-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
-            None,
-            None,
-            Some(url.clone()),
-            None,
-            None,
-        )
-        .await
-        .expect("plane B connects");
-        let loaded = plane_b
-            .inner
-            .state
-            .lock()
-            .await
-            .registration_for_verify_key(&verify_key)
-            .expect("rotated registration must survive reload");
-        assert_eq!(loaded.relay_id, second.relay_id);
-
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("aux pool");
-        sqlx::query("DELETE FROM public_relay_registrations WHERE relay_id = $1")
-            .bind(&second.relay_id)
-            .execute(&pool)
-            .await
-            .expect("cleanup");
-    }
-
-    /// Build a store that fails the save via a transaction-local constraint
-    /// violation: a second registration reuses relay_id `relay-A`, so its upsert
-    /// hits the `relay_id` UNIQUE index and the transaction aborts WITHOUT dropping
-    /// the table (so the DB stays inspectable). Contains the original A row too.
-    fn store_that_violates_relay_id_unique() -> PublicControlStateStore {
-        let mut bad = store_from(vec![relay_reg("A", Some("orig"))], vec![], vec![], vec![]);
-        let mut dup = relay_reg("A", Some("orig")); // same relay_id = relay-A
-        dup.refresh_token_hash = "DUP".to_string();
-        bad.relay_registrations_by_hash
-            .insert("DUP".to_string(), dup);
-        bad
-    }
-
-    /// Pre-commit failure (definite rollback): a save that aborts mid-transaction
-    /// must leave BOTH the DB and memory at the original credential A — memory must
-    /// never run ahead of the database.
-    #[tokio::test]
-    async fn postgres_save_failure_reconciles_memory_with_db() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        truncate_all(&pool).await;
-
-        let persistence = PublicControlPersistence::Postgres {
-            pool: pool.clone(),
-            gate: PublicControlDbGate::default(),
-            reload_before_use: false,
-            last_saved: std::sync::Arc::new(tokio::sync::Mutex::new(
-                PublicControlStateStore::default(),
-            )),
-            needs_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        };
-
-        // Persist the original credential A.
-        let mut store = store_from(vec![relay_reg("A", Some("orig"))], vec![], vec![], vec![]);
-        persistence.save(&mut store).await.expect("initial save");
-
-        // A save that violates the relay_id UNIQUE index aborts pre-commit.
-        let mut bad = store_that_violates_relay_id_unique();
-        assert!(
-            persistence.save(&mut bad).await.is_err(),
-            "duplicate relay_id must fail the save"
-        );
-
-        // Memory: only A, the un-persisted DUP is gone.
-        assert!(bad.relay_registrations_by_hash.contains_key("A"));
-        assert!(
-            !bad.relay_registrations_by_hash.contains_key("DUP"),
-            "the un-persisted row must not survive in memory"
-        );
-
-        // DB: also still exactly A (transaction rolled back cleanly).
-        let db_hashes: Vec<String> = sqlx::query_scalar(
-            "SELECT refresh_token_hash FROM public_relay_registrations ORDER BY refresh_token_hash",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("read db");
-        assert_eq!(db_hashes, vec!["A".to_string()], "DB must remain at A");
-
-        truncate_all(&pool).await;
-    }
-
-    /// AMBIGUOUS commit failure: Postgres may durably commit `next` even though the
-    /// client sees a save error (connection dropped after COMMIT, before the ack).
-    /// We simulate the resulting state — the DB has moved ahead of the last snapshot
-    /// — then trigger a failed save, and assert the failure handler reconciles memory
-    /// to the ACTUAL DB state instead of blindly restoring the stale snapshot (which
-    /// would drop the durably-committed row). Red→green guard for the ambiguous fix:
-    /// restoring the snapshot yields {A} and fails the `contains_key("B")` assert.
-    #[tokio::test]
-    async fn postgres_ambiguous_save_failure_reconciles_to_db_truth() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        truncate_all(&pool).await;
-
-        let persistence = PublicControlPersistence::Postgres {
-            pool: pool.clone(),
-            gate: PublicControlDbGate::default(),
-            reload_before_use: false,
-            last_saved: std::sync::Arc::new(tokio::sync::Mutex::new(
-                PublicControlStateStore::default(),
-            )),
-            needs_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        };
-
-        // Snapshot = {A}.
-        let mut store = store_from(vec![relay_reg("A", Some("orig"))], vec![], vec![], vec![]);
-        persistence.save(&mut store).await.expect("initial save");
-
-        // Out of band, the DB gains B — standing in for a committed-but-unacked row.
-        // The DB is now {A, B} while the in-memory snapshot is still {A}.
-        sqlx::query(
-            "INSERT INTO public_relay_registrations \
-             (refresh_token_hash, relay_id, broker_room_id, created_at, relay_verify_key) \
-             VALUES ('B', 'relay-B', 'room-B', 1, 'vk-B')",
-        )
-        .execute(&pool)
-        .await
-        .expect("inject committed row B");
-
-        // A save that fails (duplicate relay_id) leaves the DB at {A, B}.
-        let mut bad = store_that_violates_relay_id_unique();
-        assert!(
-            persistence.save(&mut bad).await.is_err(),
-            "duplicate relay_id must fail the save"
-        );
-
-        // Memory must reconcile to the ACTUAL DB state {A, B}, NOT the stale snapshot
-        // {A}. Restoring the snapshot would drop the durably-committed B.
-        assert!(
-            bad.relay_registrations_by_hash.contains_key("A"),
-            "A present"
-        );
-        assert!(
-            bad.relay_registrations_by_hash.contains_key("B"),
-            "failure handling must reload the DB truth (B), not restore the stale snapshot"
-        );
-        assert!(
-            !bad.relay_registrations_by_hash.contains_key("DUP"),
-            "the un-persisted DUP must not survive"
-        );
-
-        truncate_all(&pool).await;
-    }
-
-    /// The decision that turns a failed-but-committed save into `Ok` (so the caller
-    /// delivers the credential) vs `Err`. Pure, no DB. This is the guard for "when
-    /// the reconciled DB holds the intended rotation B, save() reports success".
-    #[test]
-    fn classify_save_reconciliation_maps_db_truth_to_outcome() {
-        let a = store_from(vec![relay_reg("A", None)], vec![], vec![], vec![]);
-        let b = store_from(vec![relay_reg("B", None)], vec![], vec![], vec![]);
-        let c = store_from(vec![relay_reg("C", None)], vec![], vec![], vec![]);
-        // prev = A, next = B.
-        // DB == next(B): the commit landed → Committed → save() returns Ok, B delivered.
-        assert_eq!(
-            classify_save_reconciliation(&b, &a, &b),
-            SaveReconciliation::Committed
-        );
-        // DB == prev(A): rolled back → RolledBack → save() returns Err, A still valid.
-        assert_eq!(
-            classify_save_reconciliation(&a, &a, &b),
-            SaveReconciliation::RolledBack
-        );
-        // DB == neither → Indeterminate → save() returns Err, memory follows the DB.
-        assert_eq!(
-            classify_save_reconciliation(&c, &a, &b),
-            SaveReconciliation::Indeterminate
-        );
-    }
-
-    /// When a save fails AND the reconciling reload also fails (DB unreachable), the
-    /// outcome is unknown: save() must surface the error AND arm a forced reload so
-    /// the next reachable operation repairs memory (rather than silently trusting a
-    /// possibly-stale snapshot with reload-before-use off).
-    #[tokio::test]
-    async fn postgres_save_and_reload_both_failing_arms_forced_reload() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        truncate_all(&pool).await;
-
-        let persistence = PublicControlPersistence::Postgres {
-            pool: pool.clone(),
-            gate: PublicControlDbGate::default(),
-            reload_before_use: false,
-            last_saved: std::sync::Arc::new(tokio::sync::Mutex::new(
-                PublicControlStateStore::default(),
-            )),
-            needs_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        };
-
-        let mut store = store_from(vec![relay_reg("A", Some("orig"))], vec![], vec![], vec![]);
-        persistence.save(&mut store).await.expect("initial save");
-
-        // Drop every table so BOTH the save and the reconciling reload fail.
-        for table in [
-            "public_client_relay_grants",
-            "public_device_grants",
-            "public_client_identities",
-            "public_relay_registrations",
-        ] {
-            sqlx::query(&format!("DROP TABLE {table}"))
-                .execute(&pool)
-                .await
-                .expect("drop table");
-        }
-
-        let mut next = store_from(vec![relay_reg("B", Some("new"))], vec![], vec![], vec![]);
-        assert!(
-            persistence.save(&mut next).await.is_err(),
-            "save must fail with all tables dropped"
-        );
-        // The reload could not determine the outcome → a forced reload must be armed.
-        if let PublicControlPersistence::Postgres { needs_reload, .. } = &persistence {
-            assert!(
-                needs_reload.load(std::sync::atomic::Ordering::SeqCst),
-                "an indeterminate save failure must arm a forced reload"
-            );
-        } else {
-            panic!("expected a Postgres persistence");
-        }
-
-        // cleanup: recreate the tables on the disposable DB.
-        initialize_postgres_public_control_schema(&pool)
-            .await
-            .expect("recreate tables");
-        truncate_all(&pool).await;
-    }
-
-    /// Build a Postgres-backed plane with an EMPTY in-memory state — models a serving
-    /// broker whose in-memory map does not (yet) know about a client identity that IS
-    /// durably persisted in Postgres. Real ways to reach this on a "single instance":
-    /// a rotation committed by the other container during a rolling-deploy window, a
-    /// second replica, or a committed-but-unacked rotation whose row is in the DB.
-    /// `reload_before_use` picks the two production modes.
-    fn postgres_plane(pool: PgPool, reload_before_use: bool) -> PublicControlPlane {
-        PublicControlPlane {
-            inner: Arc::new(PublicControlPlaneInner {
-                issuer_key: JoinTicketKey::from_secret(
-                    b"client-lockout-repro-issuer-a3f76b4c2089d15e6b0fa873c4e9521d",
-                )
-                .expect("issuer key"),
-                relay_ws_ttl_secs: DEFAULT_PUBLIC_RELAY_WS_TTL_SECS,
-                device_ws_ttl_secs: DEFAULT_PUBLIC_DEVICE_WS_TTL_SECS,
-                rotation_grace_secs: DEFAULT_PUBLIC_ROTATION_GRACE_SECS,
-                persistence: PublicControlPersistence::Postgres {
-                    pool,
-                    gate: PublicControlDbGate::default(),
-                    reload_before_use,
-                    last_saved: Arc::new(Mutex::new(PublicControlStateStore::default())),
-                    needs_reload: Arc::new(AtomicBool::new(false)),
-                },
-                state: Mutex::new(PublicControlStateStore::default()),
-                relay_enrollment_challenges: Mutex::new(HashMap::new()),
-                pending_client_claims: Mutex::new(HashMap::new()),
-                pending_credential_refreshes: Mutex::new(HashMap::new()),
-                last_full_load: std::sync::Mutex::new(None),
-                miss_reload_min_interval: MISS_RELOAD_MIN_INTERVAL,
-                force_shared_backend: false,
-                force_probe_hit: false,
-                probe_release: None,
-                force_reload_before_use: false,
-                full_load_count: std::sync::atomic::AtomicU64::new(0),
-                probe_count: std::sync::atomic::AtomicU64::new(0),
-                load_delay: Duration::ZERO,
-                persistence_down: AtomicBool::new(false),
-                load_log: std::sync::Mutex::new(Vec::new()),
-                save_fail_remaining: std::sync::atomic::AtomicU64::new(0),
-                reload_uncertain_fail_remaining: std::sync::atomic::AtomicU64::new(0),
-                cleanup_pause: std::sync::Mutex::new(None),
-            }),
-        }
-    }
-
-    #[tokio::test]
-    async fn postgres_signed_refresh_probes_client_id_and_persists_credentials() {
-        use ed25519_dalek::Signer;
-        let Some((url, _serial)) = test_url().await else {
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        truncate_all(&pool).await;
-        let owner = postgres_plane(pool.clone(), false);
-        let relay = owner
-            .issue_relay_registration_for_verify_key("vk-signed-refresh", None)
-            .await
-            .unwrap();
-        owner
-            .issue_device_grant(
-                &relay.relay_refresh_token,
-                DeviceGrantRequest {
-                    relay_id: relay.relay_id.clone(),
-                    broker_room_id: relay.broker_room_id.clone(),
-                    device_id: "signed-phone".into(),
-                },
-                None,
-            )
-            .await
-            .unwrap();
-        let key = ed25519_dalek::SigningKey::from_bytes(&[88; 32]);
-        let attestation = owner
-            .issue_client_grant(
-                &relay.relay_refresh_token,
-                ClientGrantRequest {
-                    relay_id: relay.relay_id.clone(),
-                    broker_room_id: relay.broker_room_id.clone(),
-                    device_id: "signed-phone".into(),
-                    client_verify_key: STANDARD.encode(key.verifying_key().to_bytes()),
-                    client_label: None,
-                    device_label: None,
-                },
-            )
-            .await
-            .unwrap();
-        let client = owner
-            .claim_client_identity(ClientClaimRequest {
-                claim_id: attestation.claim_id.clone(),
-                claim_signature: STANDARD.encode(
-                    key.sign(
-                        client_claim_message(
-                            &attestation.claim_id,
-                            &attestation.claim_nonce,
-                            &attestation.relay_id,
-                        )
-                        .as_bytes(),
-                    )
-                    .to_bytes(),
-                ),
-            })
-            .await
-            .unwrap();
-        let peer = postgres_plane(pool.clone(), false);
-        let origin = "https://broker.test";
-        let mut request = CredentialRefreshChallengeRequest {
-            client_id: client.client_id,
-            broker_room_id: Some(relay.broker_room_id),
-            device_id: Some("signed-phone".into()),
-            nonce: "postgres-refresh-init".into(),
-            signature: String::new(),
-        };
-        request.signature = STANDARD.encode(
-            key.sign(credential_refresh_init_message(&request, origin).as_bytes())
-                .to_bytes(),
-        );
-        let challenge = peer
-            .create_credential_refresh_challenge(request, origin)
-            .await
-            .unwrap();
-        assert_eq!(peer.inner.probe_count.load(Ordering::SeqCst), 1);
-        assert_eq!(peer.inner.full_load_count.load(Ordering::SeqCst), 1);
-        let (response, client_token, device_token) = peer
-            .refresh_credentials(
-                CredentialRefreshRequest {
-                    challenge_id: challenge.challenge_id.clone(),
-                    signature: STANDARD.encode(
-                        key.sign(credential_refresh_message(&challenge).as_bytes())
-                            .to_bytes(),
-                    ),
-                },
-                origin,
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.device.as_ref().unwrap().device_id, "signed-phone");
-        let restarted = postgres_plane(pool.clone(), false);
-        restarted
-            .issue_client_session(&client_token)
-            .await
-            .expect("client token survives database reload");
-        restarted
-            .issue_device_ws_token(&device_token.unwrap())
-            .await
-            .expect("device token survives database reload");
-        truncate_all(&pool).await;
-    }
-
-    /// Insert a client identity straight into Postgres (bypassing the in-memory
-    /// state), returning nothing — the caller keeps the plaintext token the "client"
-    /// now holds. Stands in for a rotation whose row is durably in the DB.
-    async fn inject_client_identity_into_db(pool: &PgPool, client_id: &str, token: &str) {
-        sqlx::query(
-            "INSERT INTO public_client_identities \
-             (refresh_token_hash, client_id, client_verify_key, created_at, client_label) \
-             VALUES ($1, $2, $3, 300, NULL)",
-        )
-        .bind(sha256_hex(token))
-        .bind(client_id)
-        .bind(format!("cvk-{client_id}"))
-        .execute(pool)
-        .await
-        .expect("inject client identity row");
-    }
-
-    /// RED — reproduces the production client-side lockout. A client holds a refresh
-    /// token whose identity is DURABLY in Postgres, but the serving broker's in-memory
-    /// state does not have it (rolling-deploy window / concurrent writer /
-    /// committed-but-unacked). With the single-instance default
-    /// (`reload_before_use = false`) the broker consults ONLY its stale in-memory map,
-    /// so a token that IS valid in the database is rejected as
-    /// "client refresh token is invalid" — exactly the repeated
-    /// `invalid refresh token was reused chain=client_identity` seen right after an
-    /// approval. INVARIANT: a durably-persisted client token must authenticate.
-    /// This assertion currently FAILS (the bug); it is the regression guard for the fix.
-    #[tokio::test]
-    async fn client_token_in_db_but_not_in_memory_is_rejected_without_reload() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        truncate_all(&pool).await;
-
-        let token = "cref-lockout-repro-token";
-        inject_client_identity_into_db(&pool, "client-lockout", token).await;
-
-        let plane = postgres_plane(pool.clone(), false);
-        let result = plane.issue_client_session(token).await;
-
-        truncate_all(&pool).await;
-
-        assert!(
-            result.is_ok(),
-            "a client refresh token durably persisted in Postgres must authenticate, \
-             but the single-instance default (reload_before_use=false) rejected it: {result:?}"
-        );
-    }
-
-    /// GREEN mitigation — turning `reload_before_use` ON (env
-    /// `RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE=1`) makes the broker reload the
-    /// authoritative DB state before authenticating, so the SAME durably-persisted
-    /// token that the default rejects is now accepted. Confirms the env-var stopgap
-    /// covers the "DB has it, memory doesn't" class (deploy window / concurrent writer /
-    /// committed-but-unacked). It does NOT cover a token that is genuinely gone from the
-    /// DB (the rotation-protocol lockout / follow-up A) — that needs a grace period.
-    #[tokio::test]
-    async fn client_token_in_db_authenticates_with_reload_before_use() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        truncate_all(&pool).await;
-
-        let token = "cref-lockout-repro-token";
-        inject_client_identity_into_db(&pool, "client-lockout", token).await;
-
-        let plane = postgres_plane(pool.clone(), true);
-        let session = plane.issue_client_session(token).await;
-
-        truncate_all(&pool).await;
-
-        let session =
-            session.expect("reload-before-use must consult the DB and accept the persisted token");
-        assert_eq!(session.client_id, "client-lockout");
-    }
-
-    /// The indexed probe decides whether a miss reloads: an unknown bearer costs no full
-    /// reload, a token durably in the database still gets one.
-    #[tokio::test]
-    async fn postgres_probe_gates_the_reload_on_a_miss() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        truncate_all(&pool).await;
-        let plane = postgres_plane(pool.clone(), false);
-        let now = tokio::time::Instant::now();
-        *plane.last_full_load() = Some(FullLoad {
-            started: now,
-            finished: now,
-            succeeded: true,
-        });
-
-        let unknown = plane.issue_client_session("cref-probe-unknown").await;
-        let loads_after_unknown = plane.inner.full_load_count.load(Ordering::SeqCst);
-        inject_client_identity_into_db(&pool, "client-probe", "cref-probe-token").await;
-        let known = plane.issue_client_session("cref-probe-token").await;
-        // Rotated elsewhere: the old token lives only in the superseded JSON column.
-        sqlx::query(
-            "INSERT INTO public_client_identities \
-             (refresh_token_hash, client_id, client_verify_key, created_at, client_label, \
-              superseded_tokens) VALUES ($1, $2, $3, 300, NULL, $4)",
-        )
-        .bind(sha256_hex("cref-probe-current"))
-        .bind("client-rotated")
-        .bind("cvk-client-rotated")
-        .bind(
-            encode_superseded(&[SupersededToken {
-                refresh_token_hash: sha256_hex("cref-probe-old"),
-                expires_at: unix_now() + 3600,
-            }])
-            .expect("encode superseded"),
-        )
-        .execute(&pool)
-        .await
-        .expect("inject rotated client identity row");
-        let rotated = plane.issue_client_session("cref-probe-old").await;
-        sqlx::query(
-            "INSERT INTO public_client_identities \
-             (refresh_token_hash, client_id, client_verify_key, created_at, client_label, \
-              superseded_tokens) VALUES ($1, $2, $3, 300, NULL, $4)",
-        )
-        .bind(sha256_hex("cref-probe-expired-current"))
-        .bind("client-expired")
-        .bind("cvk-client-expired")
-        .bind(
-            encode_superseded(&[SupersededToken {
-                refresh_token_hash: sha256_hex("cref-probe-expired"),
-                expires_at: 1,
-            }])
-            .expect("encode superseded"),
-        )
-        .execute(&pool)
-        .await
-        .expect("inject expired client identity row");
-        let loads_before_expired = plane.inner.full_load_count.load(Ordering::SeqCst);
-        let expired = plane.issue_client_session("cref-probe-expired").await;
-        let loads_after_expired = plane.inner.full_load_count.load(Ordering::SeqCst);
-        truncate_all(&pool).await;
-
-        assert!(unknown.is_err());
-        assert_eq!(
-            loads_after_unknown, 0,
-            "an unknown bearer must not buy a full reload"
-        );
-        assert_eq!(
-            known
-                .expect("a token durably in Postgres must authenticate")
-                .client_id,
-            "client-probe"
-        );
-        assert_eq!(
-            rotated
-                .expect("a superseded token in its grace window must authenticate")
-                .client_id,
-            "client-rotated"
-        );
-        assert!(expired.is_err());
-        assert_eq!(
-            loads_after_expired, loads_before_expired,
-            "an expired superseded token must not buy a full reload"
-        );
-    }
-
-    /// Prepared statements may switch to a generic plan, where the planner no longer sees the
-    /// hash; the probe then scanned every row per unknown bearer (~30ms at 50k rows).
-    #[tokio::test]
-    async fn postgres_probe_uses_the_superseded_index_under_a_generic_plan() {
-        use sqlx::{Connection as _, Executor as _, Row as _};
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        // TEMP tables on a private connection shadow the real names for this session only,
-        // so the probe runs as production writes it and parallel tests cannot interfere.
-        let mut conn = sqlx::PgConnection::connect(&url).await.expect("connect");
-        let now = 1_790_000_001_i64;
-        for table in ["public_device_grants", "public_client_identities"] {
-            let setup = [
-                format!(
-                    "CREATE TEMP TABLE {table} (refresh_token_hash TEXT PRIMARY KEY, \
-                     owner_id TEXT NOT NULL, label TEXT, created_at BIGINT NOT NULL, \
-                     last_seen BIGINT, superseded_tokens TEXT)"
-                ),
-                // Two in five rows carry one to three rotated-away hashes, as re-approvals leave.
-                format!(
-                    "INSERT INTO {table} SELECT md5('p' || g) || md5('q' || g), 'owner-' || g, \
-                     'Phone ' || g, 1700000000, NULL, CASE WHEN g % 5 < 2 THEN (SELECT \
-                     jsonb_agg(jsonb_build_object('refresh_token_hash', md5('s' || g || '-' || k) \
-                     || md5('t' || g || '-' || k), 'expires_at', {now} - 1 + k))::text \
-                     FROM generate_series(1, 1 + g % 3) k) END FROM generate_series(1, 50000) g"
-                ),
-                // CONCURRENTLY is meaningless on a session-private table; same expression.
-                superseded_index_sql(table).replace("CONCURRENTLY ", ""),
-                format!("ANALYZE {table}"),
-            ];
-            for statement in setup {
-                conn.execute(statement.as_str())
-                    .await
-                    .expect("set up probe table");
-            }
-        }
-        conn.execute("SET plan_cache_mode = force_generic_plan")
-            .await
-            .expect("force generic plans");
-
-        for (name, table) in [
-            ("device_probe", "public_device_grants"),
-            ("client_probe", "public_client_identities"),
-        ] {
-            conn.execute(
-                format!(
-                    "PREPARE {name}(text, text, bigint) AS {}",
-                    superseded_probe_sql(table)
-                )
-                .as_str(),
-            )
-            .await
-            .expect("prepare probe");
-            // Arguments are SQL expressions, so the fixture's hashes are rebuilt in place.
-            let run = |hash: &str| {
-                format!(
-                    r#"EXECUTE {name}({hash}, '[{{"refresh_token_hash":"' || {hash} || '"}}]', {now})"#
-                )
-            };
-            let plan = conn
-                .fetch_all(format!("EXPLAIN {}", run("repeat('f', 64)")).as_str())
-                .await
-                .expect("explain probe")
-                .iter()
-                .map(|row| row.get::<String, _>(0))
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                plan.contains(&format!("Index Scan on {table}_superseded_idx"))
-                    && !plan.contains(&format!("Seq Scan on {table}")),
-                "the {table} probe must use its superseded index under a generic plan:\n{plan}"
-            );
-            // Row 1 holds hashes expiring at `now` (k = 1) and just after it (k = 2).
-            for (hash, expected, what) in [
-                (
-                    "md5('s1-2') || md5('t1-2')",
-                    true,
-                    "an unexpired rotated-away hash",
-                ),
-                (
-                    "md5('s1-1') || md5('t1-1')",
-                    false,
-                    "an expired rotated-away hash",
-                ),
-                ("md5('p7') || md5('q7')", true, "a current hash"),
-                ("repeat('f', 64)", false, "an unknown hash"),
-            ] {
-                let found = conn
-                    .fetch_one(run(hash).as_str())
-                    .await
-                    .expect("run probe")
-                    .get::<bool, _>(0);
-                assert_eq!(found, expected, "{table}: {what}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn postgres_schema_init_leaves_a_valid_superseded_index() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping: set RELAY_BROKER_TEST_POSTGRES_URL to a disposable DB");
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-        initialize_postgres_public_control_schema(&pool)
-            .await
-            .expect("a second startup must find the index ready");
-        for table in ["public_device_grants", "public_client_identities"] {
-            let mut conn = pool.acquire().await.expect("connection");
-            assert_eq!(
-                superseded_index_valid(&mut conn, table)
-                    .await
-                    .expect("index check"),
-                Some(true),
-                "{table} must carry a valid superseded index"
-            );
-        }
-    }
-
-    /// Not a pass/fail test — prints timings so we can compare JSON vs Postgres
-    /// (full-rebuild vs targeted) and the reload-before-use cost. `#[ignore]` so
-    /// normal runs skip it; run with:
-    ///   RELAY_BROKER_TEST_POSTGRES_URL=postgres://sealwire:dev@127.0.0.1:5433/sealwire_test \
-    ///     cargo test -p relay-broker bench_persistence_backends -- --ignored --nocapture --test-threads=1
-    #[tokio::test]
-    #[ignore = "perf benchmark; needs RELAY_BROKER_TEST_POSTGRES_URL; run with --ignored --nocapture"]
-    async fn bench_persistence_backends() {
-        let Some((url, _serial)) = test_url().await else {
-            eprintln!("skipping benchmark: set RELAY_BROKER_TEST_POSTGRES_URL");
-            return;
-        };
-        let pool = connect_and_init(&url).await;
-
-        const N: usize = 200; // baseline rows in each of two tables
-        const M: u32 = 20; // timed iterations
-
-        let mut base = PublicControlStateStore::default();
-        for i in 0..N {
-            let h = format!("seed-{i}");
-            base.relay_registrations_by_hash
-                .insert(h.clone(), relay_reg(&h, Some("seed")));
-            let g = format!("seed-grant-{i}");
-            base.grants_by_hash
-                .insert(g.clone(), device_grant(&g, Some(1)));
-        }
-
-        // SAVE — full rebuild: every save re-writes all rows.
-        truncate_all(&pool).await;
-        save_public_control_postgres_full_rebuild(&pool, &base)
-            .await
-            .expect("seed for full-rebuild");
-        let t_full = {
-            let start = Instant::now();
-            for i in 0..M {
-                let mut s = base.clone();
-                let h = format!("extra-full-{i}");
-                s.grants_by_hash.insert(h.clone(), device_grant(&h, None));
-                save_public_control_postgres_full_rebuild(&pool, &s)
-                    .await
-                    .expect("full save");
-            }
-            start.elapsed() / M
-        };
-
-        // SAVE — targeted: every save writes only the one new grant.
-        truncate_all(&pool).await;
-        save_public_control_postgres_full_rebuild(&pool, &base)
-            .await
-            .expect("seed for targeted");
-        let t_targeted = {
-            let mut prev = base.clone();
-            let start = Instant::now();
-            for i in 0..M {
-                let mut next = prev.clone();
-                let h = format!("extra-tgt-{i}");
-                next.grants_by_hash
-                    .insert(h.clone(), device_grant(&h, None));
-                save_public_control_postgres(&pool, &prev, &next)
-                    .await
-                    .expect("targeted save");
-                prev = next;
-            }
-            start.elapsed() / M
-        };
-
-        // SAVE — JSON baseline: whole-file write.
-        let json_path =
-            std::env::temp_dir().join(format!("bench-public-control-{}.json", std::process::id()));
-        save_public_control_json(&json_path, &base)
-            .await
-            .expect("seed json");
-        let t_json_save = {
-            let start = Instant::now();
-            for i in 0..M {
-                let mut s = base.clone();
-                let h = format!("extra-json-{i}");
-                s.grants_by_hash.insert(h.clone(), device_grant(&h, None));
-                save_public_control_json(&json_path, &s)
-                    .await
-                    .expect("json save");
-            }
-            start.elapsed() / M
-        };
-
-        // READ — PG full reload (the per-op cost reload_before_use pays) vs JSON file read.
-        truncate_all(&pool).await;
-        save_public_control_postgres_full_rebuild(&pool, &base)
-            .await
-            .expect("seed for read");
-        let t_pg_reload = {
-            let start = Instant::now();
-            for _ in 0..M {
-                load_public_control_postgres(&pool)
-                    .await
-                    .expect("pg reload");
-            }
-            start.elapsed() / M
-        };
-        let t_json_read = {
-            let start = Instant::now();
-            for _ in 0..M {
-                load_public_control_json(&json_path)
-                    .await
-                    .expect("json read");
-            }
-            start.elapsed() / M
-        };
-
-        let _ = tokio::fs::remove_file(&json_path).await;
-        truncate_all(&pool).await;
-
-        eprintln!(
-            "\n=== persistence benchmark (N={N} rows x2 tables, M={M} iters, LOCAL pg = ~0 network RTT) ==="
-        );
-        eprintln!("SAVE one mutation @ {N} baseline rows:");
-        eprintln!("  PG full-rebuild (old): {t_full:?}/op");
-        eprintln!("  PG targeted     (new): {t_targeted:?}/op");
-        eprintln!("  JSON file            : {t_json_save:?}/op");
-        eprintln!("READ whole state @ {N} baseline rows:");
-        eprintln!("  PG full reload (reload_before_use=ON): {t_pg_reload:?}/op");
-        eprintln!("  JSON file read                       : {t_json_read:?}/op");
-        eprintln!("  in-memory (reload_before_use=OFF)    : ~0 (no I/O at all)");
-        eprintln!(
-            "NOTE: Railway adds network RTT per round-trip. full-rebuild does O(rows) round-trips \
-             and reload does O(1) SELECTs returning all rows; targeted save + reload-off do far \
-             fewer, which is the win you feel over the wire.\n"
-        );
-    }
-}
+#[path = "public_control/tests/postgres_persistence_opt_tests.rs"]
+mod postgres_persistence_opt_tests;
 
 #[cfg(test)]
-mod superseded_index_tests {
-    use super::*;
-
-    #[test]
-    fn startup_builds_a_missing_index_and_refuses_an_invalid_one() {
-        assert!(matches!(
-            superseded_index_step("public_device_grants", Some(true)),
-            SupersededIndexStep::Ready
-        ));
-        assert!(matches!(
-            superseded_index_step("public_device_grants", None),
-            SupersededIndexStep::Build
-        ));
-        let SupersededIndexStep::Refuse(message) =
-            superseded_index_step("public_device_grants", Some(false))
-        else {
-            panic!("an invalid index must stop startup, not fall back to scanning");
-        };
-        assert!(message
-            .contains("DROP INDEX CONCURRENTLY IF EXISTS public_device_grants_superseded_idx"));
-        assert!(message.contains(&superseded_index_sql("public_device_grants")));
-    }
-
-    /// The planner only uses an expression index for the same expression.
-    #[test]
-    fn the_probe_filters_on_the_indexed_expression() {
-        for table in ["public_device_grants", "public_client_identities"] {
-            assert!(superseded_index_sql(table)
-                .contains(&format!("(({SUPERSEDED_JSONB}) jsonb_path_ops)")));
-            assert!(
-                superseded_probe_sql(table).contains(&format!("{SUPERSEDED_JSONB} @> $2::jsonb"))
-            );
-        }
-    }
-}
+#[path = "public_control/tests/superseded_index_tests.rs"]
+mod superseded_index_tests;
 
 #[cfg(test)]
-mod anonymous_input_tests {
-    use super::*;
-
-    fn verify_key(seed: u32) -> String {
-        let mut bytes = [7_u8; 32];
-        bytes[..4].copy_from_slice(&seed.to_le_bytes());
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&bytes);
-        STANDARD.encode(signing_key.verifying_key().to_bytes())
-    }
-
-    async fn in_memory_plane() -> PublicControlPlane {
-        PublicControlPlane::from_parts(
-            Some("input-test-issuer-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect("in-memory plane should build")
-    }
-
-    /// The challenge endpoint is anonymous and each entry lives 300s.
-    #[tokio::test]
-    async fn enrollment_challenges_keep_labels_short_and_stop_at_a_cap() {
-        let plane = in_memory_plane().await;
-        plane
-            .create_relay_enrollment_challenge(RelayEnrollmentChallengeRequest {
-                relay_verify_key: verify_key(0),
-                relay_label: Some("x".repeat(10_000)),
-            })
-            .await
-            .expect("a long label is shortened, not refused");
-        let mut accepted = 1;
-        for seed in 1..5_000 {
-            if plane
-                .create_relay_enrollment_challenge(RelayEnrollmentChallengeRequest {
-                    relay_verify_key: verify_key(seed),
-                    relay_label: None,
-                })
-                .await
-                .is_ok()
-            {
-                accepted += 1;
-            }
-        }
-
-        let challenges = plane.inner.relay_enrollment_challenges.lock().await;
-        let longest_label = challenges
-            .values()
-            .filter_map(|challenge| challenge.relay_label.as_ref())
-            .map(|label| label.chars().count())
-            .max();
-        assert!(
-            longest_label <= Some(128),
-            "a {longest_label:?}-char label is held"
-        );
-        assert!(
-            challenges.len() <= 4_096 && accepted < 5_000,
-            "{} pending challenges are held",
-            challenges.len()
-        );
-    }
-
-    #[tokio::test]
-    async fn pending_client_claims_keep_labels_short_and_refuse_oversized_ids() {
-        let plane = in_memory_plane().await;
-        let enrolled = plane
-            .issue_relay_registration_for_verify_key(&verify_key(1), None)
-            .await
-            .expect("enroll");
-        let request = |device_id: String| ClientGrantRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            device_id,
-            client_verify_key: verify_key(2),
-            client_label: Some("c".repeat(10_000)),
-            device_label: Some("d".repeat(10_000)),
-        };
-        plane
-            .issue_client_grant(&enrolled.relay_refresh_token, request("phone".to_string()))
-            .await
-            .expect("long labels are shortened, not refused");
-        let oversized = plane
-            .issue_client_grant(&enrolled.relay_refresh_token, request("p".repeat(10_000)))
-            .await;
-
-        let claims = plane.inner.pending_client_claims.lock().await;
-        let longest_label = claims
-            .values()
-            .flat_map(|claim| [&claim.client_label, &claim.device_label])
-            .filter_map(Option::as_ref)
-            .map(|label| label.chars().count())
-            .max();
-        assert!(
-            longest_label <= Some(128),
-            "a {longest_label:?}-char label is held"
-        );
-        assert!(oversized.is_err(), "a 10k-byte device id must be refused");
-        assert_eq!(claims.len(), 1);
-    }
-}
+#[path = "public_control/tests/anonymous_input_tests.rs"]
+mod anonymous_input_tests;
 
 #[cfg(test)]
-mod miss_reload_tests {
-    use super::*;
+#[path = "public_control/tests/miss_reload_tests.rs"]
+mod miss_reload_tests;
 
-    fn temp_state_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "public-control-miss-reload-{tag}-{}-{}.json",
-            std::process::id(),
-            random_token(8).to_ascii_lowercase()
-        ))
-    }
-
-    async fn json_plane(path: &Path) -> PublicControlPlane {
-        PublicControlPlane::from_parts(
-            Some("miss-reload-test-issuer-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
-            None,
-            Some(path.display().to_string()),
-            None,
-            None,
-        )
-        .await
-        .expect("json plane should build")
-    }
-
-    /// Treats its file as shared, the way Postgres is, so a second plane on the
-    /// same path stands in for another broker instance.
-    async fn shared_json_plane(
-        path: &Path,
-        configure: impl FnOnce(&mut PublicControlPlaneInner),
-    ) -> PublicControlPlane {
-        let mut plane = json_plane(path).await;
-        let inner = Arc::get_mut(&mut plane.inner).expect("a fresh plane is unshared");
-        inner.force_shared_backend = true;
-        inner.miss_reload_min_interval = Duration::from_millis(100);
-        configure(inner);
-        plane
-    }
-
-    fn relay_ws_request(relay_id: &str, broker_room_id: &str) -> RelayWsTokenRequest {
-        RelayWsTokenRequest {
-            relay_id: relay_id.to_string(),
-            broker_room_id: broker_room_id.to_string(),
-            relay_peer_id: "relay-peer".to_string(),
-        }
-    }
-
-    fn device_request(enrolled: &RelayEnrollmentResponse, device_id: &str) -> DeviceGrantRequest {
-        DeviceGrantRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-            device_id: device_id.to_string(),
-        }
-    }
-
-    /// Eight streams of five unknown bearers each, across all three credential kinds.
-    async fn unknown_bearer_streams(plane: &PublicControlPlane) -> Vec<Result<(), String>> {
-        let streams = (0..8)
-            .map(|stream| {
-                let plane = plane.clone();
-                tokio::spawn(async move {
-                    let mut outcomes = Vec::new();
-                    for attempt in 0..5 {
-                        let bearer = format!("unknown-{stream}-{attempt}");
-                        let outcome = match attempt % 3 {
-                            0 => plane.issue_device_ws_token(&bearer).await.map(|_| ()),
-                            1 => plane.issue_client_session(&bearer).await.map(|_| ()),
-                            _ => plane
-                                .issue_relay_ws_token(&bearer, relay_ws_request("r", "room"))
-                                .await
-                                .map(|_| ()),
-                        };
-                        outcomes.push(outcome);
-                    }
-                    outcomes
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut outcomes = Vec::new();
-        for stream in streams {
-            outcomes.extend(stream.await.expect("stream should finish"));
-        }
-        outcomes
-    }
-
-    fn full_loads(plane: &PublicControlPlane) -> u64 {
-        plane.inner.full_load_count.load(Ordering::SeqCst)
-    }
-
-    #[tokio::test]
-    async fn unknown_bearers_never_buy_a_full_reload_while_memory_is_fresh() {
-        let path = temp_state_path("unknown");
-        let plane = shared_json_plane(&path, |_| {}).await;
-
-        let outcomes = unknown_bearer_streams(&plane).await;
-        let loads = full_loads(&plane);
-        let probes = plane.inner.probe_count.load(Ordering::SeqCst);
-        let _ = std::fs::remove_file(&path);
-
-        assert!(
-            outcomes.iter().all(Result::is_err),
-            "unknown bearers must be refused"
-        );
-        assert_eq!(loads, 0, "40 unknown bearers caused {loads} full reloads");
-        assert_eq!(
-            probes, 40,
-            "each unknown bearer should cost one indexed probe"
-        );
-    }
-
-    /// A 401 is terminal to the remote client, so a token still inside its rotation grace
-    /// window must not be refused just because another instance rotated it.
-    #[tokio::test]
-    async fn a_rotated_away_token_minted_elsewhere_authenticates_without_waiting() {
-        let path = temp_state_path("rotated");
-        let reader = shared_json_plane(&path, |_| {}).await;
-        let writer = json_plane(&path).await;
-        let enrolled = writer
-            .issue_relay_registration_for_verify_key("vk-rotated", None)
-            .await
-            .expect("enroll on the other instance");
-        let first = writer
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                device_request(&enrolled, "device-rotated"),
-                None,
-            )
-            .await
-            .expect("grant on the other instance");
-        // A re-approval rotates the token; `first` survives only as a superseded hash.
-        writer
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                device_request(&enrolled, "device-rotated"),
-                None,
-            )
-            .await
-            .expect("re-grant on the other instance");
-
-        let device = reader
-            .issue_device_ws_token(&first.device_refresh_token)
-            .await;
-        let _ = std::fs::remove_file(&path);
-
-        device.expect("a token inside its rotation grace window must authenticate");
-    }
-
-    #[tokio::test]
-    async fn an_expired_rotated_away_token_is_refused_without_a_reload() {
-        let path = temp_state_path("expired");
-        let reader = shared_json_plane(&path, |_| {}).await;
-        let writer = json_plane(&path).await;
-        let enrolled = writer
-            .issue_relay_registration_for_verify_key("vk-expired", None)
-            .await
-            .expect("enroll on the other instance");
-        let first = writer
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                device_request(&enrolled, "device-expired"),
-                None,
-            )
-            .await
-            .expect("grant on the other instance");
-        writer
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                device_request(&enrolled, "device-expired"),
-                None,
-            )
-            .await
-            .expect("re-grant on the other instance");
-        // Age the grace window out on disk, as a later instance would find it.
-        let mut stored = load_public_control_json(&path).await.expect("load state");
-        for grant in stored.grants_by_hash.values_mut() {
-            for token in &mut grant.superseded {
-                token.expires_at = 1;
-            }
-        }
-        save_public_control_json(&path, &stored)
-            .await
-            .expect("save state");
-
-        let mut refused = 0;
-        for _ in 0..5 {
-            if reader
-                .issue_device_ws_token(&first.device_refresh_token)
-                .await
-                .is_err()
-            {
-                refused += 1;
-            }
-        }
-        let loads = full_loads(&reader);
-        let _ = std::fs::remove_file(&path);
-
-        assert_eq!(refused, 5);
-        assert_eq!(loads, 0, "an expired token bought {loads} full reloads");
-    }
-
-    /// A token found by the probe is in memory after one reload, so presenting it again
-    /// with the wrong scope is refused from memory rather than by another reload.
-    #[tokio::test]
-    async fn a_valid_token_presented_for_the_wrong_room_buys_one_reload_at_most() {
-        let path = temp_state_path("wrong-room");
-        let reader = shared_json_plane(&path, |_| {}).await;
-        let writer = json_plane(&path).await;
-        let enrolled = writer
-            .issue_relay_registration_for_verify_key("vk-wrong-room", None)
-            .await
-            .expect("enroll on the other instance");
-        let grant = writer
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                device_request(&enrolled, "device-wrong-room"),
-                None,
-            )
-            .await
-            .expect("grant on the other instance");
-
-        for _ in 0..5 {
-            assert!(reader
-                .issue_device_ws_token_scoped(&grant.device_refresh_token, "some-other-room")
-                .await
-                .is_err());
-        }
-        let loads = full_loads(&reader);
-        let _ = std::fs::remove_file(&path);
-
-        assert_eq!(loads, 1, "a wrong-room token bought {loads} full reloads");
-    }
-
-    /// Stands in for another instance committing a device grant for `token`.
-    async fn mint_device_token_on_disk(path: &Path, token: &str) {
-        let mut stored = load_public_control_json(path).await.expect("load state");
-        let hash = sha256_hex(token);
-        stored.grants_by_hash.insert(
-            hash.clone(),
-            PersistedDeviceGrant {
-                relay_id: "relay-elsewhere".to_string(),
-                broker_room_id: "room-elsewhere".to_string(),
-                device_id: "device-elsewhere".to_string(),
-                refresh_token_hash: hash,
-                created_at: unix_now(),
-                last_seen: None,
-                superseded: Vec::new(),
-            },
-        );
-        save_public_control_json(path, &stored)
-            .await
-            .expect("save state");
-    }
-
-    /// A load that began after the request arrived but read the table before the token
-    /// was committed must not stand in for looking.
-    #[tokio::test]
-    async fn a_load_that_read_before_the_mint_does_not_make_a_miss_final() {
-        let path = temp_state_path("early-fresh");
-        let reader = shared_json_plane(&path, |_| {}).await;
-        json_plane(&path).await;
-
-        let held = reader.inner.state.lock().await;
-        let request = {
-            let reader = reader.clone();
-            tokio::spawn(async move { reader.issue_device_ws_token("dref-early").await })
-        };
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let loaded = reader
-            .load_full_state()
-            .await
-            .expect("load before the mint");
-        mint_device_token_on_disk(&path, "dref-early").await;
-        let mut held = held;
-        *held = loaded;
-        drop(held);
-        let outcome = request.await.expect("request should finish");
-        let _ = std::fs::remove_file(&path);
-
-        outcome.expect("a token committed before the lookup looked must authenticate");
-    }
-
-    /// A positive probe can only be overruled by a load that began after the probe saw it.
-    #[tokio::test]
-    async fn a_positive_probe_is_not_overruled_by_a_load_that_began_before_it() {
-        let path = temp_state_path("positive-probe");
-        let release = Arc::new(Semaphore::new(0));
-        let reader = shared_json_plane(&path, |inner| {
-            inner.probe_release = Some(release.clone());
-        })
-        .await;
-        json_plane(&path).await;
-
-        let request = {
-            let reader = reader.clone();
-            tokio::spawn(async move { reader.issue_device_ws_token("dref-probed").await })
-        };
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        {
-            let mut store = reader.inner.state.lock().await;
-            *store = reader
-                .load_full_state()
-                .await
-                .expect("load before the mint");
-        }
-        mint_device_token_on_disk(&path, "dref-probed").await;
-        release.add_permits(1);
-        let outcome = request.await.expect("request should finish");
-        let _ = std::fs::remove_file(&path);
-
-        outcome.expect("a token the probe saw must not be refused on an older load");
-    }
-
-    /// The HTTP layer maps any error mentioning "invalid" to a terminal 401.
-    #[tokio::test]
-    async fn a_database_failure_never_reads_as_an_invalid_credential() {
-        let path = temp_state_path("db-error-text");
-        let probe_fails = shared_json_plane(&path, |_| {}).await;
-        let load_fails = shared_json_plane(&path, |inner| inner.force_probe_hit = true).await;
-        probe_fails
-            .inner
-            .persistence_down
-            .store(true, Ordering::SeqCst);
-        load_fails
-            .inner
-            .persistence_down
-            .store(true, Ordering::SeqCst);
-
-        let from_probe = probe_fails.issue_device_ws_token("dref-any").await;
-        let from_load = load_fails.issue_device_ws_token("dref-any").await;
-        let _ = std::fs::remove_file(&path);
-
-        for (path_name, outcome) in [("probe", from_probe), ("reload", from_load)] {
-            let error = outcome.expect_err("the database is down");
-            assert!(
-                !error.to_ascii_lowercase().contains("invalid"),
-                "a {path_name} failure surfaced as {error:?}, which the HTTP layer calls a 401"
-            );
-        }
-    }
-
-    /// Same rule for writes: a storage failure after a good bearer is not a bad bearer.
-    #[tokio::test]
-    async fn a_storage_failure_never_reads_as_an_invalid_credential() {
-        let path = temp_state_path("save-error-text");
-        let plane = shared_json_plane(&path, |_| {}).await;
-        let enrolled = plane
-            .issue_relay_registration_for_verify_key("vk-save-error", None)
-            .await
-            .expect("enroll");
-        plane.inner.persistence_down.store(true, Ordering::SeqCst);
-
-        let grant = plane
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                device_request(&enrolled, "device-save-error"),
-                None,
-            )
-            .await;
-        let _ = std::fs::remove_file(&path);
-
-        let error = grant.expect_err("the store is down");
-        assert!(
-            !error.to_ascii_lowercase().contains("invalid"),
-            "a storage failure surfaced as {error:?}, which the HTTP layer calls a 401"
-        );
-    }
-
-    #[tokio::test]
-    async fn tokens_minted_elsewhere_back_to_back_both_authenticate() {
-        let path = temp_state_path("visibility");
-        let reader = shared_json_plane(&path, |_| {}).await;
-        let writer = json_plane(&path).await;
-
-        let enrolled = writer
-            .issue_relay_registration_for_verify_key("vk-minted-elsewhere", None)
-            .await
-            .expect("enroll on the other instance");
-        let relay = reader
-            .issue_relay_ws_token(
-                &enrolled.relay_refresh_token,
-                relay_ws_request(&enrolled.relay_id, &enrolled.broker_room_id),
-            )
-            .await;
-        // Minted right after the reader's reload, so the next miss lands in the spacing window.
-        let grant = writer
-            .issue_device_grant(
-                &enrolled.relay_refresh_token,
-                device_request(&enrolled, "device-elsewhere"),
-                None,
-            )
-            .await
-            .expect("grant on the other instance");
-        let device = reader
-            .issue_device_ws_token(&grant.device_refresh_token)
-            .await;
-        let _ = std::fs::remove_file(&path);
-
-        relay.expect("a relay token another instance minted must authenticate here");
-        device.expect("a device token another instance minted must authenticate here");
-    }
-
-    #[tokio::test]
-    async fn slow_reloads_never_run_back_to_back_or_starve_requests_that_hit() {
-        let path = temp_state_path("slow");
-        let load_delay = Duration::from_millis(200);
-        let plane = shared_json_plane(&path, |inner| {
-            inner.load_delay = load_delay;
-            // Every miss now asks for a reload: the worst case for spacing.
-            inner.force_probe_hit = true;
-        })
-        .await;
-        let enrolled = plane
-            .issue_relay_registration_for_verify_key("vk-hit", None)
-            .await
-            .expect("enroll");
-
-        let hitter = {
-            let plane = plane.clone();
-            let enrolled = enrolled.clone();
-            tokio::spawn(async move {
-                let mut slowest = Duration::ZERO;
-                for _ in 0..10 {
-                    let started = Instant::now();
-                    plane
-                        .issue_relay_ws_token(
-                            &enrolled.relay_refresh_token,
-                            relay_ws_request(&enrolled.relay_id, &enrolled.broker_room_id),
-                        )
-                        .await
-                        .expect("a known relay token must keep authenticating");
-                    slowest = slowest.max(started.elapsed());
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                slowest
-            })
-        };
-        unknown_bearer_streams(&plane).await;
-        let slowest_hit = hitter.await.expect("hitter should finish");
-        let log = plane.inner.load_log.lock().expect("load log").clone();
-        let _ = std::fs::remove_file(&path);
-
-        let interval = plane.inner.miss_reload_min_interval;
-        for pair in log.windows(2) {
-            let gap = pair[1].0.saturating_duration_since(pair[0].1);
-            assert!(
-                gap + Duration::from_millis(5) >= interval,
-                "a full reload began {gap:?} after the previous one ended; loads: {log:?}"
-            );
-        }
-        assert!(
-            slowest_hit < load_delay * 2,
-            "a request whose token is in memory waited {slowest_hit:?}, longer than one reload"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_outage_refuses_misses_without_reloading_and_still_serves_hits() {
-        let path = temp_state_path("outage");
-        let plane = shared_json_plane(&path, |inner| {
-            inner.load_delay = Duration::from_millis(50);
-        })
-        .await;
-        let enrolled = plane
-            .issue_relay_registration_for_verify_key("vk-outage", None)
-            .await
-            .expect("enroll");
-        plane.inner.persistence_down.store(true, Ordering::SeqCst);
-
-        let outcomes = unknown_bearer_streams(&plane).await;
-        let hit = plane
-            .issue_relay_ws_token(
-                &enrolled.relay_refresh_token,
-                relay_ws_request(&enrolled.relay_id, &enrolled.broker_room_id),
-            )
-            .await;
-        let loads = full_loads(&plane);
-        let _ = std::fs::remove_file(&path);
-
-        assert!(outcomes.iter().all(Result::is_err));
-        assert_eq!(
-            loads, 0,
-            "misses during an outage attempted {loads} full reloads"
-        );
-        hit.expect("a token already in memory must keep working through an outage");
-    }
-
-    #[tokio::test]
-    async fn a_forced_reload_during_an_outage_is_attempted_once_not_per_request() {
-        let path = temp_state_path("forced");
-        let plane = shared_json_plane(&path, |inner| {
-            inner.force_reload_before_use = true;
-            inner.load_delay = Duration::from_millis(50);
-        })
-        .await;
-        plane.inner.persistence_down.store(true, Ordering::SeqCst);
-
-        let outcomes = unknown_bearer_streams(&plane).await;
-        let loads = full_loads(&plane);
-        let _ = std::fs::remove_file(&path);
-
-        assert!(outcomes.iter().all(Result::is_err));
-        assert!(
-            loads <= 2,
-            "40 requests during an outage made {loads} full-reload attempts"
-        );
-    }
-}
+#[cfg(test)]
+#[path = "public_control/tests/relay_proofs.rs"]
+mod relay_proof_tests;

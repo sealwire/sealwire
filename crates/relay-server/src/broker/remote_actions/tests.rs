@@ -1,4 +1,780 @@
+use super::authentication::issue_claim_challenge_outcome;
+use super::delivery::{
+    build_encrypted_remote_action_result_chunk_payloads, cached_remote_action_result,
+    measure_remote_action_result_sizes, publish_remote_action_result_chunks,
+    publish_remote_action_result_private, remote_action_result_kind, RemoteActionOutcome,
+    RemoteActionResultChunkPlaintext, RemoteActionResultKind, RemoteActionResultPlaintext,
+    CLIENT_REMOTE_ACTION_DEADLINE, REMOTE_ACTION_PENDING_NOTICE_INTERVAL,
+};
+use super::execution::execute_remote_action;
+use super::request::{remote_action_emits_info_log, requires_signed_attempt};
 use super::*;
+use crate::{
+    broker::{
+        crypto::{decrypt_json, encrypt_json},
+        protocol::{frame_bytes_for_payload, OutboundBrokerPayload},
+        MAX_BROKER_TEXT_FRAME_BYTES,
+    },
+    protocol::{SessionSnapshot, ThreadsQuery},
+};
+use tokio::time::Duration;
+
+async fn device_proof_test_state() -> (
+    AppState,
+    std::sync::Arc<tokio::sync::RwLock<crate::state::RelayState>>,
+    ed25519_dalek::SigningKey,
+) {
+    use crate::state::{PairedDevice, RelayState, SecurityProfile};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::sync::{watch, RwLock};
+
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[31; 32]);
+    let (change_tx, _) = watch::channel(0_u64);
+    let relay = Arc::new(RwLock::new(RelayState::new(
+        "/tmp/device-proof-test".to_string(),
+        change_tx.clone(),
+        SecurityProfile::private(),
+    )));
+    {
+        let mut relay = relay.write().await;
+        relay.paired_devices.insert(
+            "phone-1".to_string(),
+            PairedDevice {
+                device_id: "phone-1".to_string(),
+                label: "Phone".to_string(),
+                payload_secret: "leaked-secret".to_string(),
+                device_verify_key: STANDARD.encode(signing_key.verifying_key().to_bytes()),
+                created_at: 1,
+                last_seen_at: None,
+                last_peer_id: None,
+                broker_join_ticket_expires_at: None,
+                path_scope: Vec::new(),
+            },
+        );
+        relay.mark_surface_peer_online("surface-phone");
+        relay.mark_surface_peer_online("surface-attacker");
+    }
+    let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
+    (state, relay, signing_key)
+}
+
+static TEST_REQUEST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A signed attempt from the paired test phone (key `[31; 32]`) on `peer_id`.
+fn signed_test_payload(
+    peer_id: &str,
+    action_id: &str,
+    request: serde_json::Value,
+    sid: &str,
+) -> serde_json::Value {
+    let (writer, _, _) = super::super::writer::test_writer_with_identity();
+    super::super::request_auth::test_signed_request(
+        &ed25519_dalek::SigningKey::from_bytes(&[31; 32]),
+        &writer.request_binding().unwrap(),
+        "phone-1",
+        peer_id,
+        sid,
+        TEST_REQUEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
+        action_id,
+        &request,
+        "leaked-secret",
+    )
+}
+
+/// Hand `payload` to the relay as if the broker said it came from `peer_id`.
+async fn deliver_as(
+    state: &AppState,
+    peer_id: &str,
+    payload: serde_json::Value,
+) -> Option<serde_json::Value> {
+    let parsed = super::super::protocol::parse_inbound_payload(payload)
+        .expect("payload parses")
+        .expect("payload is an action");
+    let super::super::protocol::InboundBrokerPayload::EncryptedRemoteAction {
+        action_id,
+        device_id,
+        action,
+        request_sid,
+        request_boot,
+        request_seq,
+        request_time,
+        op_boot,
+        op_t0,
+        request_signature,
+        envelope,
+    } = parsed
+    else {
+        panic!("not an action payload");
+    };
+    let (writer, mut replies, _trains) = super::super::writer::test_writer_with_identity();
+    // Boxed: the handler's future is too large for a test thread's stack in debug builds.
+    Box::pin(handle_encrypted_remote_action(
+        state,
+        &writer,
+        FrameOrigin {
+            ingress: crate::state::next_relay_ingress(),
+            lease: state
+                .current_surface_lease(peer_id)
+                .await
+                .unwrap_or_default(),
+        },
+        peer_id.to_string(),
+        action_id.clone(),
+        device_id,
+        signed_attempt_from_parts(
+            action,
+            request_sid,
+            request_boot,
+            request_seq,
+            request_time,
+            op_boot,
+            op_t0,
+            request_signature,
+        ),
+        envelope,
+    ))
+    .await
+    .expect("the room remains connected");
+    let tokio_tungstenite::tungstenite::Message::Text(text) = replies.try_recv().ok()? else {
+        panic!("expected a text reply");
+    };
+    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+    if frame["payload"]["kind"] == "remote_action_reauthorize" {
+        return Some(serde_json::json!({"reauthorize": true}));
+    }
+    assert_eq!(
+        frame["payload"]["action_id"].as_str(),
+        Some(action_id.as_str()),
+        "wire replies keep the caller's action id"
+    );
+    let envelope = serde_json::from_value(frame["payload"]["envelope"].clone()).unwrap();
+    Some(decrypt_json("leaked-secret", &envelope).unwrap())
+}
+
+/// A claim step (no `sid`), or an ordinary action signed under `sid`.
+async fn device_proof_test_reply(
+    state: &AppState,
+    peer_id: &str,
+    action_id: &str,
+    request: serde_json::Value,
+    sid: Option<String>,
+) -> Option<serde_json::Value> {
+    let payload = match sid {
+        Some(sid) => signed_test_payload(peer_id, action_id, request, &sid),
+        None => serde_json::json!({
+            "kind": "encrypted_remote_action",
+            "protocol_version": super::super::RELAY_PROTOCOL_VERSION,
+            "action_id": action_id,
+            "device_id": "phone-1",
+            "envelope": encrypt_json(
+                "leaked-secret",
+                &serde_json::json!({"action_id": action_id, "request": request}),
+            )
+            .expect("request encrypts"),
+        }),
+    };
+    deliver_as(state, peer_id, payload).await
+}
+
+async fn device_proof_test_action(
+    state: &AppState,
+    peer_id: &str,
+    action_id: &str,
+    request: serde_json::Value,
+    sid: Option<String>,
+) -> serde_json::Value {
+    device_proof_test_reply(state, peer_id, action_id, request, sid)
+        .await
+        .unwrap_or_else(|| panic!("{action_id} got no answer"))
+}
+
+fn assert_no_session_material(reply: &serde_json::Value) {
+    for field in [
+        "snapshot",
+        "session_claim",
+        "session_claim_expires_at",
+        "threads",
+        "devices",
+        "providers",
+        "models",
+        "receipt",
+        "thread_transcript",
+        "thread_entry_detail",
+        "workspace_diff",
+        "projects",
+        "reviews",
+        "workflows",
+        "claim_challenge",
+        "claim_challenge_id",
+        "claim_challenge_expires_at",
+    ] {
+        assert!(
+            reply[field].is_null(),
+            "{field} leaked from an unauthenticated claim completion: {reply}"
+        );
+    }
+}
+
+fn auth_cache_action_id(peer_id: &str, action_id: &str) -> String {
+    serde_json::to_string(&(peer_id, action_id)).expect("auth cache key")
+}
+
+fn sign_message(key: &ed25519_dalek::SigningKey, message: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use ed25519_dalek::Signer;
+    STANDARD.encode(key.sign(message.as_bytes()).to_bytes())
+}
+
+fn claim_device_request(
+    key: &ed25519_dalek::SigningKey,
+    challenge_id: &str,
+    nonce: &str,
+    peer_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "claim_device",
+        "challenge_id": challenge_id,
+        "challenge": nonce,
+        "proof": sign_message(
+            key,
+            &super::super::device_claim_proof_message(challenge_id, nonce, "phone-1", peer_id),
+        ),
+    })
+}
+
+#[tokio::test]
+async fn a_leaked_payload_secret_cannot_read_mutate_or_subscribe() {
+    let (state, relay, _) = device_proof_test_state().await;
+    for (index, request) in [
+        serde_json::json!({"type":"start_session", "input":{}}),
+        serde_json::json!({"type":"fork_session", "input":{"source_thread_id":"thread-1"}}),
+        serde_json::json!({"type":"resume_session", "input":{"thread_id":"thread-1"}}),
+        serde_json::json!({"type":"take_over", "input":{"thread_id":"thread-1"}}),
+        serde_json::json!({"type":"list_threads", "query":{}}),
+        serde_json::json!({"type":"fetch_devices"}),
+        serde_json::json!({"type":"watch_threads", "input":{"thread_ids":[]}}),
+        serde_json::json!({"type":"heartbeat", "input":{}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let reply = device_proof_test_reply(
+            &state,
+            "surface-attacker",
+            &format!("unsigned-{index}"),
+            request,
+            None,
+        )
+        .await;
+        assert!(
+            reply.is_none(),
+            "an unsigned action gets no answer at all, got {reply:?}"
+        );
+        assert!(state.broker_targets().await.is_empty());
+    }
+    let relay = relay.read().await;
+    assert!(relay.paired_devices["phone-1"].last_peer_id.is_none());
+    assert!(relay.active_thread_id.is_none());
+}
+
+#[tokio::test]
+async fn only_the_paired_private_key_can_claim_and_access_on_its_connection() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use ed25519_dalek::Signer;
+
+    let (state, relay, key) = device_proof_test_state().await;
+    let rejected = device_proof_test_action(
+        &state,
+        "surface-attacker",
+        "forged-init",
+        serde_json::json!({"type":"claim_challenge", "proof": STANDARD.encode([0; 64])}),
+        None,
+    )
+    .await;
+    assert_eq!(rejected["ok"], false);
+    assert!(state.broker_targets().await.is_empty());
+    assert!(relay.read().await.pending_claim_challenges.is_empty());
+
+    let proof = STANDARD.encode(
+        key.sign(
+            super::super::device_claim_init_proof_message(
+                "signed-init",
+                "phone-1",
+                "surface-phone",
+            )
+            .as_bytes(),
+        )
+        .to_bytes(),
+    );
+    let wrong_peer_init = device_proof_test_action(
+        &state,
+        "surface-attacker",
+        "signed-init",
+        serde_json::json!({"type":"claim_challenge", "proof":proof}),
+        None,
+    )
+    .await;
+    assert_eq!(wrong_peer_init["ok"], false);
+    assert!(state.broker_targets().await.is_empty());
+    assert!(relay.read().await.pending_claim_challenges.is_empty());
+
+    let challenge = device_proof_test_action(
+        &state,
+        "surface-phone",
+        "signed-init",
+        serde_json::json!({"type":"claim_challenge", "proof":proof}),
+        None,
+    )
+    .await;
+    assert_eq!(challenge["ok"], true);
+    let challenge_id = challenge["claim_challenge_id"].as_str().unwrap();
+    let nonce = challenge["claim_challenge"].as_str().unwrap();
+    let invalid = device_proof_test_action(
+        &state,
+        "surface-phone",
+        "forged-completion",
+        serde_json::json!({"type":"claim_device", "challenge_id":challenge_id,
+            "challenge":nonce, "proof":STANDARD.encode([0; 64])}),
+        None,
+    )
+    .await;
+    assert_eq!(invalid["ok"], false);
+    assert!(invalid["error"]
+        .as_str()
+        .unwrap()
+        .contains("device claim proof is invalid"));
+    assert_no_session_material(&invalid);
+
+    let proof = STANDARD.encode(
+        key.sign(
+            super::super::device_claim_proof_message(
+                challenge_id,
+                nonce,
+                "phone-1",
+                "surface-phone",
+            )
+            .as_bytes(),
+        )
+        .to_bytes(),
+    );
+    let wrong_peer_completion = device_proof_test_action(
+        &state,
+        "surface-attacker",
+        "signed-completion",
+        serde_json::json!({"type":"claim_device", "challenge_id":challenge_id,
+            "challenge":nonce, "proof":proof}),
+        None,
+    )
+    .await;
+    assert_eq!(wrong_peer_completion["ok"], false);
+    assert!(wrong_peer_completion["error"]
+        .as_str()
+        .unwrap()
+        .contains("device claim proof is invalid"));
+    assert_no_session_material(&wrong_peer_completion);
+
+    let claimed = device_proof_test_action(
+        &state,
+        "surface-phone",
+        "signed-completion",
+        serde_json::json!({"type":"claim_device", "challenge_id":challenge_id,
+            "challenge":nonce, "proof":proof}),
+        None,
+    )
+    .await;
+    assert_eq!(claimed["ok"], true);
+    let token = claimed["session_claim"].as_str().unwrap().to_string();
+    let read = device_proof_test_action(
+        &state,
+        "surface-phone",
+        "authenticated-read",
+        serde_json::json!({"type":"fetch_devices"}),
+        Some(token.clone()),
+    )
+    .await;
+    assert_eq!(read["ok"], true);
+    assert!(read["devices"].is_object());
+
+    let captured = signed_test_payload(
+        "surface-phone",
+        "captured-read",
+        serde_json::json!({"type":"fetch_devices"}),
+        &token,
+    );
+    assert!(
+        deliver_as(&state, "surface-attacker", captured)
+            .await
+            .is_none(),
+        "a request signed for one connection answers nothing on another"
+    );
+    assert_eq!(state.broker_targets().await.len(), 1);
+}
+
+async fn issue_claim_challenge(
+    state: &AppState,
+    key: &ed25519_dalek::SigningKey,
+    peer_id: &str,
+    action_id: &str,
+) -> (String, String) {
+    let proof = sign_message(
+        key,
+        &super::super::device_claim_init_proof_message(action_id, "phone-1", peer_id),
+    );
+    let challenge = device_proof_test_action(
+        state,
+        peer_id,
+        action_id,
+        serde_json::json!({"type":"claim_challenge", "proof": proof}),
+        None,
+    )
+    .await;
+    assert_eq!(challenge["ok"], true);
+    (
+        challenge["claim_challenge_id"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+        challenge["claim_challenge"].as_str().unwrap().to_string(),
+    )
+}
+
+async fn first_connection_survives_foreign_completions(
+    state: &AppState,
+    relay: &std::sync::Arc<tokio::sync::RwLock<crate::state::RelayState>>,
+    key: &ed25519_dalek::SigningKey,
+) -> (String, String, String) {
+    let (challenge_id, nonce) = issue_claim_challenge(state, key, "surface-phone", "init-p").await;
+    let completion = claim_device_request(key, &challenge_id, &nonce, "surface-phone");
+
+    let invalid = device_proof_test_action(
+        state,
+        "surface-attacker",
+        "shared-claim",
+        serde_json::json!({
+            "type": "claim_device",
+            "challenge_id": challenge_id,
+            "challenge": nonce,
+            "proof": sign_message(key, "not a claim proof"),
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(invalid["ok"], false);
+    assert!(invalid["error"]
+        .as_str()
+        .unwrap()
+        .contains("device claim proof is invalid"));
+    assert_no_session_material(&invalid);
+    assert!(state
+        .completed_remote_action("phone-1", "shared-claim")
+        .await
+        .is_none());
+    assert!(state
+        .completed_remote_action(
+            "phone-1",
+            &auth_cache_action_id("surface-attacker", "shared-claim"),
+        )
+        .await
+        .is_none());
+    assert!(relay
+        .read()
+        .await
+        .pending_claim_challenges
+        .contains_key(&challenge_id));
+
+    let from_other_connection = device_proof_test_action(
+        state,
+        "surface-attacker",
+        "shared-claim",
+        completion.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(from_other_connection["ok"], false);
+    assert!(from_other_connection["error"]
+        .as_str()
+        .unwrap()
+        .contains("device claim proof is invalid"));
+    assert_no_session_material(&from_other_connection);
+    assert!(state
+        .completed_remote_action(
+            "phone-1",
+            &auth_cache_action_id("surface-phone", "shared-claim"),
+        )
+        .await
+        .is_none());
+
+    let claimed = device_proof_test_action(
+        state,
+        "surface-phone",
+        "shared-claim",
+        completion.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(claimed["ok"], true);
+    let token = claimed["session_claim"].as_str().unwrap().to_string();
+    assert!(!token.is_empty());
+    let cached = state
+        .completed_remote_action(
+            "phone-1",
+            &auth_cache_action_id("surface-phone", "shared-claim"),
+        )
+        .await
+        .expect("the completing connection keeps its own result");
+    assert!(cached.ok);
+    assert_eq!(cached.session_claim.as_deref(), Some(token.as_str()));
+    assert!(cached.snapshot.is_none());
+    assert!(state
+        .completed_remote_action("phone-1", "shared-claim")
+        .await
+        .is_none());
+
+    let replayed_elsewhere = device_proof_test_action(
+        state,
+        "surface-attacker",
+        "shared-claim",
+        completion.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(replayed_elsewhere["ok"], false);
+    assert_no_session_material(&replayed_elsewhere);
+    assert!(state
+        .completed_remote_action(
+            "phone-1",
+            &auth_cache_action_id("surface-attacker", "shared-claim"),
+        )
+        .await
+        .is_none());
+
+    let replayed_here =
+        device_proof_test_action(state, "surface-phone", "shared-claim", completion, None).await;
+    assert_eq!(replayed_here["ok"], true);
+    assert_eq!(
+        replayed_here["session_claim"].as_str(),
+        Some(token.as_str())
+    );
+    assert!(replayed_here["snapshot"].is_null());
+    (challenge_id, nonce, token)
+}
+
+async fn second_connection_claim_is_independent(
+    state: &AppState,
+    key: &ed25519_dalek::SigningKey,
+    challenge_id: &str,
+    nonce: &str,
+    token: &str,
+) -> String {
+    let (challenge_id_b, nonce_b) =
+        issue_claim_challenge(state, key, "surface-phone-b", "init-b").await;
+    let completion_b = claim_device_request(key, &challenge_id_b, &nonce_b, "surface-phone-b");
+    let claimed_b = device_proof_test_action(
+        state,
+        "surface-phone-b",
+        "shared-claim",
+        completion_b.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(claimed_b["ok"], true);
+    let token_b = claimed_b["session_claim"].as_str().unwrap().to_string();
+    assert_ne!(token_b, token);
+    let replayed_b =
+        device_proof_test_action(state, "surface-phone-b", "shared-claim", completion_b, None)
+            .await;
+    assert_eq!(replayed_b["session_claim"].as_str(), Some(token_b.as_str()));
+    let still_p = device_proof_test_action(
+        state,
+        "surface-phone",
+        "shared-claim",
+        claim_device_request(key, challenge_id, nonce, "surface-phone"),
+        None,
+    )
+    .await;
+    assert_eq!(still_p["session_claim"].as_str(), Some(token));
+    token_b
+}
+
+async fn signed_nonce_mismatch_does_not_cross_connections(
+    state: &AppState,
+    relay: &std::sync::Arc<tokio::sync::RwLock<crate::state::RelayState>>,
+    key: &ed25519_dalek::SigningKey,
+    token: &str,
+    token_b: &str,
+) {
+    let (mismatch_id, mismatch_nonce) =
+        issue_claim_challenge(state, key, "surface-phone", "init-p-mismatch").await;
+    let wrong_nonce = device_proof_test_action(
+        state,
+        "surface-phone",
+        "wrong-nonce",
+        claim_device_request(key, &mismatch_id, "not-the-issued-nonce", "surface-phone"),
+        None,
+    )
+    .await;
+    assert_eq!(wrong_nonce["ok"], false);
+    assert!(wrong_nonce["error"]
+        .as_str()
+        .unwrap()
+        .contains("does not match the issued challenge"));
+    assert_no_session_material(&wrong_nonce);
+    let cached_mismatch = state
+        .completed_remote_action(
+            "phone-1",
+            &auth_cache_action_id("surface-phone", "wrong-nonce"),
+        )
+        .await
+        .expect("a signed nonce mismatch is cached for that connection");
+    assert!(!cached_mismatch.ok);
+    assert!(cached_mismatch.snapshot.is_none());
+    assert!(cached_mismatch.session_claim.is_none());
+    assert!(relay
+        .read()
+        .await
+        .pending_claim_challenges
+        .contains_key(&mismatch_id));
+
+    let (other_id, other_nonce) =
+        issue_claim_challenge(state, key, "surface-phone-b", "init-b-again").await;
+    let other_connection_same_id = device_proof_test_action(
+        state,
+        "surface-phone-b",
+        "wrong-nonce",
+        claim_device_request(key, &other_id, &other_nonce, "surface-phone-b"),
+        None,
+    )
+    .await;
+    assert_eq!(other_connection_same_id["ok"], true);
+    let token_other = other_connection_same_id["session_claim"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(token_other, token);
+    let cached_b = state
+        .completed_remote_action(
+            "phone-1",
+            &auth_cache_action_id("surface-phone-b", "shared-claim"),
+        )
+        .await
+        .expect("the other connection keeps the claim it already finished");
+    assert_eq!(cached_b.session_claim.as_deref(), Some(token_b));
+    let still_failed = state
+        .completed_remote_action(
+            "phone-1",
+            &auth_cache_action_id("surface-phone", "wrong-nonce"),
+        )
+        .await
+        .expect("the nonce mismatch stays on the connection that signed it");
+    assert!(!still_failed.ok);
+    assert!(still_failed.session_claim.is_none());
+    assert!(still_failed.snapshot.is_none());
+
+    let recovered = device_proof_test_action(
+        state,
+        "surface-phone",
+        "recovered-claim",
+        claim_device_request(key, &mismatch_id, &mismatch_nonce, "surface-phone"),
+        None,
+    )
+    .await;
+    assert_eq!(recovered["ok"], true);
+    assert!(recovered["session_claim"].is_string());
+    assert_ne!(
+        recovered["session_claim"].as_str(),
+        Some(token_other.as_str())
+    );
+    assert!(!relay
+        .read()
+        .await
+        .pending_claim_challenges
+        .contains_key(&mismatch_id));
+    let recovered_cached = state
+        .completed_remote_action(
+            "phone-1",
+            &auth_cache_action_id("surface-phone", "recovered-claim"),
+        )
+        .await
+        .expect("the corrected completion is cached under its own id");
+    assert!(recovered_cached.ok);
+    assert!(recovered_cached.snapshot.is_none());
+    let mismatch_after = state
+        .completed_remote_action(
+            "phone-1",
+            &auth_cache_action_id("surface-phone", "wrong-nonce"),
+        )
+        .await
+        .expect("correcting a later action id leaves the mismatch cached");
+    assert!(!mismatch_after.ok);
+    assert!(mismatch_after.session_claim.is_none());
+}
+
+#[tokio::test]
+async fn claim_completion_is_checked_before_cache_and_isolated_per_connection() {
+    let (state, relay, key) = device_proof_test_state().await;
+    relay
+        .write()
+        .await
+        .mark_surface_peer_online("surface-phone-b");
+    let (challenge_id, nonce, token) = Box::pin(first_connection_survives_foreign_completions(
+        &state, &relay, &key,
+    ))
+    .await;
+    let token_b = Box::pin(second_connection_claim_is_independent(
+        &state,
+        &key,
+        &challenge_id,
+        &nonce,
+        &token,
+    ))
+    .await;
+    Box::pin(signed_nonce_mismatch_does_not_cross_connections(
+        &state, &relay, &key, &token, &token_b,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn broker_presence_cannot_authenticate_a_device_and_rejoins_drop_its_binding() {
+    let (state, relay, _) = device_proof_test_state().await;
+    let (writer, _replies, _trains) = super::super::writer::test_writer();
+    super::super::handle_server_message(
+        &state,
+        &writer,
+        test_origin(),
+        super::super::ServerMessage::Presence {
+            channel_id: "room".to_string(),
+            kind: super::super::PresenceKind::Joined,
+            peer: relay_broker::protocol::PeerSummary {
+                peer_id: "surface-attacker".to_string(),
+                role: super::super::PeerRole::Surface,
+                device_id: Some("phone-1".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(state.broker_targets().await.is_empty());
+    relay
+        .write()
+        .await
+        .bind_surface_peer_to_device("phone-1", "surface-phone");
+    assert_eq!(state.broker_targets().await.len(), 1);
+    relay
+        .write()
+        .await
+        .mark_surface_peer_online("surface-phone");
+    assert!(state.broker_targets().await.is_empty());
+    relay
+        .write()
+        .await
+        .bind_surface_peer_to_device("phone-1", "surface-phone");
+    state
+        .replace_online_surface_peers(["surface-phone".to_string()])
+        .await;
+    assert!(state.broker_targets().await.is_empty());
+}
 use crate::protocol::{
     AskUserOptionView, AskUserQuestionDetailResponse, AskUserQuestionRequestView,
     AskUserQuestionView, SecurityMode, ThreadSummaryView, ThreadTranscriptResponse,
@@ -173,7 +949,7 @@ fn high_frequency_remote_actions_do_not_emit_info_logs() {
 }
 
 #[test]
-fn fork_session_action_round_trips_and_issues_session_claim() {
+fn fork_session_action_round_trips_and_binds_the_device() {
     let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
         "type": "fork_session",
         "input": {
@@ -200,8 +976,7 @@ fn fork_session_action_round_trips_and_issues_session_claim() {
         remote_action_result_kind(RemoteActionKind::ForkSession),
         RemoteActionResultKind::RemoteSessionResult
     ));
-    assert!(issues_session_claim(RemoteActionKind::ForkSession));
-    assert!(!requires_session_claim(RemoteActionKind::ForkSession));
+    assert!(requires_signed_attempt(RemoteActionKind::ForkSession));
 }
 
 #[test]
@@ -233,11 +1008,11 @@ fn fetch_workspace_git_context_round_trips_and_binds_the_requesting_device() {
 }
 
 #[test]
-fn fetch_workspace_git_context_is_read_only_and_needs_no_session_claim() {
+fn fetch_workspace_git_context_is_read_only_and_requires_device_authentication() {
     // A paired device must see what it is about to launch into without taking
     // control of whatever session happens to be running.
     assert!(
-        !super::requires_session_claim(RemoteActionKind::FetchWorkspaceGitContext),
+        requires_signed_attempt(RemoteActionKind::FetchWorkspaceGitContext),
         "reading a workspace's git standing must not require taking over a session"
     );
 }
@@ -294,9 +1069,9 @@ fn fetch_workspace_diff_round_trips_and_bind_device_preserves_thread_id() {
     }
 }
 
-// Not claim-gated: seeing/pinning a tree must not steal the session lease.
+// Device authentication does not take the controller lease.
 #[test]
-fn thread_workspace_actions_round_trip_and_need_no_session_claim() {
+fn thread_workspace_actions_round_trip_and_require_device_authentication() {
     let fetch: RemoteActionRequest = serde_json::from_value(serde_json::json!({
         "type": "fetch_thread_workspace",
         "thread_id": "thread-viewed"
@@ -382,7 +1157,7 @@ bind_device must overwrite the client's"
         RemoteActionKind::SetThreadWorkspace,
     ] {
         assert!(
-            !requires_session_claim(action),
+            requires_signed_attempt(action),
             "{} must not require a session claim",
             action.as_str()
         );
@@ -390,7 +1165,7 @@ bind_device must overwrite the client's"
 }
 
 #[test]
-fn project_action_round_trips_and_binds_device_without_claim() {
+fn project_action_round_trips_and_binds_authenticated_device() {
     let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
         "type": "project_action",
         "input": { "action": "assign", "thread_id": "t1", "project_id": "proj_x" }
@@ -413,12 +1188,11 @@ fn project_action_round_trips_and_binds_device_without_claim() {
         other => panic!("unexpected bound request: {other:?}"),
     }
 
-    // Projects are global, not session-scoped → no session claim required.
-    assert!(!requires_session_claim(RemoteActionKind::ProjectAction));
+    assert!(requires_signed_attempt(RemoteActionKind::ProjectAction));
 }
 
 #[test]
-fn push_subscription_actions_round_trip_and_are_not_claim_gated() {
+fn push_subscription_actions_round_trip_and_require_device_authentication() {
     let reg: RemoteActionRequest = serde_json::from_value(serde_json::json!({
         "type": "register_push_subscription",
         "input": { "endpoint": "https://push/x", "keys": { "p256dh": "p", "auth": "a" } }
@@ -456,12 +1230,8 @@ fn push_subscription_actions_round_trip_and_are_not_claim_gated() {
         RemoteActionKind::UnregisterPushSubscription,
     ] {
         assert!(
-            !requires_session_claim(kind),
+            requires_signed_attempt(kind),
             "{kind:?} must not require a session claim"
-        );
-        assert!(
-            !issues_session_claim(kind),
-            "{kind:?} must not issue a session claim"
         );
     }
 }
@@ -614,6 +1384,8 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
         ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
+        session_claim_boot: None,
+        session_claim_relay_ms: None,
         claim_challenge_id: None,
         claim_challenge: None,
         claim_challenge_expires_at: None,
@@ -670,6 +1442,8 @@ fn make_large_ask_user_detail_plaintext() -> RemoteActionResultPlaintext {
         ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
+        session_claim_boot: None,
+        session_claim_relay_ms: None,
         claim_challenge_id: None,
         claim_challenge: None,
         claim_challenge_expires_at: None,
@@ -717,7 +1491,7 @@ fn request_review_action_round_trips_and_binds_device() {
         remote_action_result_kind(RemoteActionKind::RequestReview),
         RemoteActionResultKind::RemoteActionAck
     ));
-    assert!(requires_session_claim(RemoteActionKind::RequestReview));
+    assert!(requires_signed_attempt(RemoteActionKind::RequestReview));
 }
 
 #[test]
@@ -757,22 +1531,19 @@ fn start_workflow_action_round_trips_and_binds_device() {
         remote_action_result_kind(RemoteActionKind::StartWorkflow),
         RemoteActionResultKind::RemoteActionAck
     ));
-    assert!(requires_session_claim(RemoteActionKind::StartWorkflow));
+    assert!(requires_signed_attempt(RemoteActionKind::StartWorkflow));
 }
 
 #[test]
-fn fetch_reviews_action_round_trips_and_is_not_claim_gated() {
-    // The dedicated reviewer-panel channel for remote: a read-only data fetch (mirrors
-    // fetch_workspace_diff / fetch_thread_transcript). It must parse, bind the device, NOT
-    // require a session claim, and route to the data (transcript-result) kind.
+fn fetch_reviews_action_round_trips_and_requires_device_authentication() {
     let request: RemoteActionRequest =
         serde_json::from_value(serde_json::json!({ "type": "fetch_reviews" }))
             .expect("fetch_reviews should parse");
     assert_eq!(request.kind(), RemoteActionKind::FetchReviews);
     assert_eq!(RemoteActionKind::FetchReviews.as_str(), "fetch_reviews");
     assert!(
-        !requires_session_claim(RemoteActionKind::FetchReviews),
-        "listing reviews is read-only and must not require session control"
+        requires_signed_attempt(RemoteActionKind::FetchReviews),
+        "listing reviews requires device authentication, without taking control"
     );
     assert!(matches!(
         remote_action_result_kind(RemoteActionKind::FetchReviews),
@@ -787,7 +1558,7 @@ fn fetch_reviews_action_round_trips_and_is_not_claim_gated() {
 }
 
 #[test]
-fn fetch_ask_action_round_trips_and_is_not_claim_gated() {
+fn fetch_ask_action_round_trips_and_requires_device_authentication() {
     // Agents card hover: same read-only data channel shape as fetch_reviews.
     let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
         "type": "fetch_ask",
@@ -797,8 +1568,8 @@ fn fetch_ask_action_round_trips_and_is_not_claim_gated() {
     assert_eq!(request.kind(), RemoteActionKind::FetchAsk);
     assert_eq!(RemoteActionKind::FetchAsk.as_str(), "fetch_ask");
     assert!(
-        !requires_session_claim(RemoteActionKind::FetchAsk),
-        "ask detail is read-only and must not require session control"
+        requires_signed_attempt(RemoteActionKind::FetchAsk),
+        "ask detail requires device authentication, without taking control"
     );
     assert!(matches!(
         remote_action_result_kind(RemoteActionKind::FetchAsk),
@@ -823,7 +1594,7 @@ fn dedicated_workflows_and_devices_actions_are_read_only_data_fetches() {
             serde_json::from_value(serde_json::json!({ "type": wire_type }))
                 .expect("dedicated fetch should parse");
         assert_eq!(request.kind(), expected_kind);
-        assert!(!requires_session_claim(expected_kind));
+        assert!(requires_signed_attempt(expected_kind));
         assert_eq!(
             remote_action_result_kind(expected_kind),
             RemoteActionResultKind::RemoteTranscriptResult
@@ -845,9 +1616,9 @@ fn dedicated_workflows_and_devices_actions_are_read_only_data_fetches() {
 }
 
 #[test]
-fn fetch_projects_action_round_trips_and_is_not_claim_gated() {
+fn fetch_projects_action_round_trips_and_requires_device_authentication() {
     // The dedicated Projects read channel for remote (mirrors fetch_reviews): read-only,
-    // parses from `{}`, binds the device, is NOT claim-gated, and routes to the data
+    // parses from `{}`, binds the device, requires device authentication, and routes to the data
     // (transcript-result) kind so its `projects` payload reaches the device.
     let request: RemoteActionRequest =
         serde_json::from_value(serde_json::json!({ "type": "fetch_projects" }))
@@ -855,8 +1626,8 @@ fn fetch_projects_action_round_trips_and_is_not_claim_gated() {
     assert_eq!(request.kind(), RemoteActionKind::FetchProjects);
     assert_eq!(RemoteActionKind::FetchProjects.as_str(), "fetch_projects");
     assert!(
-        !requires_session_claim(RemoteActionKind::FetchProjects),
-        "listing projects is read-only and must not require session control"
+        requires_signed_attempt(RemoteActionKind::FetchProjects),
+        "listing projects requires device authentication, without taking control"
     );
     assert!(matches!(
         remote_action_result_kind(RemoteActionKind::FetchProjects),
@@ -959,7 +1730,7 @@ fn resolve_and_delete_review_actions_round_trip_and_bind_device() {
             remote_action_result_kind(kind),
             RemoteActionResultKind::RemoteActionAck
         ));
-        assert!(requires_session_claim(kind));
+        assert!(requires_signed_attempt(kind));
     }
 }
 
@@ -1044,6 +1815,8 @@ fn encrypted_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
         ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
+        session_claim_boot: None,
+        session_claim_relay_ms: None,
         claim_challenge_id: None,
         claim_challenge: None,
         claim_challenge_expires_at: None,
@@ -1109,6 +1882,8 @@ fn encrypted_fetch_ask_result_carries_the_ask_detail_payload_to_the_device() {
         ask_detail: Some(ask_detail),
         session_claim: None,
         session_claim_expires_at: None,
+        session_claim_boot: None,
+        session_claim_relay_ms: None,
         claim_challenge_id: None,
         claim_challenge: None,
         claim_challenge_expires_at: None,
@@ -1166,6 +1941,8 @@ fn encrypted_dedicated_workflows_and_devices_payloads_reach_the_device() {
         ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
+        session_claim_boot: None,
+        session_claim_relay_ms: None,
         claim_challenge_id: None,
         claim_challenge: None,
         claim_challenge_expires_at: None,
@@ -1217,6 +1994,8 @@ fn encrypted_fetch_projects_result_carries_the_projects_payload_to_the_device() 
         ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
+        session_claim_boot: None,
+        session_claim_relay_ms: None,
         claim_challenge_id: None,
         claim_challenge: None,
         claim_challenge_expires_at: None,
@@ -1278,6 +2057,8 @@ fn encrypted_fetch_workspace_git_context_result_reaches_the_device() {
         ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
+        session_claim_boot: None,
+        session_claim_relay_ms: None,
         claim_challenge_id: None,
         claim_challenge: None,
         claim_challenge_expires_at: None,
@@ -1303,13 +2084,9 @@ fn encrypted_fetch_workspace_git_context_result_reaches_the_device() {
     );
 }
 
-/// Locks the `repair_workspace` wire contract, including the two properties that are
-/// easy to lose in a refactor and only fail on a device: `bind_device` must stamp the
-/// actor without dropping the thread selector, and the action must NOT require the
-/// session claim. A phone looking at a session whose workspace vanished has to be able
-/// to un-brick it without first stealing the active-controller lease from the desktop.
+// Device authentication must not take the controller lease just to repair a workspace.
 #[test]
-fn repair_workspace_round_trips_and_needs_no_session_claim() {
+fn repair_workspace_round_trips_and_requires_device_authentication() {
     let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
         "type": "repair_workspace",
         "thread_id": "thread-1",
@@ -1339,9 +2116,8 @@ fn repair_workspace_round_trips_and_needs_no_session_claim() {
         RemoteActionResultKind::RemoteActionAck
     ));
     assert!(
-        !requires_session_claim(RemoteActionKind::RepairWorkspace),
-        "re-creating a directory runs no turn; demanding the lease would make the \
-         repair unreachable from the device most likely to notice the problem"
+        requires_signed_attempt(RemoteActionKind::RepairWorkspace),
+        "workspace repair requires device authentication, without taking control"
     );
 }
 
@@ -1392,8 +2168,7 @@ fn rename_thread_round_trips_the_payload_the_remote_surface_sends() {
     ));
     // Renaming a tab must not fight the active controller for the relay-wide lease,
     // and must work while that session is mid-turn.
-    assert!(!requires_session_claim(RemoteActionKind::RenameThread));
-    assert!(!issues_session_claim(RemoteActionKind::RenameThread));
+    assert!(requires_signed_attempt(RemoteActionKind::RenameThread));
 }
 
 /// Locks the `set_thread_flag` wire contract against the exact payload the phone
@@ -1431,8 +2206,7 @@ fn set_thread_flag_round_trips_the_payload_the_remote_surface_sends() {
     ));
     // Flagging a session must not fight the active controller for the relay-wide
     // lease, and must work while that session is mid-turn.
-    assert!(!requires_session_claim(RemoteActionKind::SetThreadFlag));
-    assert!(!issues_session_claim(RemoteActionKind::SetThreadFlag));
+    assert!(requires_signed_attempt(RemoteActionKind::SetThreadFlag));
 }
 
 /// The broker's `list_threads` action must carry `q` into the search, not drop it.
@@ -1823,10 +2597,10 @@ fn a_goal_card_action_names_its_card_and_binds_the_device() {
 // card goes away.
 #[test]
 fn both_goal_actions_need_the_session_claim() {
-    assert!(requires_session_claim(RemoteActionKind::SetGoal));
-    assert!(requires_session_claim(RemoteActionKind::StopGoal));
-    assert!(requires_session_claim(RemoteActionKind::GoalCard));
-    assert!(!requires_session_claim(RemoteActionKind::StopTurn));
+    assert!(requires_signed_attempt(RemoteActionKind::SetGoal));
+    assert!(requires_signed_attempt(RemoteActionKind::StopGoal));
+    assert!(requires_signed_attempt(RemoteActionKind::GoalCard));
+    assert!(requires_signed_attempt(RemoteActionKind::StopTurn));
 }
 
 // `/delegate` from a phone. The other two composer commands already had a door —
@@ -1859,7 +2633,7 @@ fn delegating_from_a_paired_device_round_trips_and_binds_it() {
         other => panic!("unexpected: {other:?}"),
     }
     // Bringing in another agent is starting work, so it is gated like sending a message.
-    assert!(requires_session_claim(RemoteActionKind::Delegate));
+    assert!(requires_signed_attempt(RemoteActionKind::Delegate));
     assert!(matches!(
         remote_action_result_kind(RemoteActionKind::Delegate),
         RemoteActionResultKind::RemoteActionAck
@@ -1896,7 +2670,9 @@ fn deciding_a_model_request_from_a_paired_device_binds_it_and_needs_the_session(
         }
         other => panic!("unexpected: {other:?}"),
     }
-    assert!(requires_session_claim(RemoteActionKind::DecideModelRequest));
+    assert!(requires_signed_attempt(
+        RemoteActionKind::DecideModelRequest
+    ));
 }
 
 // `/handover` from a phone. Same door as `delegate`, and deliberately a different
@@ -1963,7 +2739,7 @@ fn handing_over_from_a_paired_device_round_trips_and_binds_it() {
 
     // Starting somebody else's session on this work is starting work, so it is gated
     // exactly as sending a message is.
-    assert!(requires_session_claim(RemoteActionKind::Handover));
+    assert!(requires_signed_attempt(RemoteActionKind::Handover));
     assert!(matches!(
         remote_action_result_kind(RemoteActionKind::Handover),
         RemoteActionResultKind::RemoteActionAck
@@ -1974,7 +2750,7 @@ fn handing_over_from_a_paired_device_round_trips_and_binds_it() {
 // until it has been read; without this door the phone can see one and never clear it, so
 // the same failure lands under every draft it writes from then on.
 #[test]
-fn acknowledging_a_handover_binds_the_device_and_takes_no_session_claim() {
+fn acknowledging_a_handover_binds_the_device_and_requires_device_authentication() {
     let ack: RemoteActionRequest = serde_json::from_value(serde_json::json!({
         "type": "ack_handover",
         "handover_id": "handover-9",
@@ -2002,9 +2778,9 @@ is against who is really asking"
     // Reading a failure is not starting work. Requiring the controller lease to dismiss
     // a notice would be a worse bargain than the one this closes — a second device would
     // have to take control of the session just to clear its own composer.
-    assert!(!requires_session_claim(RemoteActionKind::AckHandover));
+    assert!(requires_signed_attempt(RemoteActionKind::AckHandover));
     assert!(
-        requires_session_claim(RemoteActionKind::Handover),
+        requires_signed_attempt(RemoteActionKind::Handover),
         "…while the handover itself still is"
     );
     assert!(matches!(
@@ -2158,7 +2934,7 @@ async fn a_claim_challenge_from_a_closed_connection_does_not_take_the_device_bac
 }
 
 #[test]
-fn fetch_thread_skills_binds_the_asking_device_and_needs_no_session_claim() {
+fn fetch_thread_skills_binds_the_asking_device_and_requires_device_authentication() {
     // The device id decides which folders may be listed, so the client's own must lose.
     let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
         "type": "fetch_thread_skills",
@@ -2181,10 +2957,8 @@ fn fetch_thread_skills_binds_the_asking_device_and_needs_no_session_claim() {
         }
         other => panic!("unexpected bound request: {other:?}"),
     }
-    assert!(!super::requires_session_claim(
-        RemoteActionKind::FetchThreadSkills
-    ));
-    assert!(!super::remote_action_emits_info_log(
+    assert!(requires_signed_attempt(RemoteActionKind::FetchThreadSkills));
+    assert!(!remote_action_emits_info_log(
         RemoteActionKind::FetchThreadSkills
     ));
 }
@@ -2231,6 +3005,8 @@ fn encrypted_fetch_thread_skills_result_reaches_the_device() {
         ask_detail: None,
         session_claim: None,
         session_claim_expires_at: None,
+        session_claim_boot: None,
+        session_claim_relay_ms: None,
         claim_challenge_id: None,
         claim_challenge: None,
         claim_challenge_expires_at: None,
@@ -2363,7 +3139,7 @@ fn recheck_signed_out_providers_is_a_claim_free_remote_action() {
             .expect("recheck_signed_out_providers should parse");
     assert_eq!(request.kind(), RemoteActionKind::RecheckSignedOutProviders);
     // Opening Settings on a phone must not steal the session from another device.
-    assert!(!requires_session_claim(
+    assert!(requires_signed_attempt(
         RemoteActionKind::RecheckSignedOutProviders
     ));
 }
@@ -2378,7 +3154,7 @@ fn encrypted_actions_require_the_authenticated_action_id() {
     for request in [
         serde_json::json!({"type": "list_threads", "query": {"limit": 5}}),
         serde_json::json!({"type": "claim_challenge", "proof": "proof"}),
-        serde_json::json!({"type": "claim_device", "challenge_id": "challenge", "proof": "proof"}),
+        serde_json::json!({"type": "claim_device", "challenge_id": "challenge", "challenge": "nonce", "proof": "proof"}),
         serde_json::json!({"type": "heartbeat", "input": {}}),
     ] {
         let envelope = encrypt_json(
