@@ -41,7 +41,7 @@ process.on("exit", () => {
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-review-modes-e2e-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   // Build once, then spawn the relay BINARY directly. `cargo run` wraps the server in
   // a cargo process that doesn't forward SIGTERM, so teardown would orphan the relay
   // (and hold the port) on local runs; spawning the prebuilt binary lets
@@ -51,7 +51,7 @@ async function main() {
   const relay = spawnManagedProcess("relay", relayBin, [], {
     AGENT_PROVIDERS: "fake",
     PORT: String(relayPort),
-    RELAY_STATE_PATH: statePath,
+    RELAY_STATE_DB: statePath,
   });
 
   try {

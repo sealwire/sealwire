@@ -50,12 +50,12 @@ async function main() {
   const stateDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-rail-toggle-"))
   );
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const { mainCwd } = await initRepoWithWorktree(stateDir);
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);

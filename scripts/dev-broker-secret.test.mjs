@@ -57,18 +57,18 @@ Set-Acl -LiteralPath $env:SEALWIRE_ACL_TEST_PATH -AclObject $Acl
 test("development broker credentials remain random, private, and stable across launches", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "sealwire-dev-secret-"));
   try {
-    const env = { RELAY_STATE_PATH: path.join(root, ".agent-relay", "session.json") };
+    const env = { RELAY_STATE_DB: path.join(root, ".sealwire", "sealwire.db") };
     const secret = resolveDevBrokerTicketSecret(env);
     assert.equal(Buffer.from(secret, "base64").length, 48);
     assert.equal(resolveDevBrokerTicketSecret(env), secret);
-    const other = resolveDevBrokerTicketSecret({ RELAY_STATE_PATH: path.join(root, "isolated", "session.json") });
+    const other = resolveDevBrokerTicketSecret({ RELAY_STATE_DB: path.join(root, "isolated", "sealwire.db") });
     assert.notEqual(other, secret);
     if (process.platform !== "win32") {
-      assert.equal(statSync(path.join(root, ".agent-relay")).mode & 0o777, 0o700);
-      assert.equal(statSync(path.join(root, ".agent-relay", "dev-broker-ticket.key")).mode & 0o777, 0o600);
+      assert.equal(statSync(path.join(root, ".sealwire")).mode & 0o777, 0o700);
+      assert.equal(statSync(path.join(root, ".sealwire", "dev-broker-ticket.key")).mode & 0o777, 0o600);
     } else {
-      assertPrivateWindowsAcl(path.join(root, ".agent-relay"));
-      assertPrivateWindowsAcl(path.join(root, ".agent-relay", "dev-broker-ticket.key"));
+      assertPrivateWindowsAcl(path.join(root, ".sealwire"));
+      assertPrivateWindowsAcl(path.join(root, ".sealwire", "dev-broker-ticket.key"));
       assertPrivateWindowsAcl(path.join(root, "isolated"));
     }
   } finally {
@@ -79,8 +79,8 @@ test("development broker credentials remain random, private, and stable across l
 test("Windows restricts existing development credentials without rotating them", { skip: process.platform !== "win32" }, () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "sealwire-dev-secret-"));
   try {
-    const directory = path.join(root, ".agent-relay");
-    const env = { RELAY_STATE_PATH: path.join(directory, "session.json") };
+    const directory = path.join(root, ".sealwire");
+    const env = { RELAY_STATE_DB: path.join(directory, "sealwire.db") };
     const secret = resolveDevBrokerTicketSecret(env);
     const keyPath = path.join(directory, "dev-broker-ticket.key");
     const original = readFileSync(keyPath);
@@ -98,12 +98,12 @@ test("Windows restricts existing development credentials without rotating them",
 test("public issuer credentials are private, persistent, and independent of ticket credentials", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "sealwire-dev-issuer-"));
   try {
-    const env = { RELAY_STATE_PATH: path.join(root, ".agent-relay", "session.json") };
+    const env = { RELAY_STATE_DB: path.join(root, ".sealwire", "sealwire.db") };
     const secret = resolveDevBrokerIssuerSecret(env);
     assert.equal(Buffer.from(secret, "base64").length, 48);
     assert.equal(resolveDevBrokerIssuerSecret(env), secret);
     assert.notEqual(resolveDevBrokerTicketSecret(env), secret);
-    const keyPath = path.join(root, ".agent-relay", "dev-broker-issuer.key");
+    const keyPath = path.join(root, ".sealwire", "dev-broker-issuer.key");
     assert.equal(readFileSync(keyPath, "utf8").trim(), secret);
     if (process.platform === "win32") {
       assertPrivateWindowsAcl(keyPath);
@@ -113,7 +113,7 @@ test("public issuer credentials are private, persistent, and independent of tick
     } else {
       assert.equal(statSync(keyPath).mode & 0o777, 0o600);
     }
-    const explicit = { RELAY_BROKER_PUBLIC_ISSUER_SECRET: "explicit-operator-issuer", RELAY_STATE_PATH: path.join(root, "unused", "session.json") };
+    const explicit = { RELAY_BROKER_PUBLIC_ISSUER_SECRET: "explicit-operator-issuer", RELAY_STATE_DB: path.join(root, "unused", "sealwire.db") };
     assert.equal(resolveDevBrokerIssuerSecret(explicit), explicit.RELAY_BROKER_PUBLIC_ISSUER_SECRET);
     assert.throws(() => statSync(path.join(root, "unused")), { code: "ENOENT" });
   } finally {
@@ -129,7 +129,7 @@ test("Windows protects the development key while preserving a shared state direc
     const before = snapshot();
     const keyPath = path.join(root, "dev-broker-ticket.key");
     writeFileSync(keyPath, "existing-operator-key\n");
-    const secret = resolveDevBrokerTicketSecret({ RELAY_STATE_PATH: path.join(root, "session.json") });
+    const secret = resolveDevBrokerTicketSecret({ RELAY_STATE_DB: path.join(root, "sealwire.db") });
     assert.equal(secret, "existing-operator-key");
     assertPrivateWindowsAcl(keyPath);
     assert.equal(snapshot(), before);
@@ -142,11 +142,26 @@ test("an explicitly configured broker secret is used without creating a state di
   const root = mkdtempSync(path.join(os.tmpdir(), "sealwire-dev-secret-"));
   try {
     const env = {
-      RELAY_STATE_PATH: path.join(root, "unused", "session.json"),
+      RELAY_STATE_DB: path.join(root, "unused", "sealwire.db"),
       RELAY_BROKER_TICKET_SECRET: "explicit-operator-credential",
     };
     assert.equal(resolveDevBrokerTicketSecret(env), env.RELAY_BROKER_TICKET_SECRET);
     assert.throws(() => statSync(path.join(root, "unused")), { code: "ENOENT" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Creating ~/.sealwire here, before the old state is moved, would leave a directory in
+// the way of `migrate-storage` moving ~/.agent-relay into its place.
+test("a dev launch stops while ~/.agent-relay still waits to be moved", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sealwire-dev-secret-legacy-"));
+  try {
+    const legacy = path.join(root, ".agent-relay");
+    execFileSync("mkdir", ["-p", legacy]);
+    writeFileSync(path.join(legacy, "session.json"), "{}");
+    assert.throws(() => resolveDevBrokerTicketSecret({ HOME: root }), /migrate-storage/);
+    assert.throws(() => statSync(path.join(root, ".sealwire")), { code: "ENOENT" });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

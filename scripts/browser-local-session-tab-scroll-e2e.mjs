@@ -120,7 +120,7 @@ async function run() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: path.join(tmp, "session.json"),
+    relayStateDb: path.join(tmp, "sealwire.db"),
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });
 

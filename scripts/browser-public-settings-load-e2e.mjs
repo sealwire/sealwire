@@ -143,7 +143,7 @@ async function main() {
 
   const relay = startPublicRelay({
     relayPort,
-    relayStatePath: path.join(stateDir, "session.json"),
+    relayStateDb: path.join(stateDir, "sealwire.db"),
     brokerPort,
     lanIp,
     brokerRoomId: BROKER_ROOM_ID,

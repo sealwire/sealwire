@@ -413,7 +413,7 @@ async function main() {
       HOME: homeDir,
     },
     relayPort,
-    relayStatePath: path.join(stateDir, "session.json"),
+    relayStateDb: path.join(stateDir, "sealwire.db"),
   });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
 

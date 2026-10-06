@@ -1737,3 +1737,42 @@ async fn reusing_an_action_id_for_other_content_does_not_overwrite_the_original(
     relay.expect_silence("surface-a", "op-once").await;
     assert_eq!(relay.starts().await, 1);
 }
+
+/// A device is told a write is done only once it is saved. Nothing else commits in this
+/// harness, so a row on disk when the result arrives was written by the write itself.
+#[tokio::test]
+async fn a_remote_write_is_on_disk_before_its_result() {
+    let mut relay = RelayUnderTest::start(&["surface-a"]).await;
+    let database = relay.workspace.path().join("sealwire.db");
+    relay
+        .relay
+        .write()
+        .await
+        .install_database(crate::usage::store::UsageStore::open(&database));
+    relay.hello("surface-a").await;
+    let mut claim = relay.claim("surface-a").await;
+    let create = relay.attempt(
+        &mut claim,
+        "op-project",
+        serde_json::json!({
+            "type": "project_action",
+            "input": {"action": "create", "name": "Saved from the phone"},
+        }),
+    );
+    relay.send_signed(&create).await;
+    let result = relay.expect_result("surface-a", "op-project").await;
+    assert_eq!(result["ok"], true, "{result}");
+
+    let saved: i64 = rusqlite::Connection::open(&database)
+        .expect("open")
+        .query_row(
+            "SELECT COUNT(*) FROM project WHERE body LIKE '%Saved from the phone%'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query");
+    assert_eq!(
+        saved, 1,
+        "the project must be in the database when the result arrives"
+    );
+}

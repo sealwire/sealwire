@@ -31,7 +31,7 @@ const USE_FAKE_PROVIDER = process.env.AGENT_PROVIDERS === "fake";
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-delete-e2e-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const codexHomeDir = await prepareSeededCodexHome("agent-relay-local-delete-codex-", {
     requireAuth: !USE_FAKE_PROVIDER,
   });
@@ -43,7 +43,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     codexHomeDir,
     extraEnv: USE_FAKE_PROVIDER ? { AGENT_PROVIDERS: "fake" } : {},
   });

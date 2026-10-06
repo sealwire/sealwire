@@ -26,12 +26,12 @@ const USE_FAKE_PROVIDER = process.env.AGENT_PROVIDERS === "fake";
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-local-e2e-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const cwdInput = toTildePath(ROOT);
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
   });
 
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);

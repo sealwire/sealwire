@@ -226,7 +226,7 @@ async function main() {
   await fs.mkdir(SHOT_DIR, { recursive: true });
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "scroll-shot-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const codexHomeDir = await prepareSeededCodexHome("scroll-shot-codex-", { requireAuth: false });
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "scroll-shot-workspace-"))
@@ -234,7 +234,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     codexHomeDir,
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });

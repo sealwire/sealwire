@@ -30,7 +30,7 @@ const base = `http://127.0.0.1:${port}`;
 const { command, args } = resolveRelayServerCommand();
 const relay = spawnManagedProcess("pi-live", command, args, {
   AGENT_PROVIDERS: "pi", BIND_HOST: "127.0.0.1", PORT: String(port),
-  RELAY_STATE_PATH: path.join(root, "relay", "session.json"),
+  RELAY_STATE_DB: path.join(root, "relay", "sealwire.db"),
   PI_CODING_AGENT_DIR: agent, PI_CODING_AGENT_SESSION_DIR: path.join(root, "sessions"),
   PI_OFFLINE: "1", PI_TELEMETRY: "0",
 }, { stripInherited: name => /^(RELAY_|SEALWIRE_|PI_|ANTHROPIC_|OPENAI_|GOOGLE_|GEMINI_|AWS_|AZURE_|GITHUB_|GH_TOKEN|COPILOT_|OPENROUTER_|XAI_|GROQ_|MISTRAL_)/.test(name) });

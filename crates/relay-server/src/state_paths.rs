@@ -1,27 +1,14 @@
-//! One shared state directory per machine — not one per launch directory.
+//! Where the relay keeps its state: one database per relay, shared by every launch
+//! directory.
 //!
-//! Every durable thing the relay owns (`session.json`, the public-broker
-//! registration/identity, the VAPID key) used to be resolved as
-//! `<cwd>/.agent-relay/<file>`. That made the *directory you happened to run
-//! from* the identity of your relay: `cd ~/proj-b && sealwire` silently opened
-//! a blank world — no threads, no projects, no paired phones, and a fresh VAPID
-//! key that invalidated every push subscription your phone already held.
+//! Everything durable the relay owns (sessions, projects, paired phones, tasks, the
+//! broker identity and the push key) lives in one SQLite file, by default
+//! `~/.sealwire/sealwire.db`. Anchoring it to the home directory keeps `cd ~/proj-b &&
+//! sealwire` from opening a blank relay; keeping the identity in the same file means it
+//! cannot be split from the state that depends on it. `RELAY_STATE_DB` names another
+//! database, which is how a scratch or test relay stays apart from the real one.
 //!
-//! So the default is anchored to the user's home directory
-//! (`~/.agent-relay/`), which does not move when you `cd`. Two rules keep the
-//! escape hatches honest:
-//!
-//! 1. An explicit path always wins (`RELAY_STATE_PATH`, and the per-file
-//!    `RELAY_BROKER_*_PATH` / `RELAY_VAPID_KEY_PATH` overrides) — that is how a
-//!    scratch or test relay stays isolated from the real one.
-//! 2. The sibling files follow whichever directory the *session file* lands in.
-//!    Pointing `RELAY_STATE_PATH` at a scratch directory therefore moves the
-//!    whole identity set together, instead of splitting a scratch session file
-//!    away from the real relay's broker identity and push key.
-//!
-//! Nothing here is workspace-scoped: the relay has always been multi-workspace
-//! (threads carry their own `cwd`, the sidebar groups by folder, Projects group
-//! across folders). The per-cwd state file was the odd one out.
+//! Provider caches (`acp-models-*.json`, `cursor-data/`, ...) sit beside the database.
 
 use std::{
     ffi::OsString,
@@ -29,13 +16,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use tracing::warn;
-
 /// Directory name for the shared (home-anchored) state directory.
-///
-/// An absent shared session file simply starts a fresh one — there is no
-/// migration path, by design.
-pub(crate) const STATE_DIR_NAME: &str = ".agent-relay";
+pub(crate) const STATE_DIR_NAME: &str = ".sealwire";
+pub(crate) const STATE_DB_FILE_NAME: &str = "sealwire.db";
+
+/// What older builds named the state directory, and the files they kept there. Read
+/// only by `migrate-storage` and by the startup check that refuses to start without it.
+// TODO(2026-12): remove with `migrate-storage`.
+pub(crate) const LEGACY_STATE_DIR_NAME: &str = ".agent-relay";
 pub(crate) const SESSION_FILE_NAME: &str = "session.json";
 pub(crate) const PUBLIC_BROKER_REGISTRATION_FILE: &str = "public-broker-registration.json";
 pub(crate) const PUBLIC_BROKER_IDENTITY_FILE: &str = "public-broker-identity.json";
@@ -43,6 +31,29 @@ pub(crate) const VAPID_KEY_FILE: &str = "vapid.key";
 pub(crate) const RELAY_CONTENT_IDENTITY_FILE: &str = "relay-content-identity.json";
 
 pub(crate) const STATE_PATH_ENV: &str = "RELAY_STATE_PATH";
+pub(crate) const STATE_DB_ENV: &str = "RELAY_STATE_DB";
+
+/// Settings that named a state file; the state is in the database now.
+const RETIRED_STATE_SETTINGS: [&str; 5] = [
+    STATE_PATH_ENV,
+    "RELAY_BROKER_IDENTITY_PATH",
+    "RELAY_BROKER_REGISTRATION_PATH",
+    "RELAY_CONTENT_IDENTITY_PATH",
+    "RELAY_VAPID_KEY_PATH",
+];
+
+pub(crate) fn refuse_retired_state_settings() -> Result<(), String> {
+    for name in RETIRED_STATE_SETTINGS {
+        if override_path(std::env::var_os(name)).is_some() {
+            return Err(format!(
+                "{name} is no longer used: relay state is kept in a database set by \
+                 {STATE_DB_ENV}. Import the old files once with `sealwire migrate-storage`, \
+                 then remove {name}."
+            ));
+        }
+    }
+    Ok(())
+}
 
 pub(crate) fn ensure_state_directory(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
@@ -113,78 +124,52 @@ fn session_file_within(
         Some(explicit) => cwd.join(explicit),
         None => home
             .unwrap_or(cwd)
-            .join(STATE_DIR_NAME)
+            .join(LEGACY_STATE_DIR_NAME)
             .join(SESSION_FILE_NAME),
     }
 }
 
-/// Where this process persists `session.json`: `RELAY_STATE_PATH` if set, else
-/// `~/.agent-relay/session.json`.
+/// Whether the session file is where older builds kept it by default, rather than
+/// somewhere `RELAY_STATE_PATH` named.
+pub(crate) fn session_file_is_default() -> bool {
+    override_path(std::env::var_os(STATE_PATH_ENV)).is_none()
+}
+
+/// The directory an older build used in place of `state_dir`, when `state_dir` is a
+/// `.sealwire` directory: `~/.agent-relay` beside `~/.sealwire`.
+pub(crate) fn legacy_state_dir_beside(state_dir: &Path) -> Option<PathBuf> {
+    (state_dir.file_name()? == STATE_DIR_NAME)
+        .then(|| state_dir.with_file_name(LEGACY_STATE_DIR_NAME))
+}
+
+/// Where an older build kept `session.json`: `RELAY_STATE_PATH` if set, else
+/// `~/.agent-relay/session.json`. Only the one-time import reads it.
 pub(crate) fn session_file_path(cwd: &Path) -> PathBuf {
     session_file_within(std::env::var_os(STATE_PATH_ENV), home_dir().as_deref(), cwd)
 }
 
-/// The directory holding `session.json` — the anchor every sibling identity
-/// file defaults into.
+fn state_db_within(override_value: Option<OsString>, home: Option<&Path>, cwd: &Path) -> PathBuf {
+    match override_path(override_value) {
+        Some(explicit) => cwd.join(explicit),
+        None => home
+            .unwrap_or(cwd)
+            .join(STATE_DIR_NAME)
+            .join(STATE_DB_FILE_NAME),
+    }
+}
+
+/// The relay's database: `RELAY_STATE_DB` if set, else `~/.sealwire/sealwire.db`.
+pub(crate) fn state_db_path(cwd: &Path) -> PathBuf {
+    state_db_within(std::env::var_os(STATE_DB_ENV), home_dir().as_deref(), cwd)
+}
+
+/// The directory holding the database, where provider caches and the identity
+/// files of older builds live.
 pub(crate) fn state_dir(cwd: &Path) -> PathBuf {
-    let session_file = session_file_path(cwd);
-    session_file
+    state_db_path(cwd)
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| cwd.join(STATE_DIR_NAME))
-}
-
-/// A file that lives next to `session.json` unless its own env var overrides
-/// it. `configured` is the already-read override value (each caller owns its
-/// own env var name, passed as `env_var` so a bad one can be named in the
-/// warning).
-pub(crate) fn sibling_state_file(
-    cwd: &Path,
-    env_var: &str,
-    configured: Option<OsString>,
-    file_name: &str,
-) -> PathBuf {
-    let state_dir = state_dir(cwd);
-    match override_path(configured) {
-        Some(explicit) => {
-            let resolved = cwd.join(&explicit);
-            if let Some(warning) = split_identity_warning(env_var, &resolved, &state_dir) {
-                warn!("{warning}");
-            }
-            resolved
-        }
-        None => state_dir.join(file_name),
-    }
-}
-
-/// The upgrade hazard a shared state directory creates for configs written
-/// against the old per-workspace default.
-///
-/// `RELAY_BROKER_REGISTRATION_PATH=.agent-relay/…` (the form the old
-/// `.env.example` showed, and which real `.env.*.local` files still carry)
-/// keeps resolving against the launch directory. If session.json has moved to
-/// the home directory and that identity file has not, the set is *split*:
-/// launching from another folder finds no registration, enrolls as a brand-new
-/// relay, and strands every device already paired with the old one.
-///
-/// The test is "does it land outside the state directory", NOT "is it
-/// relative". A wholly relative config (`scripts/restart-dev-cloud-pg.sh` sets
-/// a relative state path *and* relative broker paths) moves as one unit and is
-/// perfectly coherent — warning there would be a lie, and its advice would
-/// break that script's deliberate isolation.
-fn split_identity_warning(env_var: &str, resolved: &Path, state_dir: &Path) -> Option<String> {
-    if resolved.parent() == Some(state_dir) {
-        return None;
-    }
-    Some(format!(
-        "{env_var} points at {}, which is outside the shared state directory {} that session.json \
-         lives in — the relay's identity set is split across two places. Launching from a \
-         different directory can then fail to find it, enroll as a new relay, and orphan \
-         already-paired devices. Point it inside the state directory (or drop the override) \
-         unless you meant to run a separate relay identity.",
-        resolved.display(),
-        state_dir.display(),
-    ))
 }
 
 #[cfg(test)]
@@ -241,6 +226,10 @@ mod tests {
         home.join(STATE_DIR_NAME).join(file)
     }
 
+    fn legacy_home_anchored(home: &Path, file: &str) -> PathBuf {
+        home.join(LEGACY_STATE_DIR_NAME).join(file)
+    }
+
     #[test]
     fn the_launch_directory_does_not_change_the_session_file() {
         let home = Path::new("/home/dev");
@@ -248,7 +237,7 @@ mod tests {
         let from_b = session_file_within(None, Some(home), Path::new("/work/b"));
 
         assert_eq!(from_a, from_b);
-        assert_eq!(from_a, home_anchored(home, SESSION_FILE_NAME));
+        assert_eq!(from_a, legacy_home_anchored(home, SESSION_FILE_NAME));
     }
 
     #[test]
@@ -290,12 +279,12 @@ mod tests {
                 Some(home),
                 Path::new("/work/a")
             ),
-            home_anchored(home, SESSION_FILE_NAME),
+            legacy_home_anchored(home, SESSION_FILE_NAME),
         );
     }
 
-    // No `$HOME` at all (some containers): fall back to the old per-cwd
-    // behaviour rather than writing to `/.agent-relay` or failing to start.
+    // No `$HOME` at all (some containers): fall back to the launch directory
+    // rather than writing to `/.agent-relay` or failing to start.
     #[test]
     fn without_a_home_directory_it_falls_back_to_the_launch_directory() {
         assert_eq!(
@@ -304,74 +293,36 @@ mod tests {
         );
     }
 
-    // The upgrade hazard: a config written for the old per-workspace default
-    // (the form the old .env.example showed) keeps working, but only in the
-    // directory it was written for — session.json moved to the home directory
-    // and this file did not. Honour it, never silently.
     #[test]
-    fn an_identity_override_that_splits_the_set_is_warned_about() {
-        let warning = split_identity_warning(
-            "RELAY_BROKER_REGISTRATION_PATH",
-            Path::new("/work/a/.agent-relay/public-broker-registration.json"),
-            Path::new("/home/dev/.agent-relay"),
-        )
-        .expect("an override outside the state dir must warn");
-
-        assert!(
-            warning.contains("RELAY_BROKER_REGISTRATION_PATH"),
-            "{warning}"
-        );
-        assert!(
-            warning.contains("/work/a/.agent-relay/public-broker-registration.json"),
-            "the warning must show where it actually landed: {warning}"
-        );
-        assert!(
-            warning.contains("orphan already-paired devices"),
-            "the warning must state the consequence, not just the fact: {warning}"
-        );
-    }
-
-    // `scripts/restart-dev-cloud-pg.sh` sets a RELATIVE state path AND relative
-    // broker paths, so every file moves together with the launch directory: the
-    // set is NOT split. Warning here would fire twice on every dev start, and
-    // its advice ("drop the override") would break the very isolation that
-    // script exists to create.
-    #[test]
-    fn a_self_consistent_relative_config_is_not_warned_about() {
-        let state_dir = Path::new("/work/a/.agent-relay");
-        assert!(split_identity_warning(
-            "RELAY_BROKER_REGISTRATION_PATH",
-            Path::new("/work/a/.agent-relay/public-pg-broker-registration.json"),
-            state_dir,
-        )
-        .is_none());
-        assert!(split_identity_warning(
-            "RELAY_BROKER_IDENTITY_PATH",
-            Path::new("/work/a/.agent-relay/public-pg-broker-identity.json"),
-            state_dir,
-        )
-        .is_none());
-    }
-
-    // The default path is built by joining, never by an override — it must not
-    // trip the warning.
-    #[test]
-    fn the_default_sibling_path_is_silent_and_anchored_to_the_state_dir() {
-        let _lock = env_lock();
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("HOME", Some(home.path()));
-        let _state = EnvVarGuard::set(STATE_PATH_ENV, None);
-
+    fn the_old_directory_is_only_looked_for_beside_a_sealwire_directory() {
         assert_eq!(
-            sibling_state_file(
-                Path::new("/work/a"),
-                "RELAY_BROKER_IDENTITY_PATH",
-                None,
-                PUBLIC_BROKER_IDENTITY_FILE
+            legacy_state_dir_beside(Path::new("/home/dev/.sealwire")),
+            Some(PathBuf::from("/home/dev/.agent-relay"))
+        );
+        assert_eq!(legacy_state_dir_beside(Path::new("/tmp/scratch")), None);
+    }
+
+    #[test]
+    fn the_database_is_shared_across_launch_directories_unless_named() {
+        let home = Path::new("/home/dev");
+        let from_a = state_db_within(None, Some(home), Path::new("/work/a"));
+        assert_eq!(
+            from_a,
+            state_db_within(None, Some(home), Path::new("/work/b"))
+        );
+        assert_eq!(from_a, home_anchored(home, STATE_DB_FILE_NAME));
+        assert_eq!(
+            state_db_within(
+                Some(OsString::from("scratch/relay.db")),
+                Some(home),
+                Path::new("/work/a")
             ),
-            home.path()
-                .join(STATE_DIR_NAME)
-                .join(PUBLIC_BROKER_IDENTITY_FILE),
+            Path::new("/work/a/scratch/relay.db"),
+        );
+        assert_eq!(
+            state_db_within(Some(OsString::from("  ")), Some(home), Path::new("/work/a")),
+            from_a,
+            "a blank setting means unset"
         );
     }
 

@@ -44,7 +44,7 @@ const HOLD_THE_PICK_MS = 4000;
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-ask-user-click-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-ask-user-click-workspace-"))
   );
@@ -88,7 +88,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     extraEnv: {
       AGENT_PROVIDERS: "fake",
       ...fakeHarness.env,

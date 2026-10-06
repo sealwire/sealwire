@@ -40,7 +40,7 @@ pub(crate) struct PendingPairing {
     pub(crate) path_scope: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct PairedDevice {
     pub(crate) device_id: String,
     pub(crate) label: String,
@@ -54,6 +54,25 @@ pub(crate) struct PairedDevice {
     pub(crate) broker_join_ticket_expires_at: Option<u64>,
     #[serde(default)]
     pub(crate) path_scope: Vec<String>,
+}
+
+impl std::fmt::Debug for PairedDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairedDevice")
+            .field("device_id", &self.device_id)
+            .field("label", &self.label)
+            .field("payload_secret", &"<redacted>")
+            .field("device_verify_key", &self.device_verify_key)
+            .field("created_at", &self.created_at)
+            .field("last_seen_at", &self.last_seen_at)
+            .field("last_peer_id", &self.last_peer_id)
+            .field(
+                "broker_join_ticket_expires_at",
+                &self.broker_join_ticket_expires_at,
+            )
+            .field("path_scope", &self.path_scope)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1391,5 +1410,25 @@ mod tests {
                 .as_deref(),
             Some("ae:21:6c:2e:f5:24:7a:37")
         );
+    }
+
+    // The payload secret decrypts this phone's traffic; a debug print or log line
+    // of the device must not carry it.
+    #[test]
+    fn a_paired_device_never_prints_its_payload_secret() {
+        let device = super::PairedDevice {
+            device_id: "device-1".to_string(),
+            label: "phone".to_string(),
+            payload_secret: "s3cret-payload-value".to_string(),
+            device_verify_key: String::new(),
+            created_at: 0,
+            last_seen_at: None,
+            last_peer_id: None,
+            broker_join_ticket_expires_at: None,
+            path_scope: Vec::new(),
+        };
+        let printed = format!("{device:?}");
+        assert!(!printed.contains("s3cret-payload-value"), "{printed}");
+        assert!(printed.contains("device-1"), "{printed}");
     }
 }

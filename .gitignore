@@ -34,10 +34,14 @@ node_modules/
 
 # Local planning docs
 /markdown
+
+# Relay state and task-team worktrees. A dev relay keeps its database (with its
+# credentials) under /.sealwire; /.agent-relay is where older builds kept it.
+/.sealwire/
 /.agent-relay
 
 # Web-push VAPID private key material — never commit. The deployed key lives on
-# the Railway /data volume; the local one under /.agent-relay. Belt-and-suspenders.
+# the Railway /data volume. Belt-and-suspenders.
 *.key
 /data/
 

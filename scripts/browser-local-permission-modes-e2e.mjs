@@ -95,7 +95,7 @@ async function waitForNoPendingApproval(relayPort) {
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-perm-modes-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const bypassCwd = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-perm-bypass-"))
   );
@@ -105,7 +105,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     extraEnv: { AGENT_PROVIDERS: "fake", FAKE_PROVIDER_ENFORCE_APPROVALS: "1" },
   });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);

@@ -55,7 +55,7 @@ setInterval(() => {}, 1000);
     const env = {
       PATH: `${root}:/usr/bin:/bin`,
       HOME: root,
-      RELAY_STATE_PATH: path.join(root, ".agent-relay", "session.json"),
+      RELAY_STATE_DB: path.join(root, ".sealwire", "sealwire.db"),
       RELAY_BROKER_PUBLIC_POSTGRES_URL: "postgres://sealwire:test@postgres.example.test/sealwire",
       RELAY_DEV_SERVER_PORT: await freePort(),
       RELAY_DEV_BROKER_PORT: await freePort(),
@@ -89,7 +89,7 @@ setInterval(() => {}, 1000);
         assert.equal(captured.mode, "public");
         assert.equal(captured.postgres, env.RELAY_BROKER_PUBLIC_POSTGRES_URL);
         assert.equal(Buffer.from(captured.issuer, "base64").length, 48);
-        assert.equal(readFileSync(path.join(root, ".agent-relay", "dev-broker-issuer.key"), "utf8").trim(), captured.issuer);
+        assert.equal(readFileSync(path.join(root, ".sealwire", "dev-broker-issuer.key"), "utf8").trim(), captured.issuer);
         if (previous) assert.equal(captured.issuer, previous);
         previous = captured.issuer;
       } finally {

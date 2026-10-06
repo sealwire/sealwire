@@ -19,7 +19,6 @@
 //!     pruning the ones a push service reports `404`/`410 Gone`.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -51,7 +50,8 @@ const PUSH_RECORD_SIZE: u32 = 4096;
 
 /// Env override for the VAPID key location. Prefer an absolute path: a relative
 /// one re-anchors the key to the launch directory (see `state_paths`).
-const VAPID_KEY_PATH_ENV: &str = "RELAY_VAPID_KEY_PATH";
+/// The credential kind holding the VAPID private scalar.
+pub(crate) const VAPID_CREDENTIAL_KIND: &str = "vapid";
 
 /// Default VAPID `sub` contact. Overridable via `RELAY_VAPID_SUBJECT`.
 const DEFAULT_VAPID_SUBJECT: &str = "mailto:sealwire@localhost";
@@ -357,97 +357,47 @@ fn vapid_public_b64url(signing_key: &SigningKey) -> String {
     URL_SAFE_NO_PAD.encode(point.as_bytes())
 }
 
-/// Resolve the VAPID key path (env `RELAY_VAPID_KEY_PATH`, else next to the
-/// session file — `~/.agent-relay/vapid.key` by default). It must follow the
-/// session file rather than the launch directory: a regenerated key silently
-/// invalidates every push subscription a paired phone already holds.
-pub(crate) fn vapid_key_path(cwd: &Path) -> PathBuf {
-    crate::state_paths::sibling_state_file(
-        cwd,
-        VAPID_KEY_PATH_ENV,
-        std::env::var_os(VAPID_KEY_PATH_ENV),
-        crate::state_paths::VAPID_KEY_FILE,
-    )
-}
-
-/// Load the VAPID private scalar from `path`, generating + persisting one on
-/// first run. Stored as a base64url-encoded 32-byte scalar (not PEM — avoids the
-/// pkcs8 feature dance and is trivially round-trippable).
-pub fn load_or_generate_vapid(path: &Path) -> Result<VapidKeys, String> {
+/// Load the VAPID private scalar from the database, generating and saving one on first
+/// run. Stored base64url-encoded, the way older builds kept it in `vapid.key`.
+///
+/// A stored key that cannot be read is an error, never a reason to mint a new one:
+/// a rotated VAPID key silently breaks every push subscription a phone already holds.
+pub(crate) fn load_or_generate_vapid(
+    store: &crate::usage::store::UsageStore,
+) -> Result<VapidKeys, String> {
     let subject =
         std::env::var("RELAY_VAPID_SUBJECT").unwrap_or_else(|_| DEFAULT_VAPID_SUBJECT.to_string());
-
-    // Only a genuine "not found" means we should mint a new key. Any other read
-    // failure (permission, transient I/O, non-UTF-8, ...) must NOT fall through
-    // to regeneration: deleting or overwriting a key we merely failed to read
-    // would rotate the VAPID identity and silently break every existing push
-    // subscription. Surface it instead — the caller treats an error as "run
-    // without push" and leaves the on-disk key untouched.
-    match std::fs::File::open(path) {
-        Ok(mut file) => {
-            #[cfg(windows)]
-            (|| {
-                if let Some(parent) = path.parent() {
-                    crate::state_paths::ensure_state_directory(parent)?;
-                }
-                crate::windows_state_permissions::restrict_existing(path, false)
-            })()
-            .map_err(|error| {
-                format!(
-                    "failed to restrict VAPID key permissions {}: {error}",
-                    path.display()
+    let signing_key = store.with_connection(|conn| {
+        let tx = conn
+            .transaction()
+            .map_err(|error| format!("failed to read the VAPID key: {error}"))?;
+        let signing_key = match crate::state::read_credential(&tx, VAPID_CREDENTIAL_KIND, "")
+            .map_err(|error| format!("failed to read the VAPID key: {error}"))?
+        {
+            Some((stored, _)) => {
+                let scalar = b64url_decode(stored.trim())
+                    .map_err(|error| format!("failed to decode the stored VAPID key: {error}"))?;
+                SigningKey::from_slice(&scalar)
+                    .map_err(|error| format!("the stored VAPID key is invalid: {error}"))?
+            }
+            None => {
+                let signing_key = SigningKey::random(&mut OsRng);
+                crate::state::put_credential(
+                    &tx,
+                    VAPID_CREDENTIAL_KIND,
+                    "",
+                    &URL_SAFE_NO_PAD.encode(signing_key.to_bytes()),
+                    None,
+                    crate::state::unix_now(),
                 )
-            })?;
-            use std::io::Read as _;
-            let mut contents = String::new();
-            file.read_to_string(&mut contents).map_err(|error| {
-                format!("failed to read VAPID key at {}: {error}", path.display())
-            })?;
-            let scalar = b64url_decode(contents.trim())
-                .map_err(|e| format!("failed to decode VAPID key at {}: {e}", path.display()))?;
-            let signing_key = SigningKey::from_slice(&scalar)
-                .map_err(|e| format!("invalid VAPID key at {}: {e}", path.display()))?;
-            let public_b64url = vapid_public_b64url(&signing_key);
-            return Ok(VapidKeys {
-                signing_key,
-                public_b64url,
-                subject,
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "failed to read VAPID key at {}: {error}",
-                path.display()
-            ));
-        }
-    }
-
-    let signing_key = SigningKey::random(&mut OsRng);
-    let scalar = signing_key.to_bytes();
-    // Persist with an exclusive create (`create_new`): it writes only when the
-    // path is truly absent, so it refuses to follow a pre-planted symlink (an
-    // agent could dangle one here to redirect the private key outside the
-    // workspace), and — unlike a stale-leftover cleanup that unlinks what it
-    // finds — it never deletes or replaces an existing entry, which for
-    // permanent key material could destroy a still-valid key that appeared
-    // between the read above and this write.
-    let persisted = (|| {
-        use std::io::Write as _;
-        if let Some(parent) = path.parent() {
-            crate::state_paths::ensure_state_directory(parent)?;
-        }
-        let mut file = crate::instance_lock::create_new_private_file(path)?;
-        file.write_all(URL_SAFE_NO_PAD.encode(scalar).as_bytes())
-    })();
-    if let Err(error) = persisted {
-        warn!(
-            "failed to persist VAPID key to {}: {error}; push subscriptions will not survive restart",
-            path.display()
-        );
-    } else {
-        restrict_key_permissions(path);
-    }
+                .map_err(|error| format!("failed to save the VAPID key: {error}"))?;
+                signing_key
+            }
+        };
+        tx.commit()
+            .map_err(|error| format!("failed to save the VAPID key: {error}"))?;
+        Ok(signing_key)
+    })?;
     let public_b64url = vapid_public_b64url(&signing_key);
     Ok(VapidKeys {
         signing_key,
@@ -456,14 +406,39 @@ pub fn load_or_generate_vapid(path: &Path) -> Result<VapidKeys, String> {
     })
 }
 
-#[cfg(unix)]
-fn restrict_key_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+/// Copy an older build's `vapid.key` into `conn` (inside the caller's transaction).
+/// Returns the public key it holds, or `None` when there was no file.
+// TODO(2026-12): remove with `migrate-storage` once every relay has been imported.
+pub(crate) fn import_legacy_vapid_file(
+    conn: &rusqlite::Connection,
+    path: &std::path::Path,
+) -> Result<Option<String>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
+    };
+    let scalar = b64url_decode(text.trim())
+        .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
+    let signing_key = SigningKey::from_slice(&scalar)
+        .map_err(|error| format!("invalid VAPID key in {}: {error}", path.display()))?;
+    let encoded = URL_SAFE_NO_PAD.encode(signing_key.to_bytes());
+    crate::state::put_credential(
+        conn,
+        VAPID_CREDENTIAL_KIND,
+        "",
+        &encoded,
+        None,
+        crate::state::unix_now(),
+    )
+    .map_err(|error| format!("failed to save the VAPID key: {error}"))?;
+    let back = crate::state::read_credential(conn, VAPID_CREDENTIAL_KIND, "")
+        .map_err(|error| format!("failed to read back the VAPID key: {error}"))?;
+    if back.map(|(secret, _)| secret).as_deref() != Some(encoded.as_str()) {
+        return Err("the VAPID key read back differently than it was written".to_string());
+    }
+    Ok(Some(vapid_public_b64url(&signing_key)))
 }
-
-#[cfg(not(unix))]
-fn restrict_key_permissions(_path: &Path) {}
 
 // ---------------------------------------------------------------------------
 // Crypto: VAPID JWT (RFC 8292) + aes128gcm payload (RFC 8291 / RFC 8188)
@@ -783,57 +758,14 @@ mod tests {
             .collect()
     }
 
-    // The VAPID key IS the push identity: regenerating it silently invalidates
-    // every subscription a phone already holds. So it must not depend on the
-    // directory the relay was launched from, and it must travel with the
-    // session file when that is redirected — otherwise an isolated scratch
-    // relay would steal/rotate the real relay's push identity.
+    // The VAPID key IS the push identity: regenerating it silently invalidates every
+    // subscription a phone already holds, so a restart must find the same key.
     #[test]
-    fn vapid_key_is_shared_across_launch_directories() {
-        let _lock = crate::state_paths::env_lock();
-        let home = tempfile::tempdir().unwrap();
-        let _home = crate::state_paths::EnvVarGuard::set("HOME", Some(home.path()));
-        let _state = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", None);
-        let _key = crate::state_paths::EnvVarGuard::set("RELAY_VAPID_KEY_PATH", None);
-
-        assert_eq!(
-            vapid_key_path(Path::new("/tmp/workspace-a")),
-            vapid_key_path(Path::new("/tmp/workspace-b")),
-            "the VAPID key must not fork per launch directory — that silently kills every \
-             existing push subscription"
-        );
-        assert_eq!(
-            vapid_key_path(Path::new("/tmp/workspace-a")),
-            home.path().join(".agent-relay").join("vapid.key"),
-        );
-    }
-
-    // First run on a fresh machine: `~/.agent-relay/` does not exist yet, and
-    // nothing creates it before the key is minted (persistence only does its
-    // create_dir_all on the first debounced save, later). If the key fails to
-    // persist, the next start silently mints a DIFFERENT one — so every push
-    // subscription registered in the first session dies on the first restart.
-    #[test]
-    fn vapid_key_persists_on_a_machine_with_no_state_directory_yet() {
-        let _lock = crate::state_paths::env_lock();
-        let home = tempfile::tempdir().unwrap();
-        let _home = crate::state_paths::EnvVarGuard::set("HOME", Some(home.path()));
-        let _state = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", None);
-        let _key = crate::state_paths::EnvVarGuard::set("RELAY_VAPID_KEY_PATH", None);
-
-        let path = vapid_key_path(Path::new("/tmp/workspace-a"));
-        assert!(
-            !path.parent().unwrap().exists(),
-            "precondition: fresh machine"
-        );
-
-        let first = load_or_generate_vapid(&path).unwrap();
-        let second = load_or_generate_vapid(&path).unwrap();
-
-        assert!(
-            path.exists(),
-            "the VAPID key must be persisted, not just minted"
-        );
+    fn the_vapid_key_is_saved_once_and_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sealwire.db");
+        let first = load_or_generate_vapid(&crate::usage::store::UsageStore::open(&path)).unwrap();
+        let second = load_or_generate_vapid(&crate::usage::store::UsageStore::open(&path)).unwrap();
         assert_eq!(
             first.public_b64url(),
             second.public_b64url(),
@@ -842,23 +774,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn vapid_key_follows_an_explicit_state_path() {
-        let _lock = crate::state_paths::env_lock();
-        let home = tempfile::tempdir().unwrap();
-        let scratch = tempfile::tempdir().unwrap();
-        let _home = crate::state_paths::EnvVarGuard::set("HOME", Some(home.path()));
-        let _state = crate::state_paths::EnvVarGuard::set(
-            "RELAY_STATE_PATH",
-            Some(&scratch.path().join("scratch-session.json")),
-        );
-        let _key = crate::state_paths::EnvVarGuard::set("RELAY_VAPID_KEY_PATH", None);
-
-        assert_eq!(
-            vapid_key_path(Path::new("/tmp/workspace-a")),
-            scratch.path().join("vapid.key"),
-            "a redirected session file must take its sibling identity files with it"
-        );
+    fn test_vapid() -> VapidKeys {
+        let dir = tempfile::tempdir().unwrap();
+        load_or_generate_vapid(&crate::usage::store::UsageStore::open(
+            &dir.path().join("sealwire.db"),
+        ))
+        .expect("vapid")
     }
 
     #[test]
@@ -1145,10 +1066,7 @@ mod tests {
                 .insert("phone".to_string(), vec![sub("s1"), sub("s2")]);
         }
 
-        let dir = std::env::temp_dir().join(format!("vapid-race-{}", std::process::id()));
-        let path = dir.join("vapid.key");
-        let _ = std::fs::remove_dir_all(&dir);
-        let vapid = load_or_generate_vapid(&path).expect("vapid");
+        let vapid = test_vapid();
         let dispatcher = PushDispatcher {
             relay: relay.clone(),
             http: build_push_client(),
@@ -1157,7 +1075,6 @@ mod tests {
         dispatcher
             .handle(PushJob::new(PushKind::NeedsInput, "t1"))
             .await;
-        let _ = std::fs::remove_dir_all(&dir);
 
         let seen = seen.lock().unwrap().clone();
         assert!(
@@ -1271,8 +1188,7 @@ mod tests {
             guard.ensure_runtime_for_thread("t1").current_cwd = canonical(&session_dir);
         }
 
-        let vapid_dir = tempfile::TempDir::new().expect("vapid tempdir");
-        let vapid = load_or_generate_vapid(&vapid_dir.path().join("vapid.key")).expect("vapid");
+        let vapid = test_vapid();
         let dispatcher = PushDispatcher {
             relay: relay.clone(),
             http: build_push_client(),
@@ -1365,38 +1281,11 @@ mod tests {
 
     #[test]
     fn vapid_keygen_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("vapid-test-{}", std::process::id()));
-        let path = dir.join("vapid.key");
-        let _ = std::fs::remove_dir_all(&dir);
-        let first = load_or_generate_vapid(&path).expect("generate");
-        let second = load_or_generate_vapid(&path).expect("reload");
-        assert_eq!(first.public_b64url(), second.public_b64url());
+        let first = test_vapid();
         // public key is an uncompressed P-256 point: 65 bytes, 0x04 prefix.
         let raw = b64url_decode(first.public_b64url()).unwrap();
         assert_eq!(raw.len(), 65);
         assert_eq!(raw[0], 0x04);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_state_permissions_preserve_the_vapid_identity() {
-        use crate::windows_state_permissions::{assert_private_acl, make_world_readable};
-
-        let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join(".agent-relay");
-        let path = directory.join("vapid.key");
-        let first = load_or_generate_vapid(&path).unwrap();
-        assert_private_acl(&directory);
-        assert_private_acl(&path);
-        let original = std::fs::read(&path).unwrap();
-        make_world_readable(&directory);
-        make_world_readable(&path);
-        let second = load_or_generate_vapid(&path).unwrap();
-        assert_eq!(first.public_b64url(), second.public_b64url());
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        assert_private_acl(&directory);
-        assert_private_acl(&path);
     }
 
     // Test-only receiver side: ECDH + same derivation, then AES-128-GCM decrypt.
@@ -1504,69 +1393,42 @@ mod tests {
         assert_eq!(recovered, plaintext);
     }
 
-    // A workspace-write-sandboxed agent can't write outside the workspace on
-    // its own, but the relay (which isn't sandboxed) can. If `vapid.key` is
-    // pre-planted as a symlink to an external, not-yet-existing path, a plain
-    // write on first run would follow the dangling link and drop the private
-    // key at the attacker-chosen location. Creating the file exclusively must
-    // refuse the symlink rather than write through it.
-    #[cfg(unix)]
+    // A stored key that cannot be read is NOT missing: minting a new one would rotate
+    // the VAPID identity and silently break every existing push subscription.
     #[test]
-    fn load_or_generate_vapid_refuses_to_write_through_a_preplanted_symlink() {
+    fn a_stored_vapid_key_that_cannot_be_read_is_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let external = dir.path().join("stolen.key");
-        let key_path = dir.path().join("vapid.key");
-        std::os::unix::fs::symlink(&external, &key_path).unwrap();
-
-        // The dangling link means no key is readable yet, so this hits the
-        // generate-and-persist branch. The call still returns a usable
-        // in-memory key even when persistence is refused.
-        let keys = load_or_generate_vapid(&key_path).expect("in-memory key is returned");
-        assert!(!keys.public_b64url().is_empty());
+        let path = dir.path().join("sealwire.db");
+        let store = crate::usage::store::UsageStore::open(&path);
+        store
+            .with_connection(|conn| {
+                crate::state::put_credential(
+                    conn,
+                    VAPID_CREDENTIAL_KIND,
+                    "",
+                    "not base64 at all!",
+                    None,
+                    1,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .unwrap();
 
         assert!(
-            !external.exists(),
-            "the private key must not be written through the symlink to an external path"
+            load_or_generate_vapid(&store).is_err(),
+            "an unreadable key must surface, not silently regenerate"
         );
-    }
-
-    // A present-but-unreadable key (transient I/O, permission, ...) is NOT
-    // "missing": regenerating in that case would rotate the VAPID identity and
-    // silently break every existing push subscription. Only `NotFound` may lead
-    // to minting a new key; every other read error must leave the key on disk
-    // untouched.
-    #[cfg(unix)]
-    #[test]
-    fn load_or_generate_vapid_preserves_an_existing_key_that_cannot_be_read() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let key_path = dir.path().join("vapid.key");
-
-        // A real, previously-generated key.
-        let original = load_or_generate_vapid(&key_path).expect("first run generates a key");
-        let original_bytes = std::fs::read(&key_path).expect("key was persisted");
-
-        // Make it unreadable while the parent dir stays writable — so a
-        // delete/replace WOULD succeed if the code wrongly took that path.
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o000)).unwrap();
-
-        let result = load_or_generate_vapid(&key_path);
-
-        // Restore perms before any assertion can panic and skip cleanup.
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        assert!(
-            result.is_err(),
-            "a non-NotFound read error must surface, not silently regenerate"
-        );
+        let kept = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT secret FROM credential WHERE kind = ?1",
+                [VAPID_CREDENTIAL_KIND],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
         assert_eq!(
-            std::fs::read(&key_path).unwrap(),
-            original_bytes,
-            "an unreadable existing key must be preserved, not deleted/regenerated"
+            kept, "not base64 at all!",
+            "the stored key must be left as it was"
         );
-        // Once readable again, the SAME key still loads.
-        let reloaded = load_or_generate_vapid(&key_path).expect("original key reloads");
-        assert_eq!(reloaded.public_b64url(), original.public_b64url());
     }
 }

@@ -144,7 +144,7 @@ await fs.writeFile(path.join(root, "config", "opencode", "opencode.json"), JSON.
 await fs.writeFile(path.join(cwd, "opencode.json"), JSON.stringify({ model: "sealwire_test/second" }));
 const env = {
   AGENT_PROVIDERS: "opencode,fake", BIND_HOST: "127.0.0.1",
-  RELAY_STATE_PATH: path.join(root, "relay", "session.json"),
+  RELAY_STATE_DB: path.join(root, "relay", "sealwire.db"),
   XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: path.join(root, "data"),
   XDG_CACHE_HOME: path.join(root, "cache"), XDG_STATE_HOME: path.join(root, "state"),
   OPENCODE_DISABLE_CLAUDE_CODE: "true", OPENCODE_DISABLE_MODELS_FETCH: "true",

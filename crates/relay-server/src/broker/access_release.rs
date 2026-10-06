@@ -4,7 +4,7 @@
 //! prints refresh tokens or activation keys. Handles the cleanup-ambiguous
 //! post-strategy 503 via a secret-free pending-release marker.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
@@ -20,20 +20,19 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::activation::scrub_activation_env;
-use super::auth::{RELAY_BROKER_CONTROL_URL_ENV, RELAY_BROKER_REGISTRATION_PATH_ENV};
+use super::auth::RELAY_BROKER_CONTROL_URL_ENV;
 use super::lifecycle::{delete_registration_if_matches, BrokerLifecycleLock, RegistrationIdentity};
 use super::signed_control::{SignedControlError, SignedControlRequest, CONTROL_CHALLENGE_PATH};
+use super::stored_credentials;
 use super::{
-    load_public_relay_registration_raw, resolve_public_relay_registration_path,
-    PersistedPublicRelayRegistration, PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
+    load_public_relay_registration_raw, PersistedPublicRelayRegistration,
+    PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
 };
 
 const ACCESS_RELEASE_PATH: &str = "/api/public/relay/access/release";
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-const MAX_LOCAL_FILE_BYTES: usize = 256 * 1024;
 const PENDING_RELEASE_SCHEMA_VERSION: u32 = 1;
-const PENDING_RELEASE_FILE: &str = "public-broker-pending-release.json";
 /// Truncated one-way fingerprint length (hex chars). Not a full digest.
 const BEARER_FINGERPRINT_HEX_CHARS: usize = 16;
 
@@ -130,22 +129,18 @@ pub(crate) async fn release_cloud_access_from_env() -> ReleaseOutcome {
             return ReleaseOutcome::Failed(format!("failed to resolve current directory: {error}"))
         }
     };
-    let registration_path = resolve_public_relay_registration_path(
-        &cwd,
-        std::env::var(RELAY_BROKER_REGISTRATION_PATH_ENV).ok(),
-    );
-    let marker_path = pending_release_marker_path(&registration_path);
-
-    release_cloud_access(&control_url, &registration_path, &marker_path).await
+    let state_db = match crate::state::checked_state_db_path(&cwd) {
+        Ok(state_db) => state_db,
+        Err(error) => return ReleaseOutcome::Failed(error),
+    };
+    release_cloud_access(&control_url, &state_db).await
 }
 
 pub(crate) async fn release_cloud_access(
     expected_control_url: &str,
-    registration_path: &Path,
-    marker_path: &Path,
+    state_db: &Path,
 ) -> ReleaseOutcome {
-    release_cloud_access_after_acquire(expected_control_url, registration_path, marker_path, || {})
-        .await
+    release_cloud_access_after_acquire(expected_control_url, state_db, || {}).await
 }
 
 /// Same as [`release_cloud_access`], with a per-call hook invoked immediately
@@ -155,20 +150,19 @@ pub(crate) async fn release_cloud_access(
 /// [`release_cloud_access`].
 pub(crate) async fn release_cloud_access_after_acquire(
     expected_control_url: &str,
-    registration_path: &Path,
-    marker_path: &Path,
+    state_db: &Path,
     after_acquire: impl FnOnce(),
 ) -> ReleaseOutcome {
-    let _lifecycle = match BrokerLifecycleLock::acquire_for_registration(registration_path) {
+    let _lifecycle = match BrokerLifecycleLock::acquire_for_registration(state_db) {
         Ok(lock) => lock,
         Err(error) => return ReleaseOutcome::Failed(error),
     };
     after_acquire();
 
-    let persisted = match load_registration_for_release(registration_path, expected_control_url) {
+    let persisted = match load_registration_for_release(state_db, expected_control_url) {
         Ok(Some(persisted)) => persisted,
         Ok(None) => {
-            let _ = tokio::fs::remove_file(marker_path).await;
+            let _ = stored_credentials::clear_pending_release(state_db);
             return ReleaseOutcome::NotLinked;
         }
         Err(error) => return ReleaseOutcome::Failed(error),
@@ -176,7 +170,7 @@ pub(crate) async fn release_cloud_access_after_acquire(
 
     let expected_identity = RegistrationIdentity::from_persisted(&persisted, expected_control_url);
     let fingerprint = expected_identity.bearer_fingerprint.clone();
-    let existing_marker = match load_pending_release_marker(marker_path) {
+    let existing_marker = match load_pending_release_marker(state_db) {
         Ok(marker) => marker,
         Err(error) => return ReleaseOutcome::Failed(error),
     };
@@ -192,17 +186,11 @@ pub(crate) async fn release_cloud_access_after_acquire(
         Err(error) => return ReleaseOutcome::Failed(error),
     };
 
-    let identity_path =
-        registration_path.with_file_name(crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE);
-    let identity = match super::load_existing_public_relay_identity(
-        &identity_path,
-        expected_control_url,
-    )
-    .await
-    {
-        Ok(identity) => identity,
-        Err(error) => return ReleaseOutcome::Failed(error),
-    };
+    let identity =
+        match super::load_existing_public_relay_identity(state_db, expected_control_url).await {
+            Ok(identity) => identity,
+            Err(error) => return ReleaseOutcome::Failed(error),
+        };
     let request = AccessReleaseRequest {
         relay_id: persisted.relay_id.clone(),
         broker_room_id: persisted.broker_room_id.clone(),
@@ -218,18 +206,11 @@ pub(crate) async fn release_cloud_access_after_acquire(
 
     match result {
         Ok(()) => {
-            finish_confirmed_release(
-                registration_path,
-                marker_path,
-                &expected_identity,
-                ReleaseOutcome::Released,
-            )
-            .await
+            finish_confirmed_release(state_db, &expected_identity, ReleaseOutcome::Released).await
         }
         Err(ReleaseHttpError::Unauthorized) if marker_matches => {
             finish_confirmed_release(
-                registration_path,
-                marker_path,
+                state_db,
                 &expected_identity,
                 ReleaseOutcome::AlreadyReleased,
             )
@@ -246,7 +227,7 @@ pub(crate) async fn release_cloud_access_after_acquire(
                 broker_room_id: persisted.broker_room_id.clone(),
                 bearer_fingerprint: fingerprint.clone(),
             };
-            match save_pending_release_marker(marker_path, &marker).await {
+            match save_pending_release_marker(state_db, &marker).await {
                 Ok(()) => ReleaseOutcome::Failed(format!(
                     "{message} (access released remotely; local cleanup pending — re-run `sealwire cloud unbind`)"
                 )),
@@ -264,8 +245,7 @@ pub(crate) async fn release_cloud_access_after_acquire(
                     {
                         Ok(()) => {
                             finish_confirmed_release(
-                                registration_path,
-                                marker_path,
+                                state_db,
                                 &expected_identity,
                                 ReleaseOutcome::Released,
                             )
@@ -274,8 +254,7 @@ pub(crate) async fn release_cloud_access_after_acquire(
                         Err(ReleaseHttpError::Unauthorized) => {
                             // In-process post-strategy fact is known for this attempt.
                             finish_confirmed_release(
-                                registration_path,
-                                marker_path,
+                                state_db,
                                 &expected_identity,
                                 ReleaseOutcome::AlreadyReleased,
                             )
@@ -285,7 +264,7 @@ pub(crate) async fn release_cloud_access_after_acquire(
                             access_released: true,
                             ..
                         }) => {
-                            if save_pending_release_marker(marker_path, &marker)
+                            if save_pending_release_marker(state_db, &marker)
                                 .await
                                 .is_ok()
                             {
@@ -332,8 +311,8 @@ pub(crate) async fn release_cloud_access_after_acquire(
                             ReleaseOutcome::Failed(format!(
                                 "{message}; confirmation retry failed ({detail}); \
                                  failed to persist pending-release marker ({marker_error}). \
-                                 Registration preserved at {}. Re-run `sealwire cloud unbind`.",
-                                registration_path.display()
+                                 Registration preserved in {}. Re-run `sealwire cloud unbind`.",
+                                state_db.display()
                             ))
                         }
                     }
@@ -358,18 +337,17 @@ pub(crate) async fn release_cloud_access_after_acquire(
 }
 
 async fn finish_confirmed_release(
-    registration_path: &Path,
-    marker_path: &Path,
+    state_db: &Path,
     expected: &RegistrationIdentity,
     success: ReleaseOutcome,
 ) -> ReleaseOutcome {
-    match delete_registration_if_matches(registration_path, expected) {
+    match delete_registration_if_matches(state_db, expected) {
         Ok(true) => {
-            let _ = tokio::fs::remove_file(marker_path).await;
+            let _ = stored_credentials::clear_pending_release(state_db);
             success
         }
         Ok(false) => {
-            let _ = tokio::fs::remove_file(marker_path).await;
+            let _ = stored_credentials::clear_pending_release(state_db);
             ReleaseOutcome::Failed(
                 "remote release confirmed, but local registration was replaced or removed \
                  before deletion; left the newer cache untouched"
@@ -377,10 +355,9 @@ async fn finish_confirmed_release(
             )
         }
         Err(error) => ReleaseOutcome::Failed(format!(
-            "remote release confirmed but failed to remove local registration cache {}: {error}. \
-             Delete that file manually only if it still matches the released binding. \
-             Do not share or paste any tokens from that file.",
-            registration_path.display()
+            "remote release confirmed but failed to remove the local registration from {}: {error}. \
+             Re-run `sealwire cloud unbind`; do not share or paste anything from that database.",
+            state_db.display()
         )),
     }
 }
@@ -639,64 +616,25 @@ fn load_registration_for_release(
     Ok(Some(persisted))
 }
 
-fn pending_release_marker_path(registration_path: &Path) -> PathBuf {
-    registration_path
-        .parent()
-        .map(|parent| parent.join(PENDING_RELEASE_FILE))
-        .unwrap_or_else(|| PathBuf::from(PENDING_RELEASE_FILE))
-}
-
 fn bearer_fingerprint(token: &str) -> String {
     super::lifecycle::bearer_fingerprint(token)
 }
 
 async fn save_pending_release_marker(
-    path: &Path,
+    state_db: &Path,
     marker: &PendingReleaseMarker,
 ) -> Result<(), String> {
-    let Some(parent) = path.parent() else {
-        return Err("pending-release marker path must have a parent directory".to_string());
-    };
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    let payload = serde_json::to_vec_pretty(marker)
+    let payload = serde_json::to_string(marker)
         .map_err(|error| format!("failed to encode pending-release marker: {error}"))?;
-    let temporary_path = path.with_extension("tmp");
-    let write_path = temporary_path.clone();
-    let payload_clone = payload.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::instance_lock::write_new_exclusive_with_mode(
-            &write_path,
-            &payload_clone,
-            Some(0o600),
-        )
-    })
-    .await
-    .map_err(|error| format!("marker write task panicked: {error}"))?
-    .map_err(|error| format!("failed to write {}: {error}", temporary_path.display()))?;
-    tokio::fs::rename(&temporary_path, path)
-        .await
-        .map_err(|error| format!("failed to replace {}: {error}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    stored_credentials::write_pending_release(state_db, &payload)
 }
 
-fn load_pending_release_marker(path: &Path) -> Result<Option<PendingReleaseMarker>, String> {
-    let contents = read_local_file_bounded(path, MAX_LOCAL_FILE_BYTES)?;
-    let Some(contents) = contents else {
+fn load_pending_release_marker(state_db: &Path) -> Result<Option<PendingReleaseMarker>, String> {
+    let Some(contents) = stored_credentials::read_pending_release(state_db)? else {
         return Ok(None);
     };
-    let marker: PendingReleaseMarker = serde_json::from_slice(&contents).map_err(|error| {
-        format!(
-            "failed to decode pending-release marker {}: {error}",
-            path.display()
-        )
-    })?;
+    let marker: PendingReleaseMarker = serde_json::from_str(&contents)
+        .map_err(|error| format!("failed to decode pending-release marker: {error}"))?;
     if marker.schema_version != PENDING_RELEASE_SCHEMA_VERSION {
         return Err(format!(
             "unsupported pending-release marker schema {}",
@@ -704,38 +642,6 @@ fn load_pending_release_marker(path: &Path) -> Result<Option<PendingReleaseMarke
         ));
     }
     Ok(Some(marker))
-}
-
-fn read_local_file_bounded(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, String> {
-    use std::io::Read;
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => return Ok(None),
-        // Older kernels/libcs may surface ENOTDIR without NotADirectory.
-        Err(error) if error.raw_os_error() == Some(20) => return Ok(None),
-        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
-    };
-    if let Ok(meta) = file.metadata() {
-        if meta.len() > max_bytes as u64 {
-            return Err(format!("{} exceeds {max_bytes} bytes", path.display()));
-        }
-    }
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = file
-            .read(&mut chunk)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        if buf.len().saturating_add(n) > max_bytes {
-            return Err(format!("{} exceeds {max_bytes} bytes", path.display()));
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-    Ok(Some(buf))
 }
 
 /// Test helper: fingerprint is truncated and does not embed the raw token.
@@ -909,32 +815,51 @@ mod tests {
         (format!("http://{addr}"), state)
     }
 
-    fn write_reg(path: &Path, control_url: &str, token: &str) {
-        let identity_path = path.with_file_name(crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE);
+    /// The relay identity and a registration with `token`, as an enrolled relay has them.
+    fn write_reg(db: &Path, control_url: &str, token: &str) {
         let control = url::Url::parse(control_url).expect("control url");
-        let identity = serde_json::json!({
+        let identity_info = serde_json::json!({
             "schema_version": 1,
             "control_url": control.as_str(),
-            "relay_signing_seed": base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                [7_u8; 32],
-            ),
-        });
-        std::fs::write(
-            &identity_path,
-            serde_json::to_vec_pretty(&identity).expect("identity json"),
+        })
+        .to_string();
+        stored_credentials::write(
+            db,
+            stored_credentials::PUBLIC_RELAY_IDENTITY,
+            &base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7_u8; 32]),
+            Some(&identity_info),
         )
         .expect("identity should save");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let payload = serde_json::to_vec_pretty(&PersistedPublicRelayRegistration {
-            schema_version: PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
-            control_url: control_url.to_string(),
-            relay_id: "relay-1".into(),
-            broker_room_id: "room-1".into(),
-            relay_refresh_token: token.into(),
+        let registration_info = serde_json::json!({
+            "schema_version": PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
+            "control_url": control_url,
+            "relay_id": "relay-1",
+            "broker_room_id": "room-1",
         })
-        .unwrap();
-        std::fs::write(path, payload).unwrap();
+        .to_string();
+        stored_credentials::write(
+            db,
+            stored_credentials::PUBLIC_REGISTRATION,
+            token,
+            Some(&registration_info),
+        )
+        .expect("registration should save");
+    }
+
+    fn reg_exists(db: &Path) -> bool {
+        load_public_relay_registration_raw(db).unwrap().is_some()
+    }
+
+    fn identity_exists(db: &Path) -> bool {
+        stored_credentials::read(db, stored_credentials::PUBLIC_RELAY_IDENTITY)
+            .unwrap()
+            .is_some()
+    }
+
+    fn marker_exists(db: &Path) -> bool {
+        stored_credentials::read_pending_release(db)
+            .unwrap()
+            .is_some()
     }
 
     #[test]
@@ -950,28 +875,25 @@ mod tests {
     async fn release_success_deletes_registration_only() {
         let (origin, state) = spawn_mock("ok").await;
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "refresh-token-abc");
-        let identity = dir.path().join("public-broker-identity.json");
 
-        let outcome = release_cloud_access(&origin, &reg, &marker).await;
+        let outcome = release_cloud_access(&origin, &reg).await;
         assert_eq!(outcome, ReleaseOutcome::Released);
-        assert!(!reg.exists());
+        assert!(!reg_exists(&reg));
         assert!(
-            identity.exists(),
+            identity_exists(&reg),
             "unbind must not delete the relay identity"
         );
-        assert!(!marker.exists());
+        assert!(!marker_exists(&reg));
         assert_eq!(*state.calls.lock().unwrap(), 1);
     }
 
     #[tokio::test]
     async fn missing_registration_is_not_linked() {
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("missing.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
-        let outcome = release_cloud_access("http://127.0.0.1:9", &reg, &marker).await;
+        let reg = dir.path().join("sealwire.db");
+        let outcome = release_cloud_access("http://127.0.0.1:9", &reg).await;
         assert_eq!(outcome, ReleaseOutcome::NotLinked);
     }
 
@@ -979,12 +901,11 @@ mod tests {
     async fn wrong_origin_is_local_error_without_request() {
         let (origin, state) = spawn_mock("ok").await;
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, "https://other.example", "refresh-token-abc");
-        let outcome = release_cloud_access(&origin, &reg, &marker).await;
+        let outcome = release_cloud_access(&origin, &reg).await;
         assert!(matches!(outcome, ReleaseOutcome::Failed(_)));
-        assert!(reg.exists());
+        assert!(reg_exists(&reg));
         assert_eq!(*state.calls.lock().unwrap(), 0);
     }
 
@@ -992,28 +913,26 @@ mod tests {
     async fn pre_strategy_503_preserves_registration_without_marker() {
         let (origin, _state) = spawn_mock("pre_strategy_unavailable").await;
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "refresh-token-abc");
-        let outcome = release_cloud_access(&origin, &reg, &marker).await;
+        let outcome = release_cloud_access(&origin, &reg).await;
         assert!(matches!(outcome, ReleaseOutcome::Failed(_)));
-        assert!(reg.exists());
-        assert!(!marker.exists());
+        assert!(reg_exists(&reg));
+        assert!(!marker_exists(&reg));
     }
 
     #[tokio::test]
     async fn post_strategy_503_commits_marker_then_401_converges() {
         let (origin, state) = spawn_mock("cleanup_uncertain").await;
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "refresh-token-abc");
 
-        let first = release_cloud_access(&origin, &reg, &marker).await;
+        let first = release_cloud_access(&origin, &reg).await;
         assert!(matches!(first, ReleaseOutcome::Failed(_)));
-        assert!(reg.exists());
-        assert!(marker.exists());
-        let loaded = load_pending_release_marker(&marker).unwrap().unwrap();
+        assert!(reg_exists(&reg));
+        assert!(marker_exists(&reg));
+        let loaded = load_pending_release_marker(&reg).unwrap().unwrap();
         assert_eq!(
             loaded.bearer_fingerprint,
             bearer_fingerprint("refresh-token-abc")
@@ -1023,47 +942,44 @@ mod tests {
             .contains("refresh-token"));
 
         *state.mode.lock().unwrap() = "unauthorized";
-        let second = release_cloud_access(&origin, &reg, &marker).await;
+        let second = release_cloud_access(&origin, &reg).await;
         assert_eq!(second, ReleaseOutcome::AlreadyReleased);
-        assert!(!reg.exists());
-        assert!(!marker.exists());
+        assert!(!reg_exists(&reg));
+        assert!(!marker_exists(&reg));
     }
 
     #[tokio::test]
     async fn first_401_without_marker_preserves_registration() {
         let (origin, _state) = spawn_mock("unauthorized").await;
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "refresh-token-abc");
-        let outcome = release_cloud_access(&origin, &reg, &marker).await;
+        let outcome = release_cloud_access(&origin, &reg).await;
         assert!(matches!(outcome, ReleaseOutcome::Failed(_)));
-        assert!(reg.exists());
-        assert!(!marker.exists());
+        assert!(reg_exists(&reg));
+        assert!(!marker_exists(&reg));
     }
 
     #[tokio::test]
     async fn redirect_is_refused() {
         let (origin, _state) = spawn_mock("redirect").await;
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "refresh-token-abc");
-        let outcome = release_cloud_access(&origin, &reg, &marker).await;
+        let outcome = release_cloud_access(&origin, &reg).await;
         assert!(matches!(outcome, ReleaseOutcome::Failed(msg) if msg.contains("redirect")));
-        assert!(reg.exists());
+        assert!(reg_exists(&reg));
     }
 
     #[tokio::test]
     async fn released_false_preserves_registration() {
         let (origin, _state) = spawn_mock("not_released").await;
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "refresh-token-abc");
-        let outcome = release_cloud_access(&origin, &reg, &marker).await;
+        let outcome = release_cloud_access(&origin, &reg).await;
         assert!(matches!(outcome, ReleaseOutcome::Failed(msg) if msg.contains("released=true")));
-        assert!(reg.exists());
+        assert!(reg_exists(&reg));
     }
 
     #[tokio::test]
@@ -1071,13 +987,12 @@ mod tests {
         for mode in ["forbidden", "rate"] {
             let (origin, _state) = spawn_mock(mode).await;
             let dir = tempfile::tempdir().unwrap();
-            let reg = dir.path().join("public-broker-registration.json");
-            let marker = dir.path().join(PENDING_RELEASE_FILE);
+            let reg = dir.path().join("sealwire.db");
             write_reg(&reg, &origin, "refresh-token-abc");
-            let outcome = release_cloud_access(&origin, &reg, &marker).await;
+            let outcome = release_cloud_access(&origin, &reg).await;
             assert!(matches!(outcome, ReleaseOutcome::Failed(_)), "{mode}");
-            assert!(reg.exists(), "{mode}");
-            assert!(!marker.exists(), "{mode}");
+            assert!(reg_exists(&reg), "{mode}");
+            assert!(!marker_exists(&reg), "{mode}");
         }
     }
 
@@ -1106,12 +1021,11 @@ mod tests {
         });
         let origin = format!("http://{addr}");
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "refresh-token-abc");
-        let outcome = release_cloud_access(&origin, &reg, &marker).await;
+        let outcome = release_cloud_access(&origin, &reg).await;
         assert!(matches!(outcome, ReleaseOutcome::Failed(msg) if msg.contains("exceeded")));
-        assert!(reg.exists());
+        assert!(reg_exists(&reg));
     }
 
     #[tokio::test]
@@ -1138,32 +1052,33 @@ mod tests {
         });
         let origin = format!("http://{addr}");
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "refresh-token-abc");
         TEST_RELEASE_TIMEOUT.with(|cell| cell.set(Some(Duration::from_millis(50))));
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(2),
-            release_cloud_access(&origin, &reg, &marker),
-        )
-        .await
-        .expect("test must finish quickly");
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(2), release_cloud_access(&origin, &reg))
+                .await
+                .expect("test must finish quickly");
         TEST_RELEASE_TIMEOUT.with(|cell| cell.set(None));
         assert!(matches!(outcome, ReleaseOutcome::Failed(_)));
-        assert!(reg.exists());
+        assert!(reg_exists(&reg));
     }
 
     #[tokio::test]
     async fn marker_write_failure_preserves_registration_without_deleting() {
         let (origin, _state) = spawn_mock("cleanup_uncertain").await;
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        // Make marker path unwritable by pointing at a file-as-directory parent.
-        let blocker = dir.path().join("not-a-dir");
-        std::fs::write(&blocker, b"x").unwrap();
-        let marker = blocker.join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "refresh-token-abc");
-        let outcome = release_cloud_access(&origin, &reg, &marker).await;
+        rusqlite::Connection::open(&reg)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse_marker BEFORE INSERT ON meta
+                 WHEN NEW.key = 'public_pending_release'
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let outcome = release_cloud_access(&origin, &reg).await;
         assert!(
             matches!(outcome, ReleaseOutcome::Failed(ref msg) if msg.contains("Registration was preserved") || msg.contains("Registration preserved")),
             "got: {outcome:?}"
@@ -1173,24 +1088,9 @@ mod tests {
             "must not claim ordinary re-run alone converges; got: {outcome:?}"
         );
         assert!(
-            reg.exists(),
+            reg_exists(&reg),
             "must not delete registration when cleanup is unconfirmed"
         );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn pending_marker_is_mode_0600() {
-        let (origin, _state) = spawn_mock("cleanup_uncertain").await;
-        let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
-        write_reg(&reg, &origin, "refresh-token-abc");
-        let _ = release_cloud_access(&origin, &reg, &marker).await;
-        assert!(marker.exists());
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
     }
 
     #[test]
@@ -1229,17 +1129,16 @@ mod tests {
         });
         let origin = format!("http://{addr}");
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "refresh-token-abc");
-        let outcome = release_cloud_access(&origin, &reg, &marker).await;
+        let outcome = release_cloud_access(&origin, &reg).await;
         match outcome {
             ReleaseOutcome::Failed(msg) => {
                 assert!(!msg.contains(secret), "got: {msg}");
             }
             other => panic!("expected Failed, got {other:?}"),
         }
-        assert!(reg.exists());
+        assert!(reg_exists(&reg));
     }
 
     #[tokio::test]
@@ -1277,16 +1176,13 @@ mod tests {
         });
         let origin = format!("http://{addr}");
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
-        let marker = dir.path().join(PENDING_RELEASE_FILE);
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, &origin, "token-a-old");
 
         let reg_clone = reg.clone();
-        let marker_clone = marker.clone();
         let origin_clone = origin.clone();
-        let release_task = tokio::spawn(async move {
-            release_cloud_access(&origin_clone, &reg_clone, &marker_clone).await
-        });
+        let release_task =
+            tokio::spawn(async move { release_cloud_access(&origin_clone, &reg_clone).await });
 
         // Wait until unbind has loaded A and is blocked in HTTP.
         tokio::task::spawn_blocking(move || {
@@ -1302,10 +1198,12 @@ mod tests {
             matches!(outcome, ReleaseOutcome::Failed(ref msg) if msg.contains("replaced") || msg.contains("newer")),
             "got: {outcome:?}"
         );
-        assert!(reg.exists(), "newer registration must survive stale unbind");
-        let raw = std::fs::read_to_string(&reg).unwrap();
-        assert!(raw.contains("token-b-new"));
-        assert!(!raw.contains("token-a-old"));
+        assert!(
+            reg_exists(&reg),
+            "newer registration must survive stale unbind"
+        );
+        let kept = load_public_relay_registration_raw(&reg).unwrap().unwrap();
+        assert_eq!(kept.relay_refresh_token, "token-b-new");
     }
 
     #[test]

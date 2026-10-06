@@ -69,7 +69,7 @@ async function main() {
     const relayPort = await getFreePort();
     relay = startLocalRelay({
       relayPort,
-      relayStatePath: path.join(stateDir, "session.json"),
+      relayStateDb: path.join(stateDir, "sealwire.db"),
       extraEnv: { AGENT_PROVIDERS: "cursor", CURSOR_CONFIG_DIR: cursorConfigDir },
     });
     await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);

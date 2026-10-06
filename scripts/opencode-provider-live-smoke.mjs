@@ -54,7 +54,7 @@ try {
   const { command, args } = resolveRelayServerCommand();
   relay = spawnManagedProcess("opencode-live-smoke", command, args, {
     AGENT_PROVIDERS: "opencode", BIND_HOST: "127.0.0.1", PORT: String(port),
-    RELAY_STATE_PATH: path.join(root, "relay", "session.json"),
+    RELAY_STATE_DB: path.join(root, "relay", "sealwire.db"),
     XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: path.join(root, "data"),
     XDG_CACHE_HOME: path.join(root, "cache"), XDG_STATE_HOME: path.join(root, "state"),
     OPENCODE_DISABLE_CLAUDE_CODE: "true", OPENCODE_CONFIG_CONTENT: "{}",

@@ -13,7 +13,10 @@ const DEV_SHELL_ENV = {
   RELAY_BROKER_IDENTITY_PATH: "/home/dev/.agent-relay/broker-identity.json",
   RELAY_DEV_SERVER_PORT: "8787",
   RELAY_DEV_LOCALHOST_ONLY: "1",
+  RELAY_STATE_DB: "/home/dev/.sealwire/sealwire.db",
+  // Retired settings a long-lived shell may still carry; the relay refuses to start on them.
   RELAY_STATE_PATH: "/home/dev/.agent-relay/session.json",
+  RELAY_VAPID_KEY_PATH: "/home/dev/.agent-relay/vapid.key",
 };
 
 // Launches through the real startLocalRelay -> spawnManagedProcess path, with a
@@ -49,13 +52,13 @@ async function launchedEnv(options) {
   return JSON.parse(stdout);
 }
 
-test("a local relay does not inherit the dev shell's broker identity or state path", async () => {
-  const env = await launchedEnv({ relayPort: 45123, relayStatePath: "/tmp/e2e-isolated/session.json" });
+test("a local relay does not inherit the dev shell's broker identity or state database", async () => {
+  const env = await launchedEnv({ relayPort: 45123, relayStateDb: "/tmp/e2e-isolated/sealwire.db" });
 
-  for (const name of Object.keys(DEV_SHELL_ENV).filter((key) => key !== "RELAY_STATE_PATH")) {
+  for (const name of Object.keys(DEV_SHELL_ENV).filter((key) => key !== "RELAY_STATE_DB")) {
     assert.equal(env[name], undefined, `${name} must not leak into the test relay`);
   }
-  assert.equal(env.RELAY_STATE_PATH, "/tmp/e2e-isolated/session.json");
+  assert.equal(env.RELAY_STATE_DB, "/tmp/e2e-isolated/sealwire.db");
   assert.equal(env.PORT, "45123");
   assert.equal(env.LOCAL_RELAY_TEST_ORDINARY, "kept", "unrelated variables are still inherited");
 });
@@ -63,7 +66,7 @@ test("a local relay does not inherit the dev shell's broker identity or state pa
 test("broker settings a test passes explicitly still reach the local relay", async () => {
   const env = await launchedEnv({
     relayPort: 45124,
-    relayStatePath: "/tmp/e2e-isolated/session.json",
+    relayStateDb: "/tmp/e2e-isolated/sealwire.db",
     extraEnv: {
       AGENT_PROVIDERS: "fake",
       RELAY_BROKER_URL: "ws://127.0.0.1:45999",

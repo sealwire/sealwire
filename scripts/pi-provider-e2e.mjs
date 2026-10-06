@@ -158,7 +158,7 @@ async function boot() {
   const { command, args } = resolveRelayServerCommand();
   relay = spawnManagedProcess("pi-relay", command, args, {
     AGENT_PROVIDERS: "pi", BIND_HOST: "127.0.0.1", PORT: String(port),
-    RELAY_STATE_PATH: path.join(root, "relay", "session.json"), PI_CODING_AGENT_DIR: agent,
+    RELAY_STATE_DB: path.join(root, "relay", "sealwire.db"), PI_CODING_AGENT_DIR: agent,
     PI_CODING_AGENT_SESSION_DIR: path.join(root, "sessions"),
     PI_OFFLINE: "1", PI_TELEMETRY: "0",
     CLAUDE_WORKER_PATH: path.join(mcpDir, "worker.mjs"),

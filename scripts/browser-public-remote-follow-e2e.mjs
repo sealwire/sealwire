@@ -83,7 +83,7 @@ async function main() {
   const relayStateDir = await fs.mkdtemp(
     path.join(os.tmpdir(), "agent-relay-public-remote-follow-")
   );
-  const relayStatePath = path.join(relayStateDir, "session.json");
+  const relayStateDb = path.join(relayStateDir, "sealwire.db");
   const brokerStatePath = path.join(relayStateDir, "public-control.json");
   const codexHomeDir = await prepareSeededCodexHome("agent-relay-public-remote-follow-codex-", {
     requireAuth: !USE_FAKE_PROVIDER,
@@ -126,7 +126,7 @@ async function main() {
 
   const relay = startPublicRelay({
     relayPort,
-    relayStatePath,
+    relayStateDb,
     brokerPort,
     lanIp,
     brokerRoomId: BROKER_ROOM_ID,

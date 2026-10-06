@@ -277,7 +277,7 @@ async function waitForRowCount(page, expected, why) {
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-search-filter-e2e-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const codexHomeDir = await prepareSeededCodexHome("agent-relay-search-filter-codex-", {
     requireAuth: false,
   });
@@ -286,7 +286,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     codexHomeDir,
     extraEnv: { AGENT_PROVIDERS: "fake", FAKE_PROVIDER_ENFORCE_APPROVALS: "1" },
   });

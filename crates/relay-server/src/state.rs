@@ -1,4 +1,5 @@
 pub(crate) mod app;
+mod core_store;
 mod delegation;
 mod goal;
 mod handover;
@@ -23,6 +24,11 @@ pub(crate) use self::app::ThreadWorkspaceError;
 pub(crate) use self::app::TranscriptReadError;
 pub(crate) use self::app::REVIEW_LOCKED_THREAD_MSG;
 pub use self::app::{AppState, ApprovalError, AskUserAnswerError};
+pub(crate) use self::core_store::{
+    checked_state_db_path, count_credentials, delete_credential, import_legacy_session,
+    open_state_database, peek_core_origin, put_credential, read_credential, read_meta, write_meta,
+    CommittedCore, DEVICE_PAYLOAD_SECRET, ENTITY_TABLES as CORE_ENTITY_TABLES, META_CORE_ORIGIN,
+};
 #[cfg(test)]
 pub(crate) use self::relay::relay_boot_id;
 pub(crate) use self::relay::relay_clock_ms;
@@ -34,14 +40,15 @@ pub(crate) use self::relay::{
     HandoverMark, InjectedMessage, InjectionTag, MessageAnchor, ReviewMark,
 };
 pub(crate) use self::relay::{
-    load_or_generate_vapid, next_relay_ingress, parse_ask_user_questions, thread_status_is_working,
-    vapid_key_path, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult, ClaimChallenge,
-    DeviceRecord, IssuedClaimChallenge, PairedDevice, PendingApproval, PendingAskUserQuestion,
-    PendingPairingResult, PendingTranscriptDelta, ProviderEventSession, PushDispatcher,
-    PushSubscription, PushSubscriptionInput, RelayState, RemoteActionReplayDecision,
-    RemoteActionWait, RemoteActionWaitSource, RequestAdmission, RequestClass, RequestSessionGrant,
-    ReservationToken, ReviewerThread, SessionBinding, SignedRequestFacts, ThreadSessionSettings,
-    TranscriptDeltaKind, TurnFailureKind, TurnOutcome, WaitOutcome, MAX_REVIEWERS_PER_PARENT,
+    import_legacy_vapid_file, load_or_generate_vapid, next_relay_ingress, parse_ask_user_questions,
+    thread_status_is_working, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult,
+    ClaimChallenge, DeviceRecord, IssuedClaimChallenge, PairedDevice, PendingApproval,
+    PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta, ProviderEventSession,
+    PushDispatcher, PushSubscription, PushSubscriptionInput, RelayState,
+    RemoteActionReplayDecision, RemoteActionWait, RemoteActionWaitSource, RequestAdmission,
+    RequestClass, RequestSessionGrant, ReservationToken, ReviewerThread, SessionBinding,
+    SignedRequestFacts, ThreadSessionSettings, TranscriptDeltaKind, TurnFailureKind, TurnOutcome,
+    WaitOutcome, MAX_REVIEWERS_PER_PARENT,
 };
 // `PushKind` is referenced only by cross-module tests (codex/claude handler tests
 // assert an Error push); gate the re-export so non-test builds don't warn.
@@ -99,18 +106,6 @@ pub const CONTROLLER_LEASE_SECS: u64 = 15;
 pub const STALE_TURN_PROGRESS_TIMEOUT_SECS: u64 = 600;
 const MAX_LOG_LINES: usize = 200;
 const PERSISTED_STATE_VERSION: u32 = 2;
-
-/// The absolute-ish path this process would persist its session state to,
-/// resolved the exact same way `AppState::new` resolves it (`RELAY_STATE_PATH`
-/// env override, else the shared `~/.agent-relay/session.json`). Exposed so `main`
-/// can compute a settings fingerprint and check for an already-running
-/// instance *before* paying for `AppState::new()`'s full async init.
-pub(crate) fn resolved_state_path() -> PathBuf {
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    persistence::PersistenceStore::resolve(&cwd)
-        .path()
-        .to_path_buf()
-}
 
 /// Shared session-settings invariants for the test harness.
 ///

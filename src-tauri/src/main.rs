@@ -882,57 +882,28 @@ fn relay_env(
         "PATH",
         expanded_path(bundled_node.as_ref().and_then(|node| node.parent())),
     );
-    // TODO(shared-state): the CLI relay now keeps its state in ONE shared place
-    // per machine (`~/.agent-relay/`, see `relay-server`'s `state_paths` module)
-    // instead of one set per launch directory. The desktop app is still on its
-    // own `desktop-*` set under the picked workspace, so running the app and
-    // `npx sealwire` gives you two separate worlds (different threads, projects,
-    // paired devices, push key).
+    // TODO(shared-state): the CLI relay keeps its state in ONE database per machine
+    // (`~/.sealwire/sealwire.db`, see `relay-server`'s `state_paths` module). The
+    // desktop app still has its own `desktop.db` under the picked workspace, so running
+    // the app and `npx sealwire` gives you two separate worlds (different threads,
+    // projects, paired devices, push key).
     //
-    // Unifying them is NOT just dropping the `desktop-` prefixes. One relay per
-    // state file is enforced by a real lock (`instance_lock`), and this launcher
-    // reacts to a busy port by picking a free one and spawning a SECOND relay
-    // (`pick_port`, below). Point both at one state file and that second relay
-    // gets refused by the lock and exits — surfacing only as a stderr line in
-    // the log panel, i.e. "the app just doesn't start" with no explanation.
+    // Unifying them is NOT just pointing both at one database. One relay per database
+    // is enforced by a real lock (`instance_lock`), and this launcher reacts to a busy
+    // port by picking a free one and spawning a SECOND relay (`pick_port`, below). Point
+    // both at one database and that second relay gets refused by the lock and exits —
+    // surfacing only as a stderr line in the log panel, i.e. "the app just doesn't
+    // start" with no explanation.
     //
-    // So the prerequisite is making this launcher ATTACH to an already-running
-    // relay (drive the existing port as a client) instead of spawning its own,
-    // and only then sharing the state path. Until that exists, keep the
-    // deliberate split below.
+    // So the prerequisite is making this launcher ATTACH to an already-running relay
+    // (drive the existing port as a client) instead of spawning its own, and only then
+    // sharing the database. Until that exists, keep the deliberate split below.
     upsert_env(
         &mut envs,
-        "RELAY_STATE_PATH",
+        "RELAY_STATE_DB",
         workspace
-            .join(".agent-relay")
-            .join("desktop-session.json")
-            .display()
-            .to_string(),
-    );
-    upsert_env(
-        &mut envs,
-        "RELAY_BROKER_REGISTRATION_PATH",
-        workspace
-            .join(".agent-relay")
-            .join("desktop-public-broker-registration.json")
-            .display()
-            .to_string(),
-    );
-    upsert_env(
-        &mut envs,
-        "RELAY_BROKER_IDENTITY_PATH",
-        workspace
-            .join(".agent-relay")
-            .join("desktop-public-broker-identity.json")
-            .display()
-            .to_string(),
-    );
-    upsert_env(
-        &mut envs,
-        "RELAY_VAPID_KEY_PATH",
-        workspace
-            .join(".agent-relay")
-            .join("desktop-vapid.key")
+            .join(".sealwire")
+            .join("desktop.db")
             .display()
             .to_string(),
     );
@@ -1088,7 +1059,7 @@ fn ensure_workspace(workspace: &Path) -> Result<(), String> {
             workspace.display()
         ));
     }
-    fs::create_dir_all(workspace.join(".agent-relay"))
+    fs::create_dir_all(workspace.join(".sealwire"))
         .map_err(|error| format!("failed to create workspace state directory: {error}"))
 }
 

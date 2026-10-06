@@ -31,6 +31,7 @@ fn health_response_only_exposes_launch_id_when_the_launcher_supplies_one() {
         service: "relay-server",
         provider: "fake".to_string(),
         launch_id: None,
+        storage_error: None,
     })
     .expect("health response should serialize");
     assert_eq!(without_launch_id.get("launch_id"), None);
@@ -40,6 +41,7 @@ fn health_response_only_exposes_launch_id_when_the_launcher_supplies_one() {
         service: "relay-server",
         provider: "fake".to_string(),
         launch_id: Some("launch-123".to_string()),
+        storage_error: None,
     })
     .expect("health response should serialize");
     assert_eq!(

@@ -13,6 +13,7 @@ import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { startLocalSession } from "./e2e/harness/local-session.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import { stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
+import { importLegacySession } from "./e2e/harness/state-db.mjs";
 
 const TIMEOUT_MS = 45000;
 const THREAD_ID = "thread-toolcalls-repro";
@@ -109,15 +110,17 @@ async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "seedtc-"));
   const ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "seedtc-ws-")));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
+  const legacySessionPath = path.join(stateDir, "seed-session.json");
   const seedPath = path.join(stateDir, "seed.json");
 
-  await fs.writeFile(statePath, JSON.stringify({
+  await fs.writeFile(legacySessionPath, JSON.stringify({
     schema_version: 2, active_thread_id: THREAD_ID, active_controller_device_id: null,
     active_controller_last_seen_at: null, current_status: "idle", active_flags: [],
     current_cwd: ws, model: "fake-echo", approval_policy: "never", sandbox: "workspace-write",
     reasoning_effort: "medium", allowed_roots: [ws], device_records: {}, paired_devices: {},
   }, null, 2));
+  importLegacySession({ sessionPath: legacySessionPath, relayStateDb: statePath });
   await fs.writeFile(seedPath, JSON.stringify(buildSeed(), null, 2));
   const liveScenarios = Object.fromEntries(
     Array.from({ length: LIVE_SESSION_COUNT }, (_, index) => [
@@ -137,7 +140,7 @@ async function main() {
   });
 
   const relay = startLocalRelay({
-    relayPort, relayStatePath: statePath,
+    relayPort, relayStateDb: statePath,
     extraEnv: {
       AGENT_PROVIDERS: "fake",
       FAKE_PROVIDER_SEED_PATH: seedPath,

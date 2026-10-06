@@ -12,8 +12,8 @@
 # and auto-started. Point at your own Postgres instead by exporting
 # RELAY_BROKER_PUBLIC_POSTGRES_URL before running.
 #
-# Local-public relay state is kept in .agent-relay/public-pg-* so it does not
-# collide with the remote-public caches used by restart-dev-cloud.sh.
+# Local-public relay state is kept in .sealwire/public-pg.db so it does not
+# collide with the relay restart-dev-cloud.sh runs against the real Cloud.
 
 set -eu
 
@@ -74,16 +74,14 @@ export RELAY_BROKER_PUBLIC_POSTGRES_URL="$PG_URL"
 export RELAY_BROKER_USAGE_EVENTS_POSTGRES_URL="${RELAY_BROKER_USAGE_EVENTS_POSTGRES_URL:-$PG_URL}"
 export RELAY_BROKER_BANNED_IPS_POSTGRES_URL="${RELAY_BROKER_BANNED_IPS_POSTGRES_URL:-$PG_URL}"
 
-# Relay: enroll against the LOCAL broker; keep local-public caches separate from
-# the remote-public ones (.agent-relay/public-broker-*).
+# Relay: enroll against the LOCAL broker, with its own database so its broker identity
+# stays apart from the one enrolled with the real Cloud.
 #
 # RELAY_BROKER_CONTROL_URL is intentionally NOT forced: the relay derives it from
 # the broker ws URL (http(s)://<same host:port>), which dev-full.mjs sets to
 # 127.0.0.1 in localhost mode and the detected LAN IP in LAN mode — so phone/LAN
 # pairing points at the right host. Export it yourself only to override.
-export RELAY_BROKER_REGISTRATION_PATH="${RELAY_BROKER_REGISTRATION_PATH:-.agent-relay/public-pg-broker-registration.json}"
-export RELAY_BROKER_IDENTITY_PATH="${RELAY_BROKER_IDENTITY_PATH:-.agent-relay/public-pg-broker-identity.json}"
-export RELAY_STATE_PATH="${RELAY_STATE_PATH:-.agent-relay/public-pg-session.json}"
+export RELAY_STATE_DB="${RELAY_STATE_DB:-.sealwire/public-pg.db}"
 
 # LAN by default so phones on the same network can pair; pass --local (or set
 # RELAY_DEV_LOCALHOST_ONLY=1) to bind localhost-only.

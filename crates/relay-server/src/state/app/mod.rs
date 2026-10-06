@@ -37,15 +37,15 @@ use crate::{
     },
 };
 
-use super::persistence::{spawn_persistence_task, PersistedRelayState, PersistenceStore};
+use super::persistence::{spawn_core_commit_task, PersistedRelayState};
 use super::{
     expire_controller_if_needed, load_or_generate_vapid, non_empty, normalize_allowed_roots,
     normalize_cwd, require_device_id, short_device_id, sort_threads_by_recency,
-    thread_status_is_working, unix_now, vapid_key_path, BrokerPendingMessage,
-    CachedRemoteActionResult, ClaimChallenge, IssuedClaimChallenge, PendingPairingResult,
-    PushDispatcher, PushSubscriptionInput, RelayState, RemoteActionReplayDecision,
-    RequestAdmission, RequestSessionGrant, SecurityProfile, SignedRequestFacts, WaitOutcome,
-    WorkspaceScope, DEFAULT_EFFORT, DEFAULT_MODEL, STALE_TURN_PROGRESS_TIMEOUT_SECS,
+    thread_status_is_working, unix_now, BrokerPendingMessage, CachedRemoteActionResult,
+    ClaimChallenge, IssuedClaimChallenge, PendingPairingResult, PushDispatcher,
+    PushSubscriptionInput, RelayState, RemoteActionReplayDecision, RequestAdmission,
+    RequestSessionGrant, SecurityProfile, SignedRequestFacts, WaitOutcome, WorkspaceScope,
+    DEFAULT_EFFORT, DEFAULT_MODEL, STALE_TURN_PROGRESS_TIMEOUT_SECS,
 };
 
 /// Drive the server-side push attention tracker once per (debounced) state
@@ -531,11 +531,14 @@ impl AppState {
             .map_err(|error| format!("failed to resolve current directory: {error}"))?
             .canonicalize()
             .map_err(|error| format!("failed to canonicalize current directory: {error}"))?;
-        let persistence = PersistenceStore::resolve(&cwd);
-        let restored_state = persistence.load().await.map_err(|error| {
+        // Everything durable is read, reconciled and written back, and the revision
+        // clock reserved, before any provider or client can reach this state.
+        let db_path = crate::state_paths::state_db_path(&cwd);
+        let store = super::core_store::open_state_database(&db_path)?;
+        let restored_state = super::core_store::load(&store).map_err(|error| {
             format!(
                 "failed to load relay state from {}: {error}",
-                persistence.path().display()
+                db_path.display()
             )
         })?;
         let (change_tx, _) = watch::channel(0_u64);
@@ -545,50 +548,29 @@ impl AppState {
             security,
         )));
 
-        // Install the database beside session.json. Best-effort by
-        // construction: a failure degrades to `enabled: false` on /api/usage and
-        // never blocks boot (see `crate::usage::store`).
         {
             let mut relay = relay.write().await;
-            let path = crate::usage::store::database_path(persistence.path());
-            relay.install_database(crate::usage::store::UsageStore::open(&path));
-        }
-
-        if let Some(ref persisted) = restored_state {
-            let mut relay = relay.write().await;
-            relay.apply_persisted(persisted);
-            relay.push_log(
-                "info",
-                format!(
-                    "Loaded persisted relay state from {}.",
-                    persistence.path().display()
-                ),
-            );
-            relay.notify();
-        }
-
-        // Reserve the transcript clock on disk BEFORE anything can issue a revision.
-        //
-        // The headroom in `PersistedRelayState::from_relay` only protects the run
-        // that wrote it. Without this, a relay that restores, hands out revisions,
-        // and then dies before its own first debounced save leaves the file still
-        // holding the PREVIOUS run's value — so the next start reads the same number
-        // and hands the same revisions out a second time. Awaited, and ahead of
-        // `spawn_providers`, so the file leads before any event can arrive.
-        //
-        // Best-effort: a relay that cannot write its state file still has to run.
-        if restored_state.is_some() {
-            let reserved = {
-                let relay = relay.read().await;
-                PersistedRelayState::from_relay(&relay)
-            };
-            if let Err(error) = persistence.save(&reserved).await {
-                let mut relay = relay.write().await;
+            relay.install_database(store);
+            if let Some(ref persisted) = restored_state {
+                relay.apply_persisted(persisted);
                 relay.push_log(
-                    "warn",
-                    format!("failed to reserve transcript clock on startup: {error}"),
+                    "info",
+                    format!("Loaded relay state from {}.", db_path.display()),
                 );
+                relay.notify();
             }
+            relay.reserve_transcript_clock().map_err(|error| {
+                format!(
+                    "failed to reserve transcript revisions in {}: {error}",
+                    db_path.display()
+                )
+            })?;
+            relay.commit_core().map_err(|error| {
+                format!(
+                    "failed to save the restored relay state to {}: {error}",
+                    db_path.display()
+                )
+            })?;
         }
 
         {
@@ -597,13 +579,17 @@ impl AppState {
         }
 
         let (providers, provider_status_base) = spawn_providers(relay.clone()).await;
-        spawn_persistence_task(relay.clone(), change_tx.subscribe(), persistence.clone());
+        spawn_core_commit_task(relay.clone(), change_tx.subscribe());
 
         // Web Push: load/generate the VAPID keypair, install the dispatcher, and
         // feed the snapshot stream to the attention tracker so a closed remote PWA
         // still gets needs-input / completed / error notifications. Failure here is
         // non-fatal — the relay just runs without push.
-        match load_or_generate_vapid(&vapid_key_path(&cwd)) {
+        let vapid = {
+            let relay = relay.read().await;
+            load_or_generate_vapid(&relay.usage_store)
+        };
+        match vapid {
             Ok(vapid) => {
                 let public_key = vapid.public_b64url().to_string();
                 let push_tx = PushDispatcher::spawn(relay.clone(), vapid);
@@ -738,6 +724,18 @@ impl AppState {
         crate::broker::spawn_broker_task(state.clone(), broker_startup).await?;
 
         Ok(state)
+    }
+
+    /// Save every durable change made so far. A request that changed state calls this
+    /// before replying, so "done" means it is on disk.
+    pub(crate) async fn commit_core(&self) -> Result<(), String> {
+        let capture = self.relay.read().await.capture_core();
+        capture.map_or(Ok(()), super::core_store::CoreCapture::commit)
+    }
+
+    /// Why the last save of the relay's state failed, if the latest one did.
+    pub(crate) async fn storage_failure(&self) -> Option<String> {
+        self.relay.read().await.usage_store.core_failure()
     }
 
     pub async fn snapshot(&self) -> SessionSnapshot {

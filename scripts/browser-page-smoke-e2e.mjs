@@ -49,14 +49,14 @@ const PAGES = [
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-page-smoke-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
 
   // Use the in-binary fake provider so startup never waits on codex/claude
   // binaries (which don't exist in CI). The relay initializes providers before
   // it binds its HTTP port, so without this the health endpoint never comes up.
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });
 

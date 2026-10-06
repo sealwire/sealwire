@@ -158,7 +158,7 @@ async function main() {
   const brokerPort = await getFreePort();
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-rename-"));
-  const relayStatePath = path.join(stateDir, "session.json");
+  const relayStateDb = path.join(stateDir, "sealwire.db");
   const brokerStatePath = path.join(stateDir, "public-control.json");
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-rename-workspace-"))
@@ -176,7 +176,7 @@ async function main() {
 
   const relay = startPublicRelay({
     relayPort,
-    relayStatePath,
+    relayStateDb,
     brokerPort,
     lanIp,
     brokerRoomId: BROKER_ROOM_ID,

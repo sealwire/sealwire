@@ -26,7 +26,6 @@ use super::signed_control::{SignedControlError, SignedControlRequest, CONTROL_CH
 pub(crate) const RELAY_BROKER_CONTROL_URL_ENV: &str = "RELAY_BROKER_CONTROL_URL";
 pub(crate) const RELAY_BROKER_RELAY_ID_ENV: &str = "RELAY_BROKER_RELAY_ID";
 pub(crate) const RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV: &str = "RELAY_BROKER_RELAY_REFRESH_TOKEN";
-pub(crate) const RELAY_BROKER_REGISTRATION_PATH_ENV: &str = "RELAY_BROKER_REGISTRATION_PATH";
 pub(crate) const RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV: &str = "RELAY_BROKER_DEVICE_JOIN_TTL_SECS";
 
 const CONTROL_PLANE_TIMEOUT: Duration = Duration::from_secs(30);

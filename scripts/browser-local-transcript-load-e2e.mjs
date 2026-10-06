@@ -41,7 +41,7 @@ const LOCAL_TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-transcript-load-e2e-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const codexHomeDir = await prepareSeededCodexHome("agent-relay-transcript-load-codex-", {
     requireAuth: false,
   });
@@ -51,7 +51,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     codexHomeDir,
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });

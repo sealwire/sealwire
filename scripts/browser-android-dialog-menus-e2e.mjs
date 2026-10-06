@@ -203,7 +203,7 @@ async function main() {
   const relay = startLocalRelay({
     extraEnv: { AGENT_PROVIDERS: "fake,codex,claude" },
     relayPort,
-    relayStatePath: path.join(stateDir, "session.json"),
+    relayStateDb: path.join(stateDir, "sealwire.db"),
   });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
 

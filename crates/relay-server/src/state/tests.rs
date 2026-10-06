@@ -12,10 +12,7 @@ use crate::{
     provider::ThreadSyncData,
 };
 
-use super::{
-    persistence::{PersistedRelayState, PersistenceStore},
-    *,
-};
+use super::{persistence::PersistedRelayState, *};
 
 const TEST_VERIFY_KEY_B64: &str = "dGVzdC12ZXJpZnkta2V5";
 
@@ -168,7 +165,6 @@ async fn test_broker_config(
         Some(peer_id.to_string()),
         None,
         Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
-        None,
         None,
         None,
         None,
@@ -4182,40 +4178,27 @@ fn filter_deleted_threads_hides_locally_purged_threads() {
     assert_eq!(filtered[0].id, "thread-keep");
 }
 
-#[tokio::test]
-async fn persistence_store_round_trips_to_disk() {
-    let unique = unique_test_dir_name();
-    let directory = std::env::temp_dir().join(unique);
-    let path = directory.join("session.json");
-    let store = PersistenceStore::from_path(path.clone());
+#[test]
+fn core_state_round_trips_through_the_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sealwire.db");
     let persisted = test_persisted_state();
+    super::core_store::commit(&crate::usage::store::UsageStore::open(&path), &persisted)
+        .expect("state should save");
 
-    store.save(&persisted).await.expect("state should save");
-    let saved_json: serde_json::Value = serde_json::from_slice(
-        &tokio::fs::read(&path)
-            .await
-            .expect("saved state file should read"),
-    )
-    .expect("saved state should be valid json");
-    assert!(
-        saved_json.get("transcript").is_none(),
-        "transcript is provider/cache data and should not be persisted in session.json"
-    );
-    assert!(
-        saved_json.get("logs").is_none(),
-        "logs are runtime UI cache and should not be persisted in session.json"
-    );
-
-    let loaded = store
-        .load()
-        .await
+    let loaded = super::core_store::load(&crate::usage::store::UsageStore::open(&path))
         .expect("state should load")
         .expect("state should exist");
 
+    assert_eq!(
+        super::core_store::rows_of(&loaded).unwrap(),
+        super::core_store::rows_of(&persisted).unwrap(),
+        "every durable field must come back as it was saved"
+    );
     assert_eq!(loaded.active_thread_id, persisted.active_thread_id);
     assert_eq!(
-        loaded.active_controller_device_id,
-        persisted.active_controller_device_id
+        loaded.active_controller_device_id, None,
+        "a 15 s controller lease never outlives a restart, so it is not saved"
     );
     assert_eq!(
         loaded
@@ -4229,51 +4212,120 @@ async fn persistence_store_round_trips_to_disk() {
             DEFAULT_MODEL
         )
     );
-
-    tokio::fs::remove_dir_all(&directory)
-        .await
-        .expect("temp persisted state directory should be removable");
 }
 
-#[tokio::test]
-async fn persistence_store_loads_legacy_state_without_thread_settings() {
-    let unique = unique_test_dir_name();
-    let directory = std::env::temp_dir().join(unique);
-    let path = directory.join("session.json");
-    let store = PersistenceStore::from_path(path.clone());
+/// Imports a session file the way `migrate-storage` does, into a fresh database.
+fn import_session_json(json: serde_json::Value) -> Result<crate::usage::store::UsageStore, String> {
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::usage::store::UsageStore::open(&directory.keep().join("sealwire.db"));
+    store.with_connection(|conn| {
+        super::core_store::import_legacy_session(conn, &serde_json::to_vec(&json).unwrap())
+            .map(|_| ())
+    })?;
+    Ok(store)
+}
 
-    tokio::fs::create_dir_all(&directory)
-        .await
-        .expect("temp persisted state directory should exist");
-    tokio::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema_version": PERSISTED_STATE_VERSION,
-            "active_thread_id": "thread-legacy",
-            "active_controller_device_id": null,
-            "active_controller_last_seen_at": null,
-            "current_status": "idle",
-            "active_flags": [],
-            "current_cwd": "/tmp/project",
-            "model": DEFAULT_MODEL,
-            "approval_policy": "bypass",
-            "sandbox": "danger-full-access",
-            "reasoning_effort": "high",
-            "allowed_roots": [],
-            "device_records": {},
-            "paired_devices": {},
-            "transcript": [],
-            "logs": []
-        }))
-        .expect("json should serialize"),
-    )
-    .await
-    .expect("legacy state file should write");
+// Captures are written outside the relay lock, so a later one can land first. The
+// earlier one must then write nothing, or it would put a change back.
+#[test]
+fn an_older_capture_landing_last_does_not_undo_a_newer_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sealwire.db");
+    let store = crate::usage::store::UsageStore::open(&path);
+    let older = super::core_store::CoreCapture::new(&store, test_persisted_state());
+    let mut changed = test_persisted_state();
+    changed.projects.insert(
+        "p1".to_string(),
+        crate::protocol::ProjectView {
+            id: "p1".to_string(),
+            name: "Made after the older capture".to_string(),
+            instructions: None,
+        },
+    );
+    let newer = super::core_store::CoreCapture::new(&store, changed);
 
-    let loaded = store
-        .load()
-        .await
-        .expect("legacy state should load")
+    newer.commit().expect("newer");
+    older.commit().expect("older");
+
+    let saved: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM project WHERE key = 'p1'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(saved, 1, "the newer state must stay on disk");
+}
+
+// A save that fails is reported until one succeeds, and the change it carried is
+// written by the next commit rather than forgotten.
+#[test]
+fn a_failed_commit_is_reported_and_retried_by_the_next_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sealwire.db");
+    let store = crate::usage::store::UsageStore::open(&path);
+    super::core_store::commit(&store, &test_persisted_state()).expect("first save");
+    let refuse = rusqlite::Connection::open(&path).unwrap();
+    refuse
+        .execute_batch(
+            "CREATE TRIGGER refuse_projects BEFORE INSERT ON project
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    let mut changed = test_persisted_state();
+    changed.projects.insert(
+        "p1".to_string(),
+        crate::protocol::ProjectView {
+            id: "p1".to_string(),
+            name: "Saved later".to_string(),
+            instructions: None,
+        },
+    );
+
+    assert!(super::core_store::commit(&store, &changed).is_err());
+    assert!(
+        store
+            .core_failure()
+            .is_some_and(|error| error.contains("disk full")),
+        "{:?}",
+        store.core_failure()
+    );
+
+    refuse
+        .execute_batch("DROP TRIGGER refuse_projects;")
+        .unwrap();
+    super::core_store::commit(&store, &changed).expect("the next save");
+    assert_eq!(store.core_failure(), None);
+    let saved: i64 = refuse
+        .query_row("SELECT COUNT(*) FROM project WHERE key = 'p1'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(saved, 1);
+}
+
+#[test]
+fn an_imported_session_without_thread_settings_backfills_the_active_thread() {
+    let store = import_session_json(serde_json::json!({
+        "schema_version": PERSISTED_STATE_VERSION,
+        "active_thread_id": "thread-legacy",
+        "active_controller_device_id": null,
+        "active_controller_last_seen_at": null,
+        "current_status": "idle",
+        "active_flags": [],
+        "current_cwd": "/tmp/project",
+        "model": DEFAULT_MODEL,
+        "approval_policy": "bypass",
+        "sandbox": "danger-full-access",
+        "reasoning_effort": "high",
+        "allowed_roots": [],
+        "device_records": {},
+        "paired_devices": {},
+        "transcript": [],
+        "logs": []
+    }))
+    .expect("an older session file should import");
+    let loaded = super::core_store::load(&store)
+        .expect("imported state should load")
         .expect("state should exist");
 
     assert!(loaded.thread_settings.is_empty());
@@ -4293,57 +4345,35 @@ async fn persistence_store_loads_legacy_state_without_thread_settings() {
             .expect("legacy active thread should be backfilled"),
         ThreadSessionSettings::new("bypass", "danger-full-access", "high", DEFAULT_MODEL)
     );
-
-    tokio::fs::remove_dir_all(&directory)
-        .await
-        .expect("temp persisted state directory should be removable");
 }
 
-#[tokio::test]
-async fn persistence_store_rejects_old_schema_version() {
-    let unique = unique_test_dir_name();
-    let directory = std::env::temp_dir().join(unique);
-    let path = directory.join("session.json");
-    let store = PersistenceStore::from_path(path.clone());
+#[test]
+fn an_import_refuses_an_old_schema_version() {
+    let error = import_session_json(serde_json::json!({
+        "schema_version": 1,
+        "active_thread_id": null,
+        "active_controller_device_id": null,
+        "active_controller_last_seen_at": null,
+        "current_status": "idle",
+        "active_flags": [],
+        "current_cwd": "/tmp/project",
+        "model": DEFAULT_MODEL,
+        "approval_policy": DEFAULT_APPROVAL_POLICY,
+        "sandbox": DEFAULT_SANDBOX,
+        "reasoning_effort": DEFAULT_EFFORT,
+        "allowed_roots": [],
+        "device_records": {},
+        "paired_devices": {},
+        "transcript": [],
+        "logs": []
+    }))
+    .err()
+    .expect("old schema version should be rejected");
 
-    tokio::fs::create_dir_all(&directory)
-        .await
-        .expect("temp persisted state directory should exist");
-    tokio::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema_version": 1,
-            "active_thread_id": null,
-            "active_controller_device_id": null,
-            "active_controller_last_seen_at": null,
-            "current_status": "idle",
-            "active_flags": [],
-            "current_cwd": "/tmp/project",
-            "model": DEFAULT_MODEL,
-            "approval_policy": DEFAULT_APPROVAL_POLICY,
-            "sandbox": DEFAULT_SANDBOX,
-            "reasoning_effort": DEFAULT_EFFORT,
-            "allowed_roots": [],
-            "device_records": {},
-            "paired_devices": {},
-            "transcript": [],
-            "logs": []
-        }))
-        .expect("json should serialize"),
-    )
-    .await
-    .expect("old state file should write");
-
-    let error = store
-        .load()
-        .await
-        .expect_err("old schema version should be rejected");
-
-    assert!(error.contains("unsupported persisted state version: 1"));
-
-    tokio::fs::remove_dir_all(&directory)
-        .await
-        .expect("temp persisted state directory should be removable");
+    assert!(
+        error.contains("unsupported persisted state version: 1"),
+        "{error}"
+    );
 }
 
 #[test]

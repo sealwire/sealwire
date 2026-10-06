@@ -27,7 +27,7 @@ const HOSTED_PUBLIC_BROKER_ORIGIN = "wss://app.sealwire.dev";
 const defaultPort = "8787";
 const defaultHost = "127.0.0.1";
 const LAUNCH_ID_ENV = "SEALWIRE_LAUNCH_ID";
-const KNOWN_COMMANDS = new Set(["local", "cloud"]);
+const KNOWN_COMMANDS = new Set(["local", "cloud", "migrate-storage"]);
 /** Preferred generic automation input for cloud activation (consumed by cloud-activate). */
 const CLOUD_ACCESS_KEY_ENV = "SEALWIRE_CLOUD_ACCESS_KEY";
 const CLOUD_ACCESS_KEY_FILE_ENV = "SEALWIRE_CLOUD_ACCESS_KEY_FILE";
@@ -54,6 +54,15 @@ if (args.cloud && args.noBroker) {
     "sealwire: `cloud` cannot be combined with `local`/`--no-broker`; pick one."
   );
   process.exit(2);
+}
+
+if (args.finish && args.command !== "migrate-storage") {
+  console.error("sealwire: `--finish` is only valid as `sealwire migrate-storage --finish`.");
+  process.exit(2);
+}
+
+if (args.command === "migrate-storage") {
+  process.exit(runMigrateStorage());
 }
 
 if (args.unbind) {
@@ -233,15 +242,15 @@ if (brokerConfig) {
   console.log(`sealwire: using public broker ${brokerConfig.controlUrl}`);
 }
 // The launch directory is the default workspace for new sessions, but it is NOT
-// where relay state lives: state is shared per machine (`~/.agent-relay/`, or
-// RELAY_STATE_PATH) so `cd` never forks your sessions, projects, paired devices
-// or push key. Print both so neither is a surprise.
+// where relay state lives: state is one database per machine (`~/.sealwire/sealwire.db`,
+// or RELAY_STATE_DB) so `cd` never forks your sessions, projects, paired devices or push
+// key. Print both so neither is a surprise.
 console.log(`sealwire: workspace directory is ${userCwd}`);
 console.log(
   `sealwire: relay state is ${
-    process.env.RELAY_STATE_PATH ||
-    path.join(os.homedir(), ".agent-relay", "session.json")
-  } (shared across launch directories; set RELAY_STATE_PATH to isolate)`
+    process.env.RELAY_STATE_DB ||
+    path.join(os.homedir(), ".sealwire", "sealwire.db")
+  } (shared across launch directories; set RELAY_STATE_DB to isolate)`
 );
 
 const command = relayServerBinary || "cargo";
@@ -285,6 +294,7 @@ function parseArgs(argv) {
     broker: null,
     cloud: false,
     command: null,
+    finish: false,
     help: false,
     host: null,
     noBroker: false,
@@ -306,6 +316,8 @@ function parseArgs(argv) {
       parsed.noBroker = true;
     } else if (arg === "--no-open") {
       parsed.noOpen = true;
+    } else if (arg === "--finish") {
+      parsed.finish = true;
     } else if (
       parsed.command === null &&
       !arg.startsWith("-") &&
@@ -533,6 +545,48 @@ function runCloudUnbind() {
   });
   if (result.error) {
     console.error(`sealwire: failed to run cloud unbind: ${result.error.message}`);
+    return 1;
+  }
+  return result.status ?? 1;
+}
+
+/**
+ * Move an older version's `session.json` and identity files into the relay's
+ * database, before starting the new relay (`relay-server migrate-storage`). The
+ * first run copies; `--finish` removes the old files once the relay checks out.
+ */
+function runMigrateStorage() {
+  const relayServerBinary = resolveRelayServerBinary();
+  if (!relayServerBinary) {
+    ensureCommand(
+      "cargo",
+      "No prebuilt relay-server binary was found, and Rust/Cargo is required for the source fallback."
+    );
+  }
+  const subcommand = ["migrate-storage", ...(args.finish ? ["--finish"] : [])];
+  const command = relayServerBinary || "cargo";
+  const commandArgs = relayServerBinary
+    ? subcommand
+    : [
+        "run",
+        "--release",
+        "--manifest-path",
+        path.join(packageRoot, "Cargo.toml"),
+        "-p",
+        "relay-server",
+        "--",
+        ...subcommand,
+      ];
+  const result = spawnSync(command, commandArgs, {
+    cwd: userCwd,
+    env: {
+      ...process.env,
+      CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || defaultCargoTargetDir(),
+    },
+    stdio: "inherit",
+  });
+  if (result.error) {
+    console.error(`sealwire: failed to run migrate-storage: ${result.error.message}`);
     return 1;
   }
   return result.status ?? 1;
@@ -845,6 +899,7 @@ Run a local relay-server from the npm package.
 Usage:
   sealwire [local|cloud] [--beta] [--broker <url>] [--port <port>] [--host <ip>] [--no-broker] [--no-open]
   sealwire cloud unbind [--broker <url>]
+  sealwire migrate-storage [--finish]
 
 Commands:
   local         Run with no broker; remote pairing is disabled (alias for
@@ -864,6 +919,11 @@ Commands:
                 control origin and remove the local registration cache. Does
                 not start the local relay or open a browser. Preserves the
                 relay identity key for later re-enrollment.
+  migrate-storage
+                Move a relay saved by an older version (session.json and the
+                identity files in ~/.agent-relay/) to ~/.sealwire/sealwire.db.
+                Stop the relay first. The old files are left in place; once the
+                relay has been checked, run again with --finish to remove them.
 
 Flags:
   --beta        Unlock in-development features (currently: Tasks). Off by

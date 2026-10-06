@@ -14195,8 +14195,8 @@ tree; got {}",
     }
 
     // The other half: threads ALREADY poisoned before the fix landed. The leak
-    // was written into `RelayState.thread_settings`, which is persisted to
-    // `.agent-relay/session.json`, so a relay that ran the buggy build restarts
+    // was written into `RelayState.thread_settings`, which is persisted, so a
+    // relay that ran the buggy build restarts
     // with a Claude thread whose remembered model is a codex id — and
     // `resolve_provider_model` treats a remembered model as an explicit choice
     // and forwards it unchecked.
@@ -29138,27 +29138,9 @@ mod double_approve_race {
             revokes: AtomicUsize::new(0),
         });
         let control_url = spawn_slow_control_plane(counts.clone()).await;
-        let identity_path = std::env::temp_dir().join(format!(
-            "sealwire-double-approve-identity-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        let parsed_control = url::Url::parse(&control_url).expect("control url");
-        let signing_seed =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [4_u8; 32]);
-        std::fs::write(
-            &identity_path,
-            serde_json::json!({
-                "schema_version": 1,
-                "control_url": parsed_control.as_str(),
-                "relay_signing_seed": signing_seed,
-            })
-            .to_string(),
-        )
-        .expect("identity file");
+        let _env = crate::state_paths::env_lock();
+        let state_db = crate::broker::temp_state_db("sealwire-double-approve-identity");
+        crate::broker::save_test_public_identity(&state_db, &control_url, [4_u8; 32]).await;
 
         // decide_pairing_request resolves its broker config from env.
         let broker_env = [
@@ -29173,7 +29155,7 @@ mod double_approve_race {
         for (key, value) in broker_env {
             std::env::set_var(key, value);
         }
-        std::env::set_var("RELAY_BROKER_IDENTITY_PATH", &identity_path);
+        std::env::set_var("RELAY_STATE_DB", &state_db);
 
         let (change_tx, _change_rx) = watch::channel(0_u64);
         let relay = Arc::new(RwLock::new(RelayState::new(
@@ -29237,7 +29219,7 @@ mod double_approve_race {
         for (key, _) in broker_env {
             std::env::remove_var(key);
         }
-        std::env::remove_var("RELAY_BROKER_IDENTITY_PATH");
+        std::env::remove_var("RELAY_STATE_DB");
 
         assert_eq!(
             u8::from(first.is_ok()) + u8::from(second.is_ok()),
@@ -41448,24 +41430,8 @@ mod pairing_qr_replacement {
                 .expect("mock control plane should serve");
         });
         let control = format!("http://{address}");
-        let identity_path = std::env::temp_dir().join(format!(
-            "sealwire-cloud-identity-{}-{}.json",
-            std::process::id(),
-            address.port()
-        ));
-        let parsed_control = url::Url::parse(&control).expect("control url");
-        let signing_seed =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [4_u8; 32]);
-        std::fs::write(
-            &identity_path,
-            serde_json::json!({
-                "schema_version": 1,
-                "control_url": parsed_control.as_str(),
-                "relay_signing_seed": signing_seed,
-            })
-            .to_string(),
-        )
-        .expect("identity file");
+        let state_db = crate::broker::temp_state_db("sealwire-cloud-identity");
+        crate::broker::save_test_public_identity(&state_db, &control, [4_u8; 32]).await;
         let broker = crate::broker::BrokerConfig::from_parts(
             Some("wss://broker.example.com".to_string()),
             None,
@@ -41476,8 +41442,7 @@ mod pairing_qr_replacement {
             None,
             Some("relay-owner-1".to_string()),
             Some("relay-refresh-1".to_string()),
-            Some(identity_path.display().to_string()),
-            None,
+            Some(state_db),
             None,
         )
         .await

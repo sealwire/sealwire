@@ -42,7 +42,7 @@ async function main() {
   const brokerPort = await getFreePort();
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-browser-e2e-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const cwdInput = toTildePath(ROOT);
 
   const broker = startSelfHostedBroker({
@@ -51,7 +51,7 @@ async function main() {
   });
   const relay = startSelfHostedRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     brokerPort,
     lanIp,
     brokerRoomId: "browser-e2e-room",

@@ -77,7 +77,7 @@ async function main() {
     }
 
     const { port, relay } = await bootRelay({
-      statePath: path.join(stateDir, "session.json"),
+      statePath: path.join(stateDir, "sealwire.db"),
       cursorConfigDir,
     });
     try {
@@ -301,7 +301,7 @@ async function bootRelay({ statePath, cursorConfigDir }) {
   const relay = spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], {
     AGENT_PROVIDERS: "cursor",
     PORT: String(port),
-    RELAY_STATE_PATH: statePath,
+    RELAY_STATE_DB: statePath,
     CURSOR_CONFIG_DIR: cursorConfigDir,
   });
   await waitForHealth(`http://127.0.0.1:${port}/api/health`);

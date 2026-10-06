@@ -22,11 +22,11 @@ process.on("exit", () => {
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-claude-e2e-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const relay = spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], {
     AGENT_PROVIDERS: "claude_code",
     PORT: String(relayPort),
-    RELAY_STATE_PATH: statePath,
+    RELAY_STATE_DB: statePath,
   });
 
   try {

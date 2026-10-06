@@ -50,8 +50,9 @@ pub(crate) use self::injections::{
     ThreadInjections,
 };
 pub(crate) use self::push::{
-    is_acceptable_push_endpoint, load_or_generate_vapid, vapid_key_path, PushAttentionTracker,
-    PushDispatcher, PushJob, PushKind, PushSubscription, PushSubscriptionInput,
+    import_legacy_vapid_file, is_acceptable_push_endpoint, load_or_generate_vapid,
+    PushAttentionTracker, PushDispatcher, PushJob, PushKind, PushSubscription,
+    PushSubscriptionInput,
 };
 pub(crate) use self::runtime::{
     CodexStartReservation, ThreadRuntime, TurnFailure, TurnFailureKind, TurnOutcome, TurnSpend,
@@ -86,6 +87,8 @@ const MAX_SEARCH_ROUTING_HINTS: usize = 2_000;
 /// deletes them (the Reviewer panel is a persistent surface), so this cap — not
 /// a timer — is what eventually evicts old completed reviews.
 const MAX_REVIEW_JOBS: usize = 64;
+/// Revisions reserved on disk at a time; a new block is written when half is used.
+const TRANSCRIPT_CLOCK_BLOCK: u64 = 10_000;
 const MAX_ASKS: usize = 64;
 const MAX_HANDOVER_LINKS: usize = 64;
 /// The HARD total, across every actor. A reservation past it is refused, not absorbed.
@@ -405,6 +408,8 @@ pub struct RelayState {
     /// `RelayState` and on `ThreadRuntime` are *copies* of a value this handed
     /// out, never counters in their own right.
     transcript_clock: u64,
+    /// The highest revision the database has reserved. `None` without a database.
+    transcript_clock_ceiling: Option<u64>,
     /// The selected thread's transcript revision, mirrored for `snapshot()` and
     /// for the legacy no-active-thread transcript. A copy of a `transcript_clock`
     /// value — never incremented on its own.
@@ -759,6 +764,7 @@ impl RelayState {
             delta_tx,
             revision: 0,
             transcript_clock: 0,
+            transcript_clock_ceiling: None,
             transcript_revision: 0,
             security,
             provider_connected: false,
@@ -1177,7 +1183,48 @@ impl RelayState {
 
     pub(super) fn next_transcript_revision(&mut self) -> u64 {
         self.transcript_clock = self.transcript_clock.saturating_add(1);
+        if self.transcript_clock_ceiling.is_some_and(|ceiling| {
+            self.transcript_clock
+                .saturating_add(TRANSCRIPT_CLOCK_BLOCK / 2)
+                > ceiling
+        }) {
+            // Half a block is still reserved, so a failure here is retried on the next
+            // revision rather than stopping the clock.
+            if let Err(error) = self.reserve_transcript_clock() {
+                tracing::error!(%error, "could not reserve transcript revisions ahead");
+            }
+        }
         self.transcript_clock
+    }
+
+    /// Put the next block of revisions on disk before any of them is handed out, so a
+    /// restart never re-issues a revision a surviving client already holds.
+    pub(crate) fn reserve_transcript_clock(&mut self) -> Result<(), String> {
+        if !self.usage_store.is_enabled() {
+            return Ok(());
+        }
+        let wanted = self.transcript_clock.saturating_add(TRANSCRIPT_CLOCK_BLOCK);
+        let reserved = self
+            .usage_store
+            .with_connection(|conn| super::core_store::raise_clock_ceiling(conn, wanted))?;
+        self.transcript_clock_ceiling = Some(reserved);
+        Ok(())
+    }
+
+    /// The durable state as it is now, to write after the relay lock is released.
+    pub(crate) fn capture_core(&self) -> Option<super::core_store::CoreCapture> {
+        self.usage_store.is_enabled().then(|| {
+            super::core_store::CoreCapture::new(
+                &self.usage_store,
+                PersistedRelayState::from_relay(self),
+            )
+        })
+    }
+
+    /// Write every durable change since the last commit, while holding the relay lock.
+    pub(crate) fn commit_core(&self) -> Result<(), String> {
+        self.capture_core()
+            .map_or(Ok(()), super::core_store::CoreCapture::commit)
     }
 
     pub(super) fn bump_transcript_revision(&mut self) -> (u64, u64) {

@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use super::*;
 // The relay itself no longer writes to a socket directly (see `writer.rs`), so this
@@ -75,15 +71,29 @@ async fn write_test_public_identity(path: &str, control_url: &str, seed: [u8; 32
         .expect("identity should save");
 }
 
+fn stored_registration(
+    db: impl AsRef<std::path::Path>,
+) -> Option<PersistedPublicRelayRegistration> {
+    load_public_relay_registration_raw(db.as_ref()).unwrap()
+}
+
+/// Everything the stored registration says, to check what did and did not end up in it.
+fn stored_registration_text(db: impl AsRef<std::path::Path>) -> String {
+    let stored = stored_registration(db).expect("a stored registration");
+    format!(
+        "{} {} {} {}",
+        stored.control_url, stored.relay_id, stored.broker_room_id, stored.relay_refresh_token
+    )
+}
+
+fn stored_identity_seed(db: impl AsRef<std::path::Path>) -> Option<String> {
+    load_public_relay_identity_raw(db.as_ref())
+        .unwrap()
+        .map(|identity| identity.relay_signing_seed)
+}
+
 fn temp_registration_path(prefix: &str) -> String {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be monotonic enough for tests")
-        .as_nanos();
-    std::env::temp_dir()
-        .join(format!("{prefix}-{unique}.json"))
-        .display()
-        .to_string()
+    crate::broker::temp_state_db(prefix)
 }
 
 async fn spawn_public_control_mock() -> String {
@@ -434,7 +444,6 @@ async fn heartbeat_test_config(broker_url: String) -> BrokerConfig {
         None,
         None,
         None,
-        None,
     )
     .await
     .expect("config should parse")
@@ -524,7 +533,6 @@ async fn broker_config_builds_websocket_url() {
         None,
         None,
         None,
-        None,
     )
     .await
     .expect("config should parse")
@@ -597,7 +605,6 @@ async fn broker_config_supports_distinct_public_url_for_pairing() {
         None,
         None,
         None,
-        None,
     )
     .await
     .expect("config should parse")
@@ -616,7 +623,6 @@ async fn broker_config_requires_channel() {
         Some("relay-1".to_string()),
         None,
         Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
-        None,
         None,
         None,
         None,
@@ -641,7 +647,6 @@ async fn broker_config_disables_when_url_is_missing() {
         None,
         None,
         None,
-        None,
     )
     .await
     .expect("missing url should be accepted");
@@ -662,7 +667,6 @@ async fn broker_config_rejects_invalid_public_url_scheme() {
         None,
         None,
         None,
-        None,
     )
     .await
     .expect_err("invalid public url scheme should fail");
@@ -678,7 +682,6 @@ async fn broker_config_requires_join_ticket_secret_in_self_hosted_mode() {
         Some("demo-room".to_string()),
         Some("relay-1".to_string()),
         Some("self_hosted".to_string()),
-        None,
         None,
         None,
         None,
@@ -706,7 +709,6 @@ async fn broker_config_public_mode_uses_control_plane_tokens() {
         Some("relay-owner-1".to_string()),
         Some("relay-refresh-1".to_string()),
         Some(identity_path),
-        None,
         None,
     )
     .await
@@ -786,15 +788,14 @@ async fn spawn_real_public_broker(registrations_json: &str) -> std::net::SocketA
 async fn ready_public_broker_config(
     broker_ws: &str,
     control_url: &str,
-    identity_path: &str,
-    registration_path: &str,
+    state_db: &str,
     seed: [u8; 32],
     relay_id: &str,
     refresh_token: &str,
     room: &str,
     peer: &str,
 ) -> BrokerConfig {
-    write_test_public_identity(identity_path, control_url, seed).await;
+    write_test_public_identity(state_db, control_url, seed).await;
     BrokerConfig::from_parts(
         Some(broker_ws.to_string()),
         Some(broker_ws.to_string()),
@@ -805,8 +806,7 @@ async fn ready_public_broker_config(
         None,
         Some(relay_id.to_string()),
         Some(refresh_token.to_string()),
-        Some(identity_path.to_string()),
-        Some(registration_path.to_string()),
+        Some(state_db.to_string()),
         None,
     )
     .await
@@ -913,12 +913,10 @@ async fn production_relay_connect_credential_is_accepted_by_a_real_public_broker
     let broker_ws = format!("ws://{address}");
     let control_url = format!("http://{address}");
     let identity_path = temp_registration_path("agent-relay-prod-identity");
-    let registration_path = temp_registration_path("agent-relay-prod-registration");
     let config = ready_public_broker_config(
         &broker_ws,
         &control_url,
         &identity_path,
-        &registration_path,
         seed,
         relay_id,
         refresh_token,
@@ -947,12 +945,11 @@ async fn production_relay_connect_credential_is_accepted_by_a_real_public_broker
     assert_relay_welcome(&second, peer, seed).await;
 
     let wrong_identity = temp_registration_path("agent-relay-prod-identity-mismatch");
-    let wrong_registration = temp_registration_path("agent-relay-prod-registration-mismatch");
+    let wrong_registration = wrong_identity.clone();
     let wrong = ready_public_broker_config(
         &broker_ws,
         &control_url,
         &wrong_identity,
-        &wrong_registration,
         [9_u8; 32],
         relay_id,
         refresh_token,
@@ -960,7 +957,8 @@ async fn production_relay_connect_credential_is_accepted_by_a_real_public_broker
         peer,
     )
     .await;
-    let identity_before = std::fs::read(&wrong_identity).expect("mismatch identity should exist");
+    let identity_before =
+        stored_identity_seed(&wrong_identity).expect("mismatch identity should exist");
     let error = wrong
         .auth
         .relay_connect_credential(
@@ -975,12 +973,12 @@ async fn production_relay_connect_credential_is_accepted_by_a_real_public_broker
         "mismatch must fail closed on the existing key: {error}"
     );
     assert_eq!(
-        std::fs::read(&wrong_identity).expect("mismatch identity should remain"),
+        stored_identity_seed(&wrong_identity).expect("mismatch identity should remain"),
         identity_before,
         "a rejected proof must not replace the identity file"
     );
     assert!(
-        !std::path::Path::new(&wrong_registration).exists(),
+        stored_registration(&wrong_registration).is_none(),
         "a rejected proof must not write a replacement registration"
     );
     let still = config
@@ -1012,12 +1010,10 @@ async fn production_session_proves_possession_before_the_public_broker_seats_it(
     let broker_ws = format!("ws://{address}");
     let control_url = format!("http://{address}");
     let identity_path = temp_registration_path("agent-relay-prod-session-identity");
-    let registration_path = temp_registration_path("agent-relay-prod-session-registration");
     let config = ready_public_broker_config(
         &broker_ws,
         &control_url,
         &identity_path,
-        &registration_path,
         seed,
         relay_id,
         refresh_token,
@@ -1195,15 +1191,11 @@ async fn production_callers_complete_privileged_control_on_a_real_broker() {
     let address = spawn_real_public_broker(&registrations.to_string()).await;
     let control_url = format!("http://{address}");
     let dir = tempfile::tempdir().expect("tempdir");
-    let registration_path = dir.path().join("public-broker-registration.json");
-    let identity_path = dir
-        .path()
-        .join(crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE);
+    let registration_path = dir.path().join("sealwire.db");
     let config = ready_public_broker_config(
         &format!("ws://{address}"),
         &control_url,
-        identity_path.to_str().expect("identity path"),
-        registration_path.to_str().expect("registration path"),
+        registration_path.to_str().expect("state database path"),
         seed,
         relay_id,
         refresh_token,
@@ -1261,10 +1253,8 @@ async fn production_callers_complete_privileged_control_on_a_real_broker() {
         .expect("production revoke")
         .expect("public mode returns a revoke");
     assert!(revoked.revoked);
-    let marker = dir.path().join("pending-release.json");
     let outcome =
-        super::access_release::release_cloud_access(&control_url, &registration_path, &marker)
-            .await;
+        super::access_release::release_cloud_access(&control_url, &registration_path).await;
     assert!(
         matches!(outcome, super::access_release::ReleaseOutcome::Released),
         "production unbind should release access, got {outcome:?}"
@@ -1415,7 +1405,6 @@ async fn production_session_answers_a_phone_hello_with_the_pinned_identity() {
         &format!("ws://{address}"),
         &format!("http://{address}"),
         dir.path().join("identity.json").to_str().unwrap(),
-        dir.path().join("registration.json").to_str().unwrap(),
         seed,
         "relay-content-registration",
         "relay-content-refresh",
@@ -1722,7 +1711,6 @@ async fn production_session_runs_a_signed_phone_action_once_through_a_real_broke
         &format!("ws://{address}"),
         &format!("http://{address}"),
         dir.path().join("identity.json").to_str().unwrap(),
-        dir.path().join("registration.json").to_str().unwrap(),
         seed,
         "relay-request-registration",
         "relay-request-refresh",
@@ -1965,24 +1953,23 @@ async fn self_hosted_content_identity_survives_restart_and_refuses_a_missing_pai
     );
     let _relay = EnvStringGuard::set("RELAY_BROKER_RELAY_ID", None);
     let _refresh = EnvStringGuard::set("RELAY_BROKER_RELAY_REFRESH_TOKEN", None);
-    let _identity_path = EnvStringGuard::set("RELAY_BROKER_IDENTITY_PATH", None);
-    let _registration_path = EnvStringGuard::set("RELAY_BROKER_REGISTRATION_PATH", None);
     let _ttl = EnvStringGuard::set("RELAY_BROKER_DEVICE_JOIN_TTL_SECS", None);
-    let _content = EnvStringGuard::set("RELAY_CONTENT_IDENTITY_PATH", None);
-    let _session = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", None);
+    let _db = crate::state_paths::EnvVarGuard::set("RELAY_STATE_DB", None);
 
-    let identity = home
-        .path()
-        .join(".agent-relay")
-        .join(crate::state_paths::RELAY_CONTENT_IDENTITY_FILE);
+    let db = home.path().join(".sealwire").join("sealwire.db");
+    let stored = |db: &std::path::Path| {
+        super::stored_credentials::read(db, super::stored_credentials::RELAY_CONTENT_IDENTITY)
+            .unwrap()
+            .map(|stored| stored.secret)
+    };
     let first = BrokerConfig::from_env()
         .await
         .expect("first start")
         .expect("self-hosted broker should be configured");
     let first_key = first.content_verify_key();
     assert!(
-        identity.is_file(),
-        "the default state directory must hold the content identity"
+        stored(&db).is_some(),
+        "the default database must hold the content identity"
     );
     let second = BrokerConfig::from_env()
         .await
@@ -1990,22 +1977,37 @@ async fn self_hosted_content_identity_survives_restart_and_refuses_a_missing_pai
         .expect("restart should stay configured");
     assert_eq!(second.content_verify_key(), first_key);
 
-    std::fs::write(&identity, b"{").expect("corrupt identity");
+    super::stored_credentials::write(
+        &db,
+        super::stored_credentials::RELAY_CONTENT_IDENTITY,
+        "{",
+        Some(r#"{"schema_version":1}"#),
+    )
+    .expect("corrupt identity");
     let corrupt = BrokerConfig::from_env().await;
     assert!(corrupt.is_err(), "a corrupt identity must not be replaced");
     assert_eq!(
-        std::fs::read(&identity).expect("identity bytes"),
-        b"{",
-        "corrupt bytes must stay in place"
+        stored(&db).as_deref(),
+        Some("{"),
+        "corrupt value must stay in place"
     );
 
-    std::fs::remove_file(&identity).expect("remove identity");
-    let session = home.path().join(".agent-relay").join("session.json");
-    std::fs::write(
-        &session,
-        r#"{"paired_devices":{"phone-1":{"device_id":"phone-1"}}}"#,
-    )
-    .expect("paired session");
+    super::stored_credentials::transact(&db, |conn| {
+        super::stored_credentials::delete_in(
+            conn,
+            super::stored_credentials::RELAY_CONTENT_IDENTITY,
+        )?;
+        crate::state::put_credential(
+            conn,
+            crate::state::DEVICE_PAYLOAD_SECRET,
+            "phone-1",
+            "payload",
+            None,
+            1,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .expect("a paired phone without the identity it pinned");
     let lost = BrokerConfig::from_env().await;
     let message = lost.expect_err("missing identity with paired devices");
     assert!(
@@ -2013,22 +2015,19 @@ async fn self_hosted_content_identity_survives_restart_and_refuses_a_missing_pai
         "identity loss must say the phones need a trusted re-pair: {message}"
     );
     assert!(
-        !identity.exists(),
+        stored(&db).is_none(),
         "a lost identity must not be silently regenerated"
     );
 
     let scratch = tempfile::tempdir().expect("scratch state");
-    let session_path = scratch.path().join("session.json");
-    let _explicit = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", Some(&session_path));
+    let scratch_db = scratch.path().join("scratch.db");
+    let _explicit = crate::state_paths::EnvVarGuard::set("RELAY_STATE_DB", Some(&scratch_db));
     let explicit = BrokerConfig::from_env()
         .await
-        .expect("explicit state path")
-        .expect("explicit state path should configure");
+        .expect("explicit database")
+        .expect("explicit database should configure");
     let explicit_key = explicit.content_verify_key();
-    let explicit_identity = scratch
-        .path()
-        .join(crate::state_paths::RELAY_CONTENT_IDENTITY_FILE);
-    assert!(explicit_identity.is_file());
+    assert!(stored(&scratch_db).is_some());
     assert_ne!(explicit_key, first_key);
     let explicit_again = BrokerConfig::from_env()
         .await
@@ -2085,7 +2084,6 @@ async fn device_broker_credential_surfaces_device_limit_error() {
         Some("relay-refresh-1".to_string()),
         Some(identity_path),
         None,
-        None,
     )
     .await
     .expect("config should parse")
@@ -2105,7 +2103,6 @@ async fn device_broker_credential_surfaces_device_limit_error() {
 async fn broker_config_public_mode_returns_pending_enrollment_until_cached_registration_exists() {
     let control_url = spawn_public_control_mock().await;
     let registration_path = temp_registration_path("agent-relay-public-registration");
-    let identity_path = temp_registration_path("agent-relay-public-identity");
 
     let pending = BrokerConfig::from_parts_resolution(
         Some("wss://broker.example.com".to_string()),
@@ -2117,7 +2114,6 @@ async fn broker_config_public_mode_returns_pending_enrollment_until_cached_regis
         None,
         None,
         None,
-        Some(identity_path.clone()),
         Some(registration_path.clone()),
         None,
     )
@@ -2148,7 +2144,6 @@ async fn broker_config_public_mode_returns_pending_enrollment_until_cached_regis
         None,
         None,
         None,
-        Some(identity_path),
         Some(registration_path),
         None,
     )
@@ -2388,11 +2383,9 @@ fn targeted_messages_inner_payloads_include_relay_protocol_version() {
 async fn perform_public_relay_enrollment_uses_relay_keypair_challenge_flow() {
     let control_url = spawn_public_control_mock().await;
     let registration_path = temp_registration_path("agent-relay-public-registration");
-    let identity_path = temp_registration_path("agent-relay-public-identity");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).expect("control url should parse"),
-        registration_path: std::path::PathBuf::from(&registration_path),
-        identity_path: std::path::PathBuf::from(&identity_path),
+        state_db: std::path::PathBuf::from(&registration_path),
     };
 
     let registration = perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
@@ -2413,13 +2406,13 @@ async fn perform_public_relay_enrollment_uses_relay_keypair_challenge_flow() {
     assert_eq!(cached, registration);
 
     let identity = load_or_create_public_relay_identity(
-        std::path::Path::new(&identity_path),
+        std::path::Path::new(&registration_path),
         pending.control_url.as_str(),
     )
     .await
     .expect("relay identity should persist");
     let reloaded_identity = load_or_create_public_relay_identity(
-        std::path::Path::new(&identity_path),
+        std::path::Path::new(&registration_path),
         pending.control_url.as_str(),
     )
     .await
@@ -2442,8 +2435,7 @@ async fn broker_config_public_mode_requires_relay_refresh_token() {
         None,
         None,
         None,
-        None,
-        None,
+        Some(temp_state_db("public-needs-refresh")),
         None,
     )
     .await
@@ -2465,7 +2457,6 @@ async fn broker_config_self_hosted_can_issue_expiring_device_join_credentials() 
         Some("relay-1".to_string()),
         Some("self_hosted".to_string()),
         Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),
-        None,
         None,
         None,
         None,
@@ -2803,126 +2794,32 @@ fn summarize_thread_transcript_response_reports_entry_and_char_counts() {
     assert!(summary.contains("prev_cursor=tc1.test.3"));
 }
 
-// A workspace-write-sandboxed agent can't write outside the workspace on its
-// own, but the relay (which isn't sandboxed) can. The registration cache is
-// written through a `<name>.tmp` sibling; a symlink pre-planted there would let
-// a plain write land the cache bytes on the symlink's external target. Creating
-// the temp file exclusively must refuse the symlink rather than write through
-// it.
-#[cfg(unix)]
-#[tokio::test]
-async fn save_public_relay_registration_refuses_a_preplanted_temp_symlink() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let victim = dir.path().join("victim.txt");
-    std::fs::write(&victim, b"do not touch me").unwrap();
-
-    let registration_path = dir.path().join("public-broker-registration.json");
-    let temp_path = registration_path.with_extension("tmp");
-    std::os::unix::fs::symlink(&victim, &temp_path).unwrap();
-
-    let registration = PublicRelayRegistration {
-        relay_id: "relay-x".into(),
-        broker_room_id: "room-x".into(),
-        relay_refresh_token: "refresh-x".into(),
-    };
-    let result = save_public_relay_registration(
-        &registration_path,
-        "https://control.example",
-        &registration,
-    )
-    .await;
-
-    assert!(
-        result.is_err(),
-        "save must refuse to write through a pre-planted symlink at the temp path"
-    );
-    assert_eq!(
-        std::fs::read(&victim).unwrap(),
-        b"do not touch me",
-        "the external file the planted symlink points to must be untouched"
-    );
-    assert!(
-        !registration_path.exists(),
-        "save must not have completed the rename onto the real registration path"
-    );
-}
-
-// The broker registration (relay_id + refresh token) and the identity seed are
-// this relay's identity to the public broker. Deriving them from the launch
-// directory meant `cd ~/elsewhere && sealwire cloud` re-enrolled as a brand new
-// relay, orphaning the devices already paired with the old one.
+// The broker registration and the identity seed are this relay's identity to the
+// public broker. They live in the relay's own database, so `cd ~/elsewhere && sealwire
+// cloud` cannot re-enroll as a new relay, and a scratch database takes its identity with it.
 #[test]
-fn broker_identity_files_are_shared_across_launch_directories() {
-    let _lock = crate::state_paths::env_lock();
-    let home = tempfile::tempdir().unwrap();
-    let _home = crate::state_paths::EnvVarGuard::set("HOME", Some(home.path()));
-    let _state = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", None);
-
-    let a = std::path::Path::new("/tmp/workspace-a");
-    let b = std::path::Path::new("/tmp/workspace-b");
-
-    assert_eq!(
-        resolve_public_relay_registration_path(a, None),
-        resolve_public_relay_registration_path(b, None),
-        "broker registration must not fork per launch directory"
-    );
-    assert_eq!(
-        resolve_public_relay_identity_path(a, None),
-        resolve_public_relay_identity_path(b, None),
-        "the relay signing seed must not fork per launch directory"
-    );
-    assert_eq!(
-        resolve_public_relay_registration_path(a, None),
-        home.path()
-            .join(".agent-relay")
-            .join("public-broker-registration.json"),
-    );
-    assert_eq!(
-        resolve_public_relay_identity_path(a, None),
-        home.path()
-            .join(".agent-relay")
-            .join("public-broker-identity.json"),
-    );
-}
-
-#[test]
-fn broker_identity_files_follow_an_explicit_state_path() {
+fn the_broker_identity_lives_in_the_relay_database() {
     let _lock = crate::state_paths::env_lock();
     let home = tempfile::tempdir().unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let _home = crate::state_paths::EnvVarGuard::set("HOME", Some(home.path()));
-    let _state = crate::state_paths::EnvVarGuard::set(
-        "RELAY_STATE_PATH",
-        Some(&scratch.path().join("scratch-session.json")),
-    );
+    let _state = crate::state_paths::EnvVarGuard::set("RELAY_STATE_DB", None);
 
     let a = std::path::Path::new("/tmp/workspace-a");
+    let b = std::path::Path::new("/tmp/workspace-b");
     assert_eq!(
-        resolve_public_relay_registration_path(a, None),
-        scratch.path().join("public-broker-registration.json"),
+        resolve_state_db(a, None),
+        resolve_state_db(b, None),
+        "the broker identity must not fork per launch directory"
     );
     assert_eq!(
-        resolve_public_relay_identity_path(a, None),
-        scratch.path().join("public-broker-identity.json"),
+        resolve_state_db(a, None),
+        home.path().join(".sealwire").join("sealwire.db")
     );
-}
 
-// An explicit per-file override still wins — the escape hatch for a split
-// setup that deliberately keeps one file elsewhere.
-#[test]
-fn an_explicit_broker_path_override_still_wins() {
-    let _lock = crate::state_paths::env_lock();
-    let home = tempfile::tempdir().unwrap();
-    let _home = crate::state_paths::EnvVarGuard::set("HOME", Some(home.path()));
-    let _state = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", None);
-
-    assert_eq!(
-        resolve_public_relay_registration_path(
-            std::path::Path::new("/tmp/workspace-a"),
-            Some("/tmp/explicit-registration.json".to_string()),
-        ),
-        std::path::Path::new("/tmp/explicit-registration.json"),
-    );
+    let explicit = scratch.path().join("scratch.db");
+    let _explicit = crate::state_paths::EnvVarGuard::set("RELAY_STATE_DB", Some(&explicit));
+    assert_eq!(resolve_state_db(a, None), explicit);
 }
 
 /// End-to-end delivery contract for transcript deltas, in BOTH security modes.
@@ -6154,11 +6051,9 @@ async fn a_handler_error_after_parsing_does_not_end_the_session() {
 async fn public_cached_registration_rejects_activation_override() {
     let control_url = spawn_public_control_mock().await;
     let registration_path = temp_registration_path("agent-relay-public-registration-override");
-    let identity_path = temp_registration_path("agent-relay-public-identity-override");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).expect("control url"),
-        registration_path: std::path::PathBuf::from(&registration_path),
-        identity_path: std::path::PathBuf::from(&identity_path),
+        state_db: std::path::PathBuf::from(&registration_path),
     };
     perform_public_relay_enrollment(&reqwest::Client::new(), &pending, Some("first-key"))
         .await
@@ -6178,7 +6073,6 @@ async fn public_cached_registration_rejects_activation_override() {
         None,
         None,
         None,
-        Some(identity_path),
         Some(registration_path),
         None,
     )
@@ -6198,11 +6092,9 @@ async fn public_cached_registration_rejects_activation_override() {
 async fn registration_watch_diverged_when_cache_removed() {
     let control_url = spawn_public_control_mock().await;
     let registration_path = temp_registration_path("agent-relay-public-registration-watch");
-    let identity_path = temp_registration_path("agent-relay-public-identity-watch");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).expect("control url"),
-        registration_path: std::path::PathBuf::from(&registration_path),
-        identity_path: std::path::PathBuf::from(&identity_path),
+        state_db: std::path::PathBuf::from(&registration_path),
     };
     perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
         .await
@@ -6218,7 +6110,6 @@ async fn registration_watch_diverged_when_cache_removed() {
         None,
         None,
         None,
-        Some(identity_path),
         Some(registration_path.clone()),
         None,
     )
@@ -6441,7 +6332,6 @@ async fn cloud_require_cached_fails_closed_when_registration_missing() {
         None,
         None,
         None,
-        None,
         Some(registration_path),
         None,
         startup,
@@ -6464,11 +6354,9 @@ async fn cloud_require_cached_fails_closed_when_registration_replaced() {
     let _guard = cloud_env_lock().lock().unwrap();
     let control_url = spawn_public_control_mock().await;
     let registration_path = temp_registration_path("agent-relay-require-cached-replaced");
-    let identity_path = temp_registration_path("agent-relay-require-cached-id");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).expect("control url"),
-        registration_path: std::path::PathBuf::from(&registration_path),
-        identity_path: std::path::PathBuf::from(&identity_path),
+        state_db: std::path::PathBuf::from(&registration_path),
     };
     let registration = perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
         .await
@@ -6512,7 +6400,6 @@ async fn cloud_require_cached_fails_closed_when_registration_replaced() {
         None,
         None,
         None,
-        Some(identity_path),
         Some(registration_path),
         None,
         startup,
@@ -6538,8 +6425,7 @@ async fn cloud_launch_capture_scrub_then_matching_config_succeeds() {
         .as_str()
         .to_string();
     let registration_path = temp_registration_path("agent-relay-witness-matching");
-    let identity_path = temp_registration_path("agent-relay-witness-matching-identity");
-    write_test_public_identity(&identity_path, &control_url, [4_u8; 32]).await;
+    write_test_public_identity(&registration_path, &control_url, [4_u8; 32]).await;
     let registration = PublicRelayRegistration {
         relay_id: "relay-match".into(),
         broker_room_id: "room-match".into(),
@@ -6567,7 +6453,7 @@ async fn cloud_launch_capture_scrub_then_matching_config_succeeds() {
 
     // An unrelated ordinary resolution has no ownership of the captured value.
     let disabled = BrokerConfig::from_parts_resolution(
-        None, None, None, None, None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None, None, None, None,
     )
     .await
     .unwrap();
@@ -6583,7 +6469,6 @@ async fn cloud_launch_capture_scrub_then_matching_config_succeeds() {
         None,
         None,
         None,
-        Some(identity_path),
         Some(registration_path),
         None,
         startup,
@@ -6600,7 +6485,6 @@ async fn enrolled_relay_refuses_to_mint_a_replacement_identity() {
         .as_str()
         .to_string();
     let registration_path = temp_registration_path("agent-relay-missing-identity-reg");
-    let identity_path = temp_registration_path("agent-relay-missing-identity-id");
     save_public_relay_registration(
         std::path::Path::new(&registration_path),
         &control_url,
@@ -6623,7 +6507,6 @@ async fn enrolled_relay_refuses_to_mint_a_replacement_identity() {
         None,
         None,
         None,
-        Some(identity_path.clone()),
         Some(registration_path.clone()),
         None,
     )
@@ -6631,12 +6514,12 @@ async fn enrolled_relay_refuses_to_mint_a_replacement_identity() {
     .expect_err("a cached registration without an identity must fail");
     assert!(missing.contains("refusing to generate"), "got: {missing}");
     assert!(
-        !std::path::Path::new(&identity_path).exists(),
+        stored_identity_seed(&registration_path).is_none(),
         "startup must not create a replacement identity"
     );
 
-    write_test_public_identity(&identity_path, "http://127.0.0.1:8", [4_u8; 32]).await;
-    let before = std::fs::read(&identity_path).expect("identity should exist");
+    write_test_public_identity(&registration_path, "http://127.0.0.1:8", [4_u8; 32]).await;
+    let before = stored_identity_seed(&registration_path).expect("identity should exist");
     let mismatched = BrokerConfig::from_parts(
         Some("wss://broker.example.com".to_string()),
         None,
@@ -6647,15 +6530,14 @@ async fn enrolled_relay_refuses_to_mint_a_replacement_identity() {
         None,
         None,
         None,
-        Some(identity_path.clone()),
-        Some(registration_path),
+        Some(registration_path.clone()),
         None,
     )
     .await
     .expect_err("an identity for a different control url must fail");
     assert!(mismatched.contains("was created for"), "got: {mismatched}");
     assert_eq!(
-        std::fs::read(&identity_path).expect("identity should remain"),
+        stored_identity_seed(&registration_path).expect("identity should remain"),
         before,
         "a control-url mismatch must not rewrite the identity file"
     );
@@ -6684,7 +6566,6 @@ async fn cloud_launch_partial_or_malformed_required_witness_fails_closed_after_s
             None,
             Some("relay-auto".into()),
             Some("public".into()),
-            None,
             None,
             None,
             None,
@@ -6723,7 +6604,6 @@ async fn ambient_partial_witness_without_require_is_ignored_after_scrub() {
         None,
         None,
         None,
-        None,
         Some(temp_registration_path("agent-relay-ambient-witness")),
         None,
         startup,
@@ -6753,7 +6633,7 @@ async fn required_cloud_witness_fails_closed_when_broker_url_missing() {
     );
     let startup = crate::broker::capture_and_scrub_activation_for_normal_start();
     let error = BrokerConfig::from_parts_resolution_with_startup_context(
-        None, None, None, None, None, None, None, None, None, None, None, None, startup,
+        None, None, None, None, None, None, None, None, None, None, None, startup,
     )
     .await
     .expect_err("required cloud witness must not disappear into Disabled");
@@ -6791,7 +6671,6 @@ async fn required_cloud_witness_fails_closed_for_self_hosted_auth() {
         None,
         None,
         None,
-        None,
         startup,
     )
     .await
@@ -6807,28 +6686,23 @@ async fn required_cloud_witness_fails_closed_for_self_hosted_auth() {
 async fn registration_and_identity_files_are_mode_0600() {
     let control_url = spawn_public_control_mock().await;
     let registration_path = temp_registration_path("agent-relay-mode-reg");
-    let identity_path = temp_registration_path("agent-relay-mode-id");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).expect("control url"),
-        registration_path: std::path::PathBuf::from(&registration_path),
-        identity_path: std::path::PathBuf::from(&identity_path),
+        state_db: std::path::PathBuf::from(&registration_path),
     };
     perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
         .await
         .expect("enroll");
     use std::os::unix::fs::PermissionsExt;
-    let reg_mode = std::fs::metadata(&registration_path)
+    let mode = std::fs::metadata(&registration_path)
         .unwrap()
         .permissions()
         .mode()
         & 0o777;
-    let id_mode = std::fs::metadata(&identity_path)
-        .unwrap()
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(reg_mode, 0o600, "registration must be owner-only");
-    assert_eq!(id_mode, 0o600, "identity must be owner-only");
+    assert_eq!(
+        mode, 0o600,
+        "the database holding the registration must be owner-only"
+    );
 }
 
 #[cfg(windows)]
@@ -6837,11 +6711,10 @@ async fn windows_state_permissions_protect_broker_credentials_without_rotating_t
     use crate::windows_state_permissions::{assert_private_acl, make_world_readable};
 
     let root = tempfile::tempdir().unwrap();
-    let directory = root.path().join(".agent-relay");
-    let registration_path = directory.join("public-broker-registration.json");
-    let identity_path = directory.join("public-broker-identity.json");
+    let directory = root.path().join(crate::state_paths::STATE_DIR_NAME);
+    let db = directory.join("sealwire.db");
     let control_url = "https://broker.example.test";
-    let identity = load_or_create_public_relay_identity(&identity_path, control_url)
+    let identity = load_or_create_public_relay_identity(&db, control_url)
         .await
         .unwrap();
     let registration = PublicRelayRegistration {
@@ -6849,23 +6722,19 @@ async fn windows_state_permissions_protect_broker_credentials_without_rotating_t
         broker_room_id: "test-room".into(),
         relay_refresh_token: "test-refresh-token".into(),
     };
-    save_public_relay_registration(&registration_path, control_url, &registration)
+    save_public_relay_registration(&db, control_url, &registration)
         .await
         .unwrap();
     assert_private_acl(&directory);
-    assert_private_acl(&registration_path);
-    assert_private_acl(&identity_path);
-    let registration_bytes = std::fs::read(&registration_path).unwrap();
-    let identity_bytes = std::fs::read(&identity_path).unwrap();
+    assert_private_acl(&db);
     make_world_readable(&directory);
-    make_world_readable(&registration_path);
-    make_world_readable(&identity_path);
-    let loaded = load_public_relay_registration(&registration_path, control_url)
+    make_world_readable(&db);
+    let loaded = load_public_relay_registration(&db, control_url)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(loaded.relay_refresh_token, registration.relay_refresh_token);
-    let reloaded = load_or_create_public_relay_identity(&identity_path, control_url)
+    let reloaded = load_or_create_public_relay_identity(&db, control_url)
         .await
         .unwrap();
     assert_eq!(
@@ -6873,31 +6742,20 @@ async fn windows_state_permissions_protect_broker_credentials_without_rotating_t
         identity.signing_key.to_bytes()
     );
     assert_private_acl(&directory);
-    assert_private_acl(&registration_path);
-    assert_private_acl(&identity_path);
-    assert_eq!(
-        std::fs::read(&registration_path).unwrap(),
-        registration_bytes
-    );
-    assert_eq!(std::fs::read(&identity_path).unwrap(), identity_bytes);
+    assert_private_acl(&db);
 }
 
 #[tokio::test]
 async fn cloud_activate_non_tty_missing_key_exits_nonzero() {
     let _guard = cloud_env_lock().lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let reg = dir.path().join("public-broker-registration.json");
-    let identity = dir.path().join("public-broker-identity.json");
+    let reg = dir.path().join("sealwire.db");
     std::env::set_var(crate::broker::activation::CLOUD_ACTIVATION_ENV, "1");
     std::env::set_var(
         crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV,
         "http://127.0.0.1:9",
     );
-    std::env::set_var(
-        crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV,
-        &reg,
-    );
-    std::env::set_var(crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV, &identity);
+    std::env::set_var("RELAY_STATE_DB", &reg);
     // Ensure no credentials.
     crate::broker::activation::scrub_activation_env();
     std::env::set_var(crate::broker::activation::CLOUD_ACTIVATION_ENV, "1");
@@ -6906,8 +6764,7 @@ async fn cloud_activate_non_tty_missing_key_exits_nonzero() {
 
     std::env::remove_var(crate::broker::activation::CLOUD_ACTIVATION_ENV);
     std::env::remove_var(crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV);
-    std::env::remove_var(crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV);
-    std::env::remove_var(crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV);
+    std::env::remove_var("RELAY_STATE_DB");
     assert_ne!(
         code, 0,
         "non-TTY cloud-activate without a key must fail closed"
@@ -6919,11 +6776,9 @@ async fn cloud_activate_cached_registration_emits_witness_without_prompt() {
     let _guard = cloud_env_lock().lock().unwrap();
     let control_url = spawn_public_control_mock().await;
     let registration_path = temp_registration_path("agent-relay-cloud-cached-witness");
-    let identity_path = temp_registration_path("agent-relay-cloud-cached-id");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).unwrap(),
-        registration_path: std::path::PathBuf::from(&registration_path),
-        identity_path: std::path::PathBuf::from(&identity_path),
+        state_db: std::path::PathBuf::from(&registration_path),
     };
     perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
         .await
@@ -6934,14 +6789,7 @@ async fn cloud_activate_cached_registration_emits_witness_without_prompt() {
         crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV,
         &control_url,
     );
-    std::env::set_var(
-        crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV,
-        &registration_path,
-    );
-    std::env::set_var(
-        crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV,
-        &identity_path,
-    );
+    std::env::set_var("RELAY_STATE_DB", &registration_path);
     crate::broker::activation::scrub_activation_env();
     std::env::set_var(crate::broker::activation::CLOUD_ACTIVATION_ENV, "1");
 
@@ -6949,10 +6797,13 @@ async fn cloud_activate_cached_registration_emits_witness_without_prompt() {
 
     std::env::remove_var(crate::broker::activation::CLOUD_ACTIVATION_ENV);
     std::env::remove_var(crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV);
-    std::env::remove_var(crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV);
-    std::env::remove_var(crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV);
+    std::env::remove_var("RELAY_STATE_DB");
     assert_eq!(code, 0);
-    assert!(std::path::Path::new(&registration_path).exists());
+    assert!(
+        load_public_relay_registration_raw(std::path::Path::new(&registration_path))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -7046,22 +6897,12 @@ async fn enroll_release_reenroll_different_key_lifecycle() {
     let lifecycle_dir = tempfile::tempdir().expect("lifecycle dir");
     let registration_path = lifecycle_dir
         .path()
-        .join("public-broker-registration.json")
+        .join("sealwire.db")
         .display()
         .to_string();
-    let identity_path = lifecycle_dir
-        .path()
-        .join(crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE)
-        .display()
-        .to_string();
-    let marker = std::path::PathBuf::from(&registration_path)
-        .parent()
-        .unwrap()
-        .join("public-broker-pending-release.json");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).unwrap(),
-        registration_path: std::path::PathBuf::from(&registration_path),
-        identity_path: std::path::PathBuf::from(&identity_path),
+        state_db: std::path::PathBuf::from(&registration_path),
     };
     let client = reqwest::Client::new();
 
@@ -7073,14 +6914,17 @@ async fn enroll_release_reenroll_different_key_lifecycle() {
     let outcome = crate::broker::access_release::release_cloud_access(
         &control_url,
         std::path::Path::new(&registration_path),
-        &marker,
     )
     .await;
     assert_eq!(
         outcome,
         crate::broker::access_release::ReleaseOutcome::Released
     );
-    assert!(!std::path::Path::new(&registration_path).exists());
+    assert!(
+        load_public_relay_registration_raw(std::path::Path::new(&registration_path))
+            .unwrap()
+            .is_none()
+    );
 
     let second = perform_public_relay_enrollment(&client, &pending, Some("key-b"))
         .await
@@ -7092,7 +6936,7 @@ async fn enroll_release_reenroll_different_key_lifecycle() {
         ["key-a", "key-b"]
     );
     assert_eq!(plane.released.lock().unwrap().len(), 1);
-    let persisted = std::fs::read_to_string(&registration_path).unwrap();
+    let persisted = stored_registration_text(&registration_path);
     assert!(!persisted.contains("key-a"));
     assert!(!persisted.contains("key-b"));
 }
@@ -7105,8 +6949,7 @@ async fn concurrent_production_enrollment_critical_sections_complete_once() {
     let dir = tempfile::tempdir().unwrap();
     let pending = PendingPublicEnrollment {
         control_url: Url::parse("http://127.0.0.1:9").unwrap(),
-        registration_path: dir.path().join("public-broker-registration.json"),
-        identity_path: dir.path().join("public-broker-identity.json"),
+        state_db: dir.path().join("sealwire.db"),
     };
     let completions = Arc::new(AtomicUsize::new(0));
     let make = |submitted_key: &'static str| {
@@ -7143,7 +6986,7 @@ async fn concurrent_production_enrollment_critical_sections_complete_once() {
     assert!(dispositions.contains(&EnrollmentDisposition::Enrolled));
     assert!(dispositions.contains(&EnrollmentDisposition::Existing));
     assert_eq!(first.1.relay_refresh_token, second.1.relay_refresh_token);
-    let persisted = std::fs::read_to_string(&pending.registration_path).unwrap();
+    let persisted = stored_registration_text(&pending.state_db);
     assert!(!persisted.contains(first.2));
     assert!(!persisted.contains(second.2));
     assert!(persisted.contains("server-refresh-1"));
@@ -7157,11 +7000,10 @@ async fn pending_generic_enrollment_rechecks_after_activation_writes() {
     let dir = tempfile::tempdir().unwrap();
     let pending = PendingPublicEnrollment {
         control_url: Url::parse("http://127.0.0.1:9").unwrap(),
-        registration_path: dir.path().join("public-broker-registration.json"),
-        identity_path: dir.path().join("public-broker-identity.json"),
+        state_db: dir.path().join("sealwire.db"),
     };
     let remote_calls = Arc::new(AtomicUsize::new(0));
-    let lock = BrokerLifecycleLock::acquire_for_registration(&pending.registration_path).unwrap();
+    let lock = BrokerLifecycleLock::acquire_for_registration(&pending.state_db).unwrap();
     let generic_pending = pending.clone();
     let generic_calls = remote_calls.clone();
     let generic = tokio::spawn(async move {
@@ -7178,13 +7020,9 @@ async fn pending_generic_enrollment_rechecks_after_activation_writes() {
         broker_room_id: "room-activated".into(),
         relay_refresh_token: "refresh-created-by-activation".into(),
     };
-    save_public_relay_registration(
-        &pending.registration_path,
-        pending.control_url.as_str(),
-        &activated,
-    )
-    .await
-    .unwrap();
+    save_public_relay_registration(&pending.state_db, pending.control_url.as_str(), &activated)
+        .await
+        .unwrap();
     drop(lock);
 
     let observed = generic.await.unwrap().unwrap();
@@ -7216,13 +7054,10 @@ async fn production_activate_then_matching_release_clears() {
     let control_url = format!("http://{addr}");
 
     let dir = tempfile::tempdir().unwrap();
-    let registration_path = dir.path().join("public-broker-registration.json");
-    let identity_path = dir.path().join("public-broker-identity.json");
-    let marker = dir.path().join("public-broker-pending-release.json");
+    let registration_path = dir.path().join("sealwire.db");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).unwrap(),
-        registration_path: registration_path.clone(),
-        identity_path,
+        state_db: registration_path.clone(),
     };
 
     let locked = enroll_public_relay_if_absent(&pending, || async {
@@ -7237,23 +7072,21 @@ async fn production_activate_then_matching_release_clears() {
     assert_eq!(locked.disposition, EnrollmentDisposition::Enrolled);
     drop(locked);
     write_test_public_identity(
-        pending.identity_path.to_str().expect("identity path"),
+        pending.state_db.to_str().expect("identity path"),
         &control_url,
         [4_u8; 32],
     )
     .await;
 
-    let outcome = crate::broker::access_release::release_cloud_access(
-        &control_url,
-        &registration_path,
-        &marker,
-    )
-    .await;
+    let outcome =
+        crate::broker::access_release::release_cloud_access(&control_url, &registration_path).await;
     assert_eq!(
         outcome,
         crate::broker::access_release::ReleaseOutcome::Released
     );
-    assert!(!registration_path.exists());
+    assert!(load_public_relay_registration_raw(&registration_path)
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7286,8 +7119,7 @@ async fn production_stale_release_refuses_after_locked_activation_rebind() {
     let control_url = format!("http://{addr}");
 
     let dir = tempfile::tempdir().unwrap();
-    let registration_path = dir.path().join("public-broker-registration.json");
-    let marker = dir.path().join("public-broker-pending-release.json");
+    let registration_path = dir.path().join("sealwire.db");
     save_public_relay_registration(
         &registration_path,
         &control_url,
@@ -7301,7 +7133,7 @@ async fn production_stale_release_refuses_after_locked_activation_rebind() {
     .unwrap();
     write_test_public_identity(
         dir.path()
-            .join(crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE)
+            .join("sealwire.db")
             .to_str()
             .expect("identity path"),
         &control_url,
@@ -7316,15 +7148,9 @@ async fn production_stale_release_refuses_after_locked_activation_rebind() {
     // production enroll path itself cannot interleave mid-release; assert the
     // CAS outcome when a newer registration appears before deletion.
     let reg_clone = registration_path.clone();
-    let marker_clone = marker.clone();
     let origin_clone = control_url.clone();
     let release_task = tokio::spawn(async move {
-        crate::broker::access_release::release_cloud_access(
-            &origin_clone,
-            &reg_clone,
-            &marker_clone,
-        )
-        .await
+        crate::broker::access_release::release_cloud_access(&origin_clone, &reg_clone).await
     });
 
     tokio::task::spawn_blocking(move || {
@@ -7353,7 +7179,7 @@ async fn production_stale_release_refuses_after_locked_activation_rebind() {
         ),
         "got: {outcome:?}"
     );
-    let persisted = std::fs::read_to_string(&registration_path).unwrap();
+    let persisted = stored_registration_text(&registration_path);
     assert!(persisted.contains("refresh-new"));
     assert!(!persisted.contains("refresh-old"));
 }
@@ -7377,13 +7203,10 @@ async fn production_release_first_then_activate_under_contended_lock() {
     let control_url = format!("http://{addr}");
 
     let dir = tempfile::tempdir().unwrap();
-    let registration_path = dir.path().join("public-broker-registration.json");
-    let identity_path = dir.path().join("public-broker-identity.json");
-    let marker = dir.path().join("public-broker-pending-release.json");
+    let registration_path = dir.path().join("sealwire.db");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).unwrap(),
-        registration_path: registration_path.clone(),
-        identity_path: identity_path.clone(),
+        state_db: registration_path.clone(),
     };
     save_public_relay_registration(
         &registration_path,
@@ -7397,7 +7220,7 @@ async fn production_release_first_then_activate_under_contended_lock() {
     .await
     .unwrap();
     write_test_public_identity(
-        identity_path.to_str().expect("identity path"),
+        registration_path.to_str().expect("identity path"),
         &control_url,
         [4_u8; 32],
     )
@@ -7418,7 +7241,6 @@ async fn production_release_first_then_activate_under_contended_lock() {
             crate::broker::access_release::release_cloud_access_after_acquire(
                 &control_url,
                 &registration_path,
-                &marker,
                 move || {
                     release_acquired.wait();
                     release_proceed.wait();
@@ -7466,10 +7288,12 @@ async fn production_release_first_then_activate_under_contended_lock() {
         "activate must remain blocked on the lifecycle lock while release holds it"
     );
     assert!(
-        registration_path.exists(),
+        stored_registration(&registration_path).is_some(),
         "seed registration must still be present before release mutates"
     );
-    let seed = std::fs::read_to_string(&registration_path).unwrap();
+    let seed = stored_registration(&registration_path)
+        .unwrap()
+        .relay_refresh_token;
     assert!(seed.contains("refresh-seed"));
 
     tokio::task::spawn_blocking(move || {
@@ -7487,7 +7311,7 @@ async fn production_release_first_then_activate_under_contended_lock() {
     assert_eq!(activated.disposition, EnrollmentDisposition::Enrolled);
     assert_eq!(remote_enrolls.load(Ordering::SeqCst), 1);
     assert!(activate_acquired.load(Ordering::SeqCst));
-    let persisted = std::fs::read_to_string(&registration_path).unwrap();
+    let persisted = stored_registration_text(&registration_path);
     assert!(persisted.contains("refresh-after-release"));
     assert!(!persisted.contains("refresh-seed"));
 }
@@ -7511,16 +7335,13 @@ async fn production_activate_first_then_release_under_contended_lock() {
     let control_url = format!("http://{addr}");
 
     let dir = tempfile::tempdir().unwrap();
-    let registration_path = dir.path().join("public-broker-registration.json");
-    let identity_path = dir.path().join("public-broker-identity.json");
-    let marker = dir.path().join("public-broker-pending-release.json");
+    let registration_path = dir.path().join("sealwire.db");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).unwrap(),
-        registration_path: registration_path.clone(),
-        identity_path: identity_path.clone(),
+        state_db: registration_path.clone(),
     };
     write_test_public_identity(
-        identity_path.to_str().expect("identity path"),
+        registration_path.to_str().expect("identity path"),
         &control_url,
         [4_u8; 32],
     )
@@ -7579,7 +7400,6 @@ async fn production_activate_first_then_release_under_contended_lock() {
             crate::broker::access_release::release_cloud_access_after_acquire(
                 &control_url,
                 &registration_path,
-                &marker,
                 move || {
                     release_acquired_flag.store(true, Ordering::SeqCst);
                 },
@@ -7593,7 +7413,7 @@ async fn production_activate_first_then_release_under_contended_lock() {
         "release must remain blocked on the lifecycle lock while activate holds it"
     );
     assert!(
-        !registration_path.exists(),
+        stored_registration(&registration_path).is_none(),
         "activation must not have written registration before after-acquire pause lifts"
     );
 
@@ -7614,7 +7434,7 @@ async fn production_activate_first_then_release_under_contended_lock() {
         crate::broker::access_release::ReleaseOutcome::Released
     );
     assert!(
-        !registration_path.exists(),
+        stored_registration(&registration_path).is_none(),
         "release after activate must clear the just-written registration"
     );
 }
@@ -7635,13 +7455,10 @@ async fn production_release_then_activate_reenrolls_cleanly() {
     let control_url = format!("http://{addr}");
 
     let dir = tempfile::tempdir().unwrap();
-    let registration_path = dir.path().join("public-broker-registration.json");
-    let identity_path = dir.path().join("public-broker-identity.json");
-    let marker = dir.path().join("public-broker-pending-release.json");
+    let registration_path = dir.path().join("sealwire.db");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).unwrap(),
-        registration_path: registration_path.clone(),
-        identity_path: identity_path.clone(),
+        state_db: registration_path.clone(),
     };
     save_public_relay_registration(
         &registration_path,
@@ -7655,23 +7472,21 @@ async fn production_release_then_activate_reenrolls_cleanly() {
     .await
     .unwrap();
     write_test_public_identity(
-        identity_path.to_str().expect("identity path"),
+        registration_path.to_str().expect("identity path"),
         &control_url,
         [4_u8; 32],
     )
     .await;
 
-    let outcome = crate::broker::access_release::release_cloud_access(
-        &control_url,
-        &registration_path,
-        &marker,
-    )
-    .await;
+    let outcome =
+        crate::broker::access_release::release_cloud_access(&control_url, &registration_path).await;
     assert_eq!(
         outcome,
         crate::broker::access_release::ReleaseOutcome::Released
     );
-    assert!(!registration_path.exists());
+    assert!(load_public_relay_registration_raw(&registration_path)
+        .unwrap()
+        .is_none());
 
     let locked = enroll_public_relay_if_absent(&pending, || async {
         Ok(PublicRelayRegistration {
@@ -7683,7 +7498,7 @@ async fn production_release_then_activate_reenrolls_cleanly() {
     .await
     .unwrap();
     assert_eq!(locked.disposition, EnrollmentDisposition::Enrolled);
-    let persisted = std::fs::read_to_string(&registration_path).unwrap();
+    let persisted = stored_registration_text(&registration_path);
     assert!(persisted.contains("refresh-new-independent"));
     assert!(!persisted.contains("refresh-old"));
 }
@@ -7693,11 +7508,9 @@ async fn already_linked_discards_oneshot_file_input() {
     let _guard = cloud_env_lock().lock().unwrap();
     let control_url = spawn_public_control_mock().await;
     let registration_path = temp_registration_path("agent-relay-discard-file-reg");
-    let identity_path = temp_registration_path("agent-relay-discard-file-id");
     let pending = PendingPublicEnrollment {
         control_url: Url::parse(&control_url).unwrap(),
-        registration_path: std::path::PathBuf::from(&registration_path),
-        identity_path: std::path::PathBuf::from(&identity_path),
+        state_db: std::path::PathBuf::from(&registration_path),
     };
     perform_public_relay_enrollment(&reqwest::Client::new(), &pending, None)
         .await
@@ -7712,14 +7525,7 @@ async fn already_linked_discards_oneshot_file_input() {
         crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV,
         &control_url,
     );
-    std::env::set_var(
-        crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV,
-        &registration_path,
-    );
-    std::env::set_var(
-        crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV,
-        &identity_path,
-    );
+    std::env::set_var("RELAY_STATE_DB", &registration_path);
     std::env::set_var(
         crate::broker::activation::CLOUD_ACCESS_KEY_FILE_ENV,
         &oneshot,
@@ -7729,8 +7535,7 @@ async fn already_linked_discards_oneshot_file_input() {
 
     std::env::remove_var(crate::broker::activation::CLOUD_ACTIVATION_ENV);
     std::env::remove_var(crate::broker::auth::RELAY_BROKER_CONTROL_URL_ENV);
-    std::env::remove_var(crate::broker::auth::RELAY_BROKER_REGISTRATION_PATH_ENV);
-    std::env::remove_var(crate::broker::RELAY_BROKER_IDENTITY_PATH_ENV);
+    std::env::remove_var("RELAY_STATE_DB");
     std::env::remove_var(crate::broker::activation::CLOUD_ACCESS_KEY_FILE_ENV);
 
     assert_eq!(code, 1, "override while linked must fail");

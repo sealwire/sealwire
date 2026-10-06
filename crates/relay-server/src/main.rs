@@ -21,6 +21,7 @@ mod provider;
 mod skills;
 mod state;
 mod state_paths;
+mod storage_migration;
 mod teams;
 mod usage;
 #[cfg(windows)]
@@ -193,10 +194,22 @@ struct LocalImageInput {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match std::env::args().nth(1).as_deref() {
+    let subcommand = std::env::args().nth(1);
+    // `migrate-storage` reads these to find the old files; anything else would run
+    // against a fresh default database while the real state waits to be imported.
+    if subcommand.as_deref() != Some("migrate-storage") {
+        if let Err(error) = state_paths::refuse_retired_state_settings() {
+            eprintln!("relay-server: {error}");
+            std::process::exit(1);
+        }
+    }
+    match subcommand.as_deref() {
         Some("cloud-access-release") => {
             let code = broker::run_cloud_access_release().await;
             std::process::exit(code);
+        }
+        Some("migrate-storage") => {
+            std::process::exit(storage_migration::run());
         }
         Some("cloud-activate") => {
             if let Err(error) = broker::check_broker_client_version().await {
@@ -237,34 +250,19 @@ async fn main() -> ExitCode {
     let host_policy = HostPolicy::loopback_only();
     let security_headers = security_headers_from_env()
         .unwrap_or_else(|error| panic!("relay-server security header config is invalid: {error}"));
-    // One live relay-server per RELAY_STATE_PATH: a second process for the
-    // same session file must not become a concurrent writer (that corrupts /
-    // forks session.json). The dev restart scripts `pkill` the previous relay
-    // before starting, so they never find the lock held. `npx sealwire` and
-    // the desktop app don't, so for them a second start for the same workspace
-    // refuses with a clear message pointing at the one already running. See
-    // instance_lock's module docs (real OS file lock; refuse, don't attach).
-    // Escape hatch (RELAY_DISABLE_INSTANCE_LOCK) for anything that genuinely
-    // needs multiple instances on one state path (e.g. some test harnesses).
-    //
-    // Relay state is shared per machine (`~/.agent-relay/`), not per launch
-    // directory — see `state_paths`. An absent shared session file just starts a
-    // fresh one: there is deliberately no migration from a pre-existing
-    // `<cwd>/.agent-relay/`, which would mean owning atomicity, cross-process
-    // serialization, partial-copy recovery and identity-cloning-a-live-relay —
-    // a lot of machinery guarding a one-time event.
-    let state_path = state::resolved_state_path();
-    // Resolve (canonicalize) RELAY_STATE_PATH and pin the env var to the
-    // result BEFORE AppState::new() (and therefore PersistenceStore) reads it
-    // — see instance_lock::resolve_identity: otherwise persistence's first
-    // atomic save (rename onto an existing symlink replaces the symlink) would
-    // sever a symlinked state path, and a later process re-resolving it would
-    // take a different lock, reintroducing the duplicate-writer bug.
-    let state_path = instance_lock::resolve_identity(&state_path).unwrap_or_else(|error| {
-        eprintln!("relay-server: {error}");
+    // One live relay-server per database: a second process would hold its own copy
+    // of the state in memory and overwrite the first one's rows. Dev restart scripts
+    // stop the previous relay first; `npx sealwire` and the desktop app get a clear
+    // refusal pointing at the one already running (instance_lock's module docs).
+    // Checked before the lock, whose file creates the database's directory and would sit
+    // in the way of `migrate-storage` moving the old one into its place. Pinned resolved,
+    // so every later lookup and every later process takes the same lock for the same file.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let state_path = state::checked_state_db_path(&cwd).unwrap_or_else(|error| {
+        eprintln!("relay-server: failed to start: {error}");
         std::process::exit(1);
     });
-    std::env::set_var("RELAY_STATE_PATH", &state_path);
+    std::env::set_var(state_paths::STATE_DB_ENV, &state_path);
 
     let lock_guard = if instance_lock::disabled_via_env() {
         None
@@ -280,9 +278,9 @@ async fn main() -> ExitCode {
                 // say so, and point at the way to get a second relay anyway.
                 eprintln!(
                     "relay-server: another relay is already running{location} against the state \
-                     file this one would use ({}). Relay state is shared across launch \
+                     database this one would use ({}). Relay state is shared across launch \
                      directories, so this is expected when one is already up — use it, stop it \
-                     first, or give this one its own RELAY_STATE_PATH to run an isolated second \
+                     first, or give this one its own RELAY_STATE_DB to run an isolated second \
                      relay.",
                     state_path.display()
                 );
@@ -563,6 +561,10 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
     let host_policy_context = context.clone();
     router
         .with_state(context.clone())
+        .layer(middleware::from_fn_with_state(
+            context.clone(),
+            with_durable_mutations,
+        ))
         .layer(middleware::from_fn(with_csrf_protection))
         .layer(middleware::from_fn_with_state(
             context,
@@ -689,6 +691,7 @@ async fn health(State(context): State<AppContext>) -> Json<ApiEnvelope<HealthRes
         service: "relay-server",
         provider: snapshot.provider,
         launch_id: context.launch_id.clone(),
+        storage_error: context.app.storage_failure().await,
     }))
 }
 
@@ -2617,6 +2620,34 @@ async fn with_host_allowlist(
     }
 
     next.run(request).await
+}
+
+/// A successful change is saved before it is reported: the reply waits for the commit,
+/// and a commit that fails turns the reply into an error rather than a false "done".
+async fn with_durable_mutations(
+    State(context): State<AppContext>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let mutating = request.uri().path().starts_with("/api/") && !method_is_safe(request.method());
+    let response = next.run(request).await;
+    if !mutating || !response.status().is_success() {
+        return response;
+    }
+    match context.app.commit_core().await {
+        Ok(()) => response,
+        Err(error) => {
+            tracing::error!(%error, "a change was made but could not be saved");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError::new(
+                    "storage_failed",
+                    format!("the change was made but could not be saved: {error}"),
+                )),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn with_csrf_protection(request: Request, next: Next) -> Response {

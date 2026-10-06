@@ -37,7 +37,7 @@ const TEST_FILE = "package-lock.json";
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-diff-cards-state-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const seedPath = path.join(stateDir, "fake-transcript-seed.json");
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-diff-cards-workspace-"))
@@ -80,7 +80,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     extraEnv: { AGENT_PROVIDERS: "fake", FAKE_PROVIDER_SEED_PATH: seedPath },
   });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);

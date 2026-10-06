@@ -67,7 +67,7 @@ async function main() {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-length-verify-"));
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: path.join(stateDir, "session.json"),
+    relayStateDb: path.join(stateDir, "sealwire.db"),
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });
   step(`relay booting on ${relayPort}`);

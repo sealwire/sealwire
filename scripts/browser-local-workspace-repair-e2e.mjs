@@ -11,7 +11,7 @@
 // button wired to a field that no longer existed — every unit test stayed green and the
 // button silently did nothing. That is what this catches.
 //
-// Runs against its OWN relay on a free port with its own RELAY_STATE_PATH, so it never
+// Runs against its OWN relay on a free port with its own RELAY_STATE_DB, so it never
 // disturbs a relay the developer has running.
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -32,7 +32,7 @@ console.log("relay port", relayPort, "cwd", doomed);
 
 const relay = startLocalRelay({
   relayPort,
-  relayStatePath: path.join(stateDir, "session.json"),
+  relayStateDb: path.join(stateDir, "sealwire.db"),
   extraEnv: { AGENT_PROVIDERS: "fake" },
 });
 await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);

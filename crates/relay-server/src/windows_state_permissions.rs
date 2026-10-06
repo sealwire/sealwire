@@ -498,7 +498,7 @@ mod tests {
         use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
 
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join(".agent-relay");
+        let directory = root.path().join(crate::state_paths::STATE_DIR_NAME);
         ensure_directory(&directory, true).unwrap();
         let path = directory.join("session.json");
         drop(create_new_file(&path).unwrap());
@@ -553,7 +553,10 @@ mod tests {
         make_world_readable(root.path());
         let before = acl_snapshot(root.path());
         ensure_directory(root.path(), false).unwrap();
-        let path = root.path().join("nested").join(".agent-relay");
+        let path = root
+            .path()
+            .join("nested")
+            .join(crate::state_paths::STATE_DIR_NAME);
         ensure_directory(&path, true).unwrap();
         assert_private_acl(path.parent().unwrap());
         assert_private_acl(&path);

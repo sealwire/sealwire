@@ -5,9 +5,20 @@ import { fetchDevices, fetchSession } from "../../e2e-thread-cleanup.mjs";
 import { resolveRelayServerCommand } from "./binaries.mjs";
 import { spawnManagedProcess } from "./process.mjs";
 
+// Settings that named state files; a relay inheriting one from the shell refuses to start.
+export function isRetiredStateEnv(name) {
+  return [
+    "RELAY_STATE_PATH",
+    "RELAY_BROKER_IDENTITY_PATH",
+    "RELAY_BROKER_REGISTRATION_PATH",
+    "RELAY_CONTENT_IDENTITY_PATH",
+    "RELAY_VAPID_KEY_PATH",
+  ].includes(name);
+}
+
 export function startPublicRelay({
   relayPort,
-  relayStatePath,
+  relayStateDb,
   brokerPort,
   lanIp,
   brokerRoomId,
@@ -15,13 +26,11 @@ export function startPublicRelay({
   relayRefreshToken,
   codexHomeDir,
   peerId = "browser-public-relay",
-  registrationPath,
-  identityPath,
   extraEnv = {},
 }) {
   const env = {
     PORT: String(relayPort),
-    RELAY_STATE_PATH: relayStatePath,
+    RELAY_STATE_DB: relayStateDb,
     RELAY_BROKER_URL: `ws://127.0.0.1:${brokerPort}`,
     RELAY_BROKER_PUBLIC_URL: `ws://${lanIp}:${brokerPort}`,
     RELAY_BROKER_CONTROL_URL: `http://127.0.0.1:${brokerPort}`,
@@ -37,22 +46,16 @@ export function startPublicRelay({
     env.RELAY_BROKER_RELAY_ID = relayId;
     env.RELAY_BROKER_RELAY_REFRESH_TOKEN = relayRefreshToken;
   }
-  if (registrationPath) {
-    env.RELAY_BROKER_REGISTRATION_PATH = registrationPath;
-  }
-  if (identityPath) {
-    env.RELAY_BROKER_IDENTITY_PATH = identityPath;
-  }
   if (codexHomeDir) {
     env.CODEX_HOME = codexHomeDir;
   }
   const { command, args } = resolveRelayServerCommand();
-  return spawnManagedProcess("relay", command, args, env);
+  return spawnManagedProcess("relay", command, args, env, { stripInherited: isRetiredStateEnv });
 }
 
 export function startSelfHostedRelay({
   relayPort,
-  relayStatePath,
+  relayStateDb,
   brokerPort,
   lanIp,
   brokerRoomId,
@@ -63,7 +66,7 @@ export function startSelfHostedRelay({
 }) {
   const env = {
     PORT: String(relayPort),
-    RELAY_STATE_PATH: relayStatePath,
+    RELAY_STATE_DB: relayStateDb,
     RELAY_BROKER_URL: `ws://127.0.0.1:${brokerPort}`,
     RELAY_BROKER_PUBLIC_URL: `ws://${lanIp}:${brokerPort}`,
     RELAY_BROKER_AUTH_MODE: "self_hosted",
@@ -76,7 +79,7 @@ export function startSelfHostedRelay({
     env.CODEX_HOME = codexHomeDir;
   }
   const { command, args } = resolveRelayServerCommand();
-  return spawnManagedProcess("relay", command, args, env);
+  return spawnManagedProcess("relay", command, args, env, { stripInherited: isRetiredStateEnv });
 }
 
 export async function waitForBrokerConnection(sessionUrl, timeoutMs = 30000) {

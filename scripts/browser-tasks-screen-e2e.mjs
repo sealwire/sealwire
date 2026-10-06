@@ -59,7 +59,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: path.join(stateDir, "session.json"),
+    relayStateDb: path.join(stateDir, "sealwire.db"),
     extraEnv: { AGENT_PROVIDERS: "fake", SEALWIRE_BETA: "1", ...fakeHarness.env },
   });
 

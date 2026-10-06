@@ -243,14 +243,14 @@ const projectMenuRow = (page, label) =>
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-projects-toggle-e2e-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const codexHomeDir = await prepareSeededCodexHome("agent-relay-projects-toggle-codex-", { requireAuth: false });
   const workspace = path.join(stateDir, "projects-toggle-ws");
   await fs.mkdir(workspace, { recursive: true });
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     codexHomeDir,
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });

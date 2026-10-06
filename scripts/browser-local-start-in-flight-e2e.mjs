@@ -70,7 +70,7 @@ async function main() {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "local-start-in-flight-"));
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: path.join(stateDir, "session.json"),
+    relayStateDb: path.join(stateDir, "sealwire.db"),
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);

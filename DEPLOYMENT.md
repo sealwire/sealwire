@@ -94,13 +94,30 @@ windows for your local workspace and remote sessions. See the
 
 ## Relay state location
 
-Sessions, projects, paired devices, and connection credentials are saved in
-`~/.agent-relay/`. Restarting SealWire or launching from another project keeps
-that saved state. Back up the whole directory when moving to another computer.
+Sessions, projects, paired devices, and connection credentials are saved in one
+database, `~/.sealwire/sealwire.db`. Restarting SealWire or launching from
+another project keeps that saved state. Back up the whole directory when moving
+to another computer.
 
-Run one SealWire instance at a time with the default state location. Advanced
-settings, including a separate state location, are in
-[`.env.example`](.env.example).
+The database holds this relay's credentials unencrypted, readable only by your
+user account. Treat it like a key file: do not share it or attach it to a bug
+report.
+
+Run one SealWire instance at a time with the default state location. To run a
+separate relay, give it its own database with `RELAY_STATE_DB`.
+
+### Upgrading from a version that saved `session.json`
+
+Earlier versions kept the same state in `~/.agent-relay/`, in `session.json` and
+a few key files. The new version will not start until they are moved into the
+database:
+
+1. Stop SealWire.
+2. Run `npx sealwire@latest migrate-storage`. It moves `~/.agent-relay/` to
+   `~/.sealwire/`, copies everything into `sealwire.db`, and leaves the old files
+   where they are.
+3. Start SealWire and check your sessions and paired devices.
+4. Run `npx sealwire@latest migrate-storage --finish` to remove the old files.
 
 ## Privacy
 

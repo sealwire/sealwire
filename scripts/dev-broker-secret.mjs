@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export function resolveDevBrokerTicketSecret(env = process.env, cwd = process.cwd()) {
@@ -15,11 +15,20 @@ function resolveDevBrokerSecret(env, cwd, setting, filename) {
   const configured = env[setting]?.trim();
   if (configured) return configured;
 
-  const statePath = env.RELAY_STATE_PATH?.trim();
+  const stateDb = env.RELAY_STATE_DB?.trim();
   const homeDir = [env.HOME, env.USERPROFILE].find((value) => value && path.isAbsolute(value)) || cwd;
-  const stateDir = statePath
-    ? path.dirname(path.resolve(cwd, statePath))
-    : path.join(homeDir, ".agent-relay");
+  const stateDir = stateDb
+    ? path.dirname(path.resolve(cwd, stateDb))
+    : path.join(homeDir, ".sealwire");
+  // Making ~/.sealwire now would sit in the way of `migrate-storage` moving the old
+  // directory into its place, and the relay refuses to start until that has run anyway.
+  const legacyDir = path.join(homeDir, ".agent-relay");
+  if (!stateDb && !existsSync(stateDir) && existsSync(legacyDir)) {
+    throw new Error(
+      `relay state in ${legacyDir} has not been moved to ${stateDir} yet. ` +
+        "Stop the relay and run `cargo run -p relay-server -- migrate-storage` (or `npx sealwire migrate-storage`) first."
+    );
+  }
   if (process.platform === "win32") {
     const script = readFileSync(new URL("./dev-broker-secret-windows.ps1", import.meta.url), "utf8");
     const powershell = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -32,7 +41,7 @@ function resolveDevBrokerSecret(env, cwd, setting, filename) {
     }).trim();
   }
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  if (path.basename(stateDir) === ".agent-relay") {
+  if (path.basename(stateDir) === ".sealwire") {
     chmodSync(stateDir, 0o700);
   }
   const secretPath = path.join(stateDir, filename);

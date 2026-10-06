@@ -45,7 +45,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: path.join(stateDir, "session.json"),
+    relayStateDb: path.join(stateDir, "sealwire.db"),
     extraEnv: { AGENT_PROVIDERS: "fake", SEALWIRE_BETA: "1" },
     ...(process.env.E2E_RELAY_BIN
       ? { resolveCommand: () => ({ command: process.env.E2E_RELAY_BIN, args: [] }) }

@@ -8,13 +8,13 @@ mod protocol;
 mod remote_actions;
 mod request_auth;
 mod signed_control;
+mod stored_credentials;
 mod writer;
 
 pub use access_release::run_cloud_access_release;
 #[cfg(test)]
 pub(crate) use access_release::with_test_control_challenge;
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -53,8 +53,7 @@ use self::auth::{
     build_control_plane_client, complete_public_relay_enrollment, parse_control_plane_url,
     request_public_relay_enrollment_challenge, BrokerAuthConfig, BrokerJoinCredential,
     ClientBrokerGrant, DeviceBrokerCredential, PublicRelayRegistration,
-    RELAY_BROKER_CONTROL_URL_ENV, RELAY_BROKER_REGISTRATION_PATH_ENV, RELAY_BROKER_RELAY_ID_ENV,
-    RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV,
+    RELAY_BROKER_CONTROL_URL_ENV, RELAY_BROKER_RELAY_ID_ENV, RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV,
 };
 use self::crypto::{decrypt_json, encrypt_json, EncryptedEnvelope};
 use self::lifecycle::{bearer_fingerprint, BrokerLifecycleLock, RegistrationIdentity};
@@ -256,7 +255,6 @@ const INBOUND_MESSAGE_QUEUE_CAPACITY: usize = 256;
 /// How far ONE surface may fall behind before its frames are shed. Per surface, so a
 /// phone waiting on something slow cannot make its backlog anyone else's problem.
 const SURFACE_MESSAGE_QUEUE_CAPACITY: usize = 64;
-pub(crate) const RELAY_BROKER_IDENTITY_PATH_ENV: &str = "RELAY_BROKER_IDENTITY_PATH";
 const MAX_BROKER_TEXT_FRAME_BYTES: usize = 65_536;
 // Version 4 signed every relay payload with the content key; version 5 also has the
 // phone sign every action attempt. Exact match, no fallback.
@@ -626,7 +624,7 @@ impl std::fmt::Debug for BrokerConfig {
 
 #[derive(Clone, Debug)]
 struct RegistrationWatch {
-    path: PathBuf,
+    state_db: PathBuf,
     control_url: String,
     relay_id: String,
     broker_room_id: String,
@@ -644,8 +642,7 @@ enum BrokerConfigResolution {
 #[derive(Debug, Clone)]
 struct PendingPublicEnrollment {
     control_url: Url,
-    registration_path: PathBuf,
-    identity_path: PathBuf,
+    state_db: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -882,6 +879,13 @@ pub(crate) struct PersistedPublicRelayRegistration {
     relay_refresh_token: String,
 }
 
+#[cfg(test)]
+impl PersistedPublicRelayRegistration {
+    pub(crate) fn relay_id(&self) -> &str {
+        &self.relay_id
+    }
+}
+
 impl std::fmt::Debug for PersistedPublicRelayRegistration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PersistedPublicRelayRegistration")
@@ -965,8 +969,7 @@ impl BrokerConfig {
             std::env::var(relay_broker::join_ticket::JOIN_TICKET_SECRET_ENV).ok(),
             std::env::var(RELAY_BROKER_RELAY_ID_ENV).ok(),
             std::env::var(RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV).ok(),
-            std::env::var(RELAY_BROKER_IDENTITY_PATH_ENV).ok(),
-            std::env::var(RELAY_BROKER_REGISTRATION_PATH_ENV).ok(),
+            None,
             std::env::var(self::auth::RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV).ok(),
             startup_context,
         )
@@ -995,8 +998,7 @@ impl BrokerConfig {
         join_ticket_secret: Option<String>,
         relay_id: Option<String>,
         relay_refresh_token: Option<String>,
-        relay_identity_path: Option<String>,
-        registration_path: Option<String>,
+        state_db: Option<String>,
         device_join_ttl_secs: Option<String>,
     ) -> Result<Option<Self>, String> {
         match Self::from_parts_resolution(
@@ -1009,8 +1011,7 @@ impl BrokerConfig {
             join_ticket_secret,
             relay_id,
             relay_refresh_token,
-            relay_identity_path,
-            registration_path,
+            state_db,
             device_join_ttl_secs,
         )
         .await?
@@ -1034,8 +1035,7 @@ impl BrokerConfig {
         join_ticket_secret: Option<String>,
         relay_id: Option<String>,
         relay_refresh_token: Option<String>,
-        relay_identity_path: Option<String>,
-        registration_path: Option<String>,
+        state_db: Option<String>,
         device_join_ttl_secs: Option<String>,
     ) -> Result<BrokerConfigResolution, String> {
         Self::from_parts_resolution_with_startup_context(
@@ -1048,8 +1048,7 @@ impl BrokerConfig {
             join_ticket_secret,
             relay_id,
             relay_refresh_token,
-            relay_identity_path,
-            registration_path,
+            state_db,
             device_join_ttl_secs,
             BrokerStartupContext::default(),
         )
@@ -1067,8 +1066,7 @@ impl BrokerConfig {
         join_ticket_secret: Option<String>,
         relay_id: Option<String>,
         relay_refresh_token: Option<String>,
-        relay_identity_path: Option<String>,
-        registration_path: Option<String>,
+        state_db: Option<String>,
         device_join_ttl_secs: Option<String>,
         startup_context: BrokerStartupContext,
     ) -> Result<BrokerConfigResolution, String> {
@@ -1130,9 +1128,7 @@ impl BrokerConfig {
             .and_then(trimmed_string);
         let current_dir = std::env::current_dir()
             .map_err(|error| format!("failed to resolve current directory: {error}"))?;
-        let registration_path =
-            resolve_public_relay_registration_path(&current_dir, registration_path);
-        let identity_path = resolve_public_relay_identity_path(&current_dir, relay_identity_path);
+        let state_db = resolve_state_db(&current_dir, state_db);
 
         let (
             broker_room_id,
@@ -1193,7 +1189,7 @@ impl BrokerConfig {
                         None,
                     )
                 } else if let Some(cached) =
-                    load_public_relay_registration(&registration_path, control_url.as_str()).await?
+                    load_public_relay_registration(&state_db, control_url.as_str()).await?
                 {
                     if require_cached {
                         let actual = RegistrationIdentity {
@@ -1217,7 +1213,7 @@ impl BrokerConfig {
                     }
                     scrub_activation_env();
                     let watch = RegistrationWatch {
-                        path: registration_path.clone(),
+                        state_db: state_db.clone(),
                         control_url: control_url.as_str().to_string(),
                         relay_id: cached.relay_id.clone(),
                         broker_room_id: cached.broker_room_id.clone(),
@@ -1245,8 +1241,7 @@ impl BrokerConfig {
                         None,
                         Some(PendingPublicEnrollment {
                             control_url,
-                            registration_path: registration_path.clone(),
-                            identity_path: identity_path.clone(),
+                            state_db: state_db.clone(),
                         }),
                         None,
                     )
@@ -1265,7 +1260,7 @@ impl BrokerConfig {
                 })?;
             let parsed = parse_control_plane_url(&control_url_string)?;
             Some(
-                load_existing_public_relay_identity(&identity_path, parsed.as_str())
+                load_existing_public_relay_identity(&state_db, parsed.as_str())
                     .await?
                     .signing_key,
             )
@@ -1343,15 +1338,8 @@ impl BrokerConfig {
             return Ok(());
         }
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let path = crate::state_paths::sibling_state_file(
-            &cwd,
-            "RELAY_CONTENT_IDENTITY_PATH",
-            std::env::var_os("RELAY_CONTENT_IDENTITY_PATH"),
-            crate::state_paths::RELAY_CONTENT_IDENTITY_FILE,
-        );
-        let session_path = crate::state_paths::session_file_path(&cwd);
-        self.content_signing_key =
-            load_or_create_relay_content_identity(&path, &session_path).await?;
+        let db = crate::state_paths::state_db_path(&cwd);
+        self.content_signing_key = load_or_create_relay_content_identity(&db).await?;
         Ok(())
     }
 
@@ -1556,7 +1544,7 @@ async fn registration_watch_diverged(config: &BrokerConfig) -> bool {
     let Some(watch) = config.registration_watch.as_ref() else {
         return false;
     };
-    match load_public_relay_registration(&watch.path, &watch.control_url).await {
+    match load_public_relay_registration(&watch.state_db, &watch.control_url).await {
         Ok(Some(cached)) => {
             cached.relay_id != watch.relay_id
                 || cached.broker_room_id != watch.broker_room_id
@@ -1566,7 +1554,7 @@ async fn registration_watch_diverged(config: &BrokerConfig) -> bool {
         Ok(None) => true,
         Err(error) => {
             warn!(
-                registration_path = %watch.path.display(),
+                state_db = %watch.state_db.display(),
                 error = %error,
                 "failed to read broker registration cache while checking reconnect; treating as diverged"
             );
@@ -1738,19 +1726,17 @@ pub(crate) async fn run_cloud_activate_core(allow_tty: bool) -> i32 {
             return 1;
         }
     };
-    let registration_path = resolve_public_relay_registration_path(
-        &cwd,
-        std::env::var(RELAY_BROKER_REGISTRATION_PATH_ENV).ok(),
-    );
-    let identity_path = resolve_public_relay_identity_path(
-        &cwd,
-        std::env::var(RELAY_BROKER_IDENTITY_PATH_ENV).ok(),
-    );
-
+    let state_db = match crate::state::checked_state_db_path(&cwd) {
+        Ok(state_db) => state_db,
+        Err(error) => {
+            eprintln!("sealwire: cloud activation failed: {error}");
+            scrub_activation_env();
+            return 1;
+        }
+    };
     let pending = PendingPublicEnrollment {
         control_url,
-        registration_path,
-        identity_path,
+        state_db,
     };
     let activation_override = activation_override_env_present();
     let result = enroll_public_relay_if_absent(&pending, || async {
@@ -1837,7 +1823,7 @@ async fn request_public_relay_enrollment(
     enrollment_token: Option<&str>,
 ) -> Result<PublicRelayRegistration, String> {
     let identity =
-        load_or_create_public_relay_identity(&pending.identity_path, pending.control_url.as_str())
+        load_or_create_public_relay_identity(&pending.state_db, pending.control_url.as_str())
             .await?;
     let verify_key_b64 = STANDARD.encode(identity.signing_key.verifying_key().to_bytes());
     let challenge = request_public_relay_enrollment_challenge(
@@ -3228,115 +3214,70 @@ async fn publish_targeted_messages(
     Ok(())
 }
 
-/// The broker registration and identity live next to the session file, not in
-/// the launch directory: they are *this relay's* identity to the broker, so a
-/// per-directory copy would re-enroll as a brand new relay and orphan the
-/// devices already paired with the old one. See [`crate::state_paths`].
-pub(crate) fn resolve_public_relay_registration_path(
-    cwd: &Path,
-    configured: Option<String>,
-) -> PathBuf {
-    crate::state_paths::sibling_state_file(
-        cwd,
-        RELAY_BROKER_REGISTRATION_PATH_ENV,
-        configured.and_then(trimmed_string).map(OsString::from),
-        crate::state_paths::PUBLIC_BROKER_REGISTRATION_FILE,
-    )
+/// The database holding this relay's broker identity: an explicit path (tests) or the
+/// relay's own state database, so the identity always moves together with the relay.
+fn resolve_state_db(cwd: &Path, configured: Option<String>) -> PathBuf {
+    match configured.and_then(trimmed_string) {
+        Some(explicit) => cwd.join(explicit),
+        None => crate::state_paths::state_db_path(cwd),
+    }
 }
 
-fn resolve_public_relay_identity_path(cwd: &Path, configured: Option<String>) -> PathBuf {
-    crate::state_paths::sibling_state_file(
-        cwd,
-        RELAY_BROKER_IDENTITY_PATH_ENV,
-        configured.and_then(trimmed_string).map(OsString::from),
-        crate::state_paths::PUBLIC_BROKER_IDENTITY_FILE,
-    )
+#[derive(Deserialize, Serialize)]
+struct StoredRegistrationInfo {
+    schema_version: u32,
+    control_url: String,
+    relay_id: String,
+    broker_room_id: String,
 }
 
 pub(crate) fn load_public_relay_registration_raw(
-    path: &Path,
+    db: &Path,
 ) -> Result<Option<PersistedPublicRelayRegistration>, String> {
-    const MAX_REGISTRATION_BYTES: usize = 256 * 1024;
-    use std::io::Read;
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "failed to read broker registration cache {}: {error}",
-                path.display()
-            ))
-        }
+    let Some(stored) = stored_credentials::read(db, stored_credentials::PUBLIC_REGISTRATION)
+        .map_err(|error| {
+            format!(
+                "failed to read broker registration in {}: {error}",
+                db.display()
+            )
+        })?
+    else {
+        return Ok(None);
     };
-    #[cfg(windows)]
-    (|| {
-        if let Some(parent) = path.parent() {
-            crate::state_paths::ensure_state_directory(parent)?;
-        }
-        crate::windows_state_permissions::restrict_existing(path, false)
-    })()
-    .map_err(|error| {
+    let info: StoredRegistrationInfo = serde_json::from_str(stored.info.as_deref().unwrap_or(""))
+        .map_err(|error| {
         format!(
-            "failed to restrict broker registration permissions {}: {error}",
-            path.display()
+            "failed to decode broker registration in {}: {error}",
+            db.display()
         )
     })?;
-    if let Ok(meta) = file.metadata() {
-        if meta.len() > MAX_REGISTRATION_BYTES as u64 {
-            return Err(format!(
-                "broker registration cache {} exceeds {MAX_REGISTRATION_BYTES} bytes",
-                path.display()
-            ));
-        }
-    }
-    let mut contents = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = file.read(&mut chunk).map_err(|error| {
-            format!(
-                "failed to read broker registration cache {}: {error}",
-                path.display()
-            )
-        })?;
-        if n == 0 {
-            break;
-        }
-        if contents.len().saturating_add(n) > MAX_REGISTRATION_BYTES {
-            return Err(format!(
-                "broker registration cache {} exceeds {MAX_REGISTRATION_BYTES} bytes",
-                path.display()
-            ));
-        }
-        contents.extend_from_slice(&chunk[..n]);
-    }
-    let persisted: PersistedPublicRelayRegistration =
-        serde_json::from_slice(&contents).map_err(|error| {
-            format!(
-                "failed to decode broker registration cache {}: {error}",
-                path.display()
-            )
-        })?;
-    Ok(Some(persisted))
+    Ok(Some(PersistedPublicRelayRegistration {
+        schema_version: info.schema_version,
+        control_url: info.control_url,
+        relay_id: info.relay_id,
+        broker_room_id: info.broker_room_id,
+        relay_refresh_token: stored.secret,
+    }))
 }
 
 fn load_matching_registration_for_enrollment(
     pending: &PendingPublicEnrollment,
 ) -> Result<Option<PublicRelayRegistration>, String> {
-    let Some(persisted) = load_public_relay_registration_raw(&pending.registration_path)? else {
+    let Some(persisted) = load_public_relay_registration_raw(&pending.state_db)? else {
         return Ok(None);
     };
     if persisted.schema_version != PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION {
         return Err(format!(
             "unsupported broker registration cache schema {} in {}",
             persisted.schema_version,
-            pending.registration_path.display()
+            pending.state_db.display()
         ));
     }
     if persisted.control_url != pending.control_url.as_str() {
         return Err(format!(
             "broker registration cache {} belongs to a different control origin; \
              refusing to overwrite it",
-            pending.registration_path.display()
+            pending.state_db.display()
         ));
     }
     if persisted.relay_id.trim().is_empty()
@@ -3345,7 +3286,7 @@ fn load_matching_registration_for_enrollment(
     {
         return Err(format!(
             "broker registration cache {} is incomplete; refusing to overwrite it",
-            pending.registration_path.display()
+            pending.state_db.display()
         ));
     }
     Ok(Some(PublicRelayRegistration {
@@ -3383,7 +3324,7 @@ where
     Fut: std::future::Future<Output = Result<PublicRelayRegistration, String>>,
     H: FnOnce(),
 {
-    let lifecycle = BrokerLifecycleLock::acquire_for_registration(&pending.registration_path)
+    let lifecycle = BrokerLifecycleLock::acquire_for_registration(&pending.state_db)
         .map_err(EnrollmentCriticalError::Fatal)?;
     after_acquire();
     if let Some(registration) = load_matching_registration_for_enrollment(pending)
@@ -3400,7 +3341,7 @@ where
         .await
         .map_err(EnrollmentCriticalError::Retryable)?;
     save_public_relay_registration(
-        &pending.registration_path,
+        &pending.state_db,
         pending.control_url.as_str(),
         &registration,
     )
@@ -3414,22 +3355,17 @@ where
 }
 
 async fn load_public_relay_registration(
-    path: &Path,
+    db: &Path,
     expected_control_url: &str,
 ) -> Result<Option<PublicRelayRegistration>, String> {
-    let path_owned = path.to_path_buf();
-    let persisted =
-        tokio::task::spawn_blocking(move || load_public_relay_registration_raw(&path_owned))
-            .await
-            .map_err(|error| format!("registration cache read task panicked: {error}"))??;
-    let Some(persisted) = persisted else {
+    let Some(persisted) = load_public_relay_registration_raw(db)? else {
         return Ok(None);
     };
     if persisted.schema_version != PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION {
         return Err(format!(
             "unsupported broker registration cache schema {} in {}",
             persisted.schema_version,
-            path.display()
+            db.display()
         ));
     }
     if persisted.control_url != expected_control_url {
@@ -3443,169 +3379,108 @@ async fn load_public_relay_registration(
     }))
 }
 
-/// Write `payload` to `path` through a temp sibling and an atomic rename,
-/// creating the temp file *exclusively* (`create_new`). That refuses a symlink
-/// or hard link pre-planted at the temp path instead of following it to an
-/// external target: the relay isn't sandboxed, so without this a
-/// workspace-write-confined agent could redirect these broker cache / key
-/// writes to a fixed filename outside the workspace. Mirrors
-/// `state::persistence::save`; `write_new_exclusive`
-/// is sync I/O, hence the blocking pool.
-async fn persist_bytes_atomically(path: &Path, payload: Vec<u8>) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or("broker state path must have a parent directory")?
-        .to_path_buf();
-    let temporary_path = path.with_extension("tmp");
-    let write_path = temporary_path.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::state_paths::ensure_state_directory(&parent)?;
-        crate::instance_lock::write_new_exclusive_with_mode(&write_path, &payload, Some(0o600))
-    })
-    .await
-    .map_err(|error| format!("temp file write task panicked: {error}"))?
-    .map_err(|error| format!("failed to write {}: {error}", temporary_path.display()))?;
-    tokio::fs::rename(&temporary_path, path)
-        .await
-        .map_err(|error| format!("failed to replace {}: {error}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
-}
-
 async fn save_public_relay_registration(
-    path: &Path,
+    db: &Path,
     control_url: &str,
     registration: &PublicRelayRegistration,
 ) -> Result<(), String> {
-    let payload = serde_json::to_vec_pretty(&PersistedPublicRelayRegistration {
+    let info = serde_json::to_string(&StoredRegistrationInfo {
         schema_version: PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
         control_url: control_url.to_string(),
         relay_id: registration.relay_id.clone(),
         broker_room_id: registration.broker_room_id.clone(),
-        relay_refresh_token: registration.relay_refresh_token.clone(),
     })
-    .map_err(|error| format!("failed to encode broker registration cache: {error}"))?;
-    persist_bytes_atomically(path, payload).await
+    .map_err(|error| format!("failed to encode broker registration: {error}"))?;
+    stored_credentials::write(
+        db,
+        stored_credentials::PUBLIC_REGISTRATION,
+        &registration.relay_refresh_token,
+        Some(&info),
+    )
+    .map_err(|error| {
+        format!(
+            "failed to save broker registration in {}: {error}",
+            db.display()
+        )
+    })
 }
 
-#[derive(Serialize, Deserialize)]
-struct PersistedRelayContentIdentity {
+#[derive(Deserialize, Serialize)]
+struct StoredIdentityInfo {
     schema_version: u32,
-    content_signing_seed: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    control_url: Option<String>,
 }
 
-fn session_has_paired_devices(session_path: &Path) -> Result<bool, String> {
-    if !session_path.exists() {
-        return Ok(false);
-    }
-    let text = std::fs::read_to_string(session_path).map_err(|error| {
+const RELAY_CONTENT_IDENTITY_SCHEMA_VERSION: u32 = 1;
+
+/// The self-hosted relay's content key. Created once; never replaced, because the
+/// phones paired with it pinned its public half.
+async fn load_or_create_relay_content_identity(db: &Path) -> Result<SigningKey, String> {
+    let unusable = |reason: &str| {
         format!(
-            "relay session at {} could not be read ({error}); refusing to mint a replacement content identity",
-            session_path.display()
+            "relay content identity in {} {reason}; refusing to replace it",
+            db.display()
         )
-    })?;
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
-        format!(
-            "relay session at {} is unreadable; refusing to mint a replacement content identity",
-            session_path.display()
-        )
-    })?;
-    let paired = match value.get("paired_devices") {
-        Some(serde_json::Value::Object(devices)) => !devices.is_empty(),
-        Some(serde_json::Value::Array(devices)) => !devices.is_empty(),
-        _ => false,
     };
-    Ok(paired)
-}
-
-async fn load_or_create_relay_content_identity(
-    path: &Path,
-    session_path: &Path,
-) -> Result<SigningKey, String> {
-    const SCHEMA: u32 = 1;
-    if path.exists() {
-        let text = tokio::fs::read_to_string(path).await.map_err(|error| {
-            format!(
-                "relay content identity at {} could not be read ({error}); refusing to replace it",
-                path.display()
-            )
-        })?;
-        let parsed: PersistedRelayContentIdentity = serde_json::from_str(&text).map_err(|_| {
-            format!(
-                "relay content identity at {} is unreadable; refusing to replace it",
-                path.display()
-            )
-        })?;
-        if parsed.schema_version != SCHEMA {
+    stored_credentials::transact(db, |conn| {
+        if let Some(stored) =
+            stored_credentials::read_in(conn, stored_credentials::RELAY_CONTENT_IDENTITY)?
+        {
+            let info: StoredIdentityInfo =
+                serde_json::from_str(stored.info.as_deref().unwrap_or(""))
+                    .map_err(|_| unusable("is unreadable"))?;
+            if info.schema_version != RELAY_CONTENT_IDENTITY_SCHEMA_VERSION {
+                return Err(unusable(&format!("has schema {}", info.schema_version)));
+            }
+            let seed: [u8; 32] = STANDARD
+                .decode(stored.secret.trim())
+                .ok()
+                .and_then(|seed| seed.as_slice().try_into().ok())
+                .ok_or_else(|| unusable("has an unusable seed"))?;
+            return Ok(SigningKey::from_bytes(&seed));
+        }
+        if stored_credentials::paired_device_count_in(conn)? > 0 {
             return Err(format!(
-                "relay content identity at {} has schema {}; refusing to replace it",
-                path.display(),
-                parsed.schema_version
+                "relay content identity in {} is missing but this relay already has paired devices; restore the database or pair the phones again after removing those devices",
+                db.display()
             ));
         }
-        let seed = STANDARD
-            .decode(parsed.content_signing_seed.trim())
-            .map_err(|_| {
-                format!(
-                    "relay content identity at {} has an unusable seed; refusing to replace it",
-                    path.display()
-                )
-            })?;
-        let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| {
-            format!(
-                "relay content identity at {} has an unusable seed; refusing to replace it",
-                path.display()
-            )
-        })?;
-        return Ok(SigningKey::from_bytes(&seed));
-    }
-    if session_has_paired_devices(session_path)? {
-        return Err(format!(
-            "relay content identity at {} is missing but this relay already has paired devices; restore the identity file or pair the phones again after removing those devices",
-            path.display()
-        ));
-    }
-    let key = generate_content_signing_key();
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                format!("relay content identity directory could not be created: {error}")
-            })?;
-        }
-    }
-    let body = serde_json::to_vec(&PersistedRelayContentIdentity {
-        schema_version: SCHEMA,
-        content_signing_seed: STANDARD.encode(key.to_bytes()),
+        let key = generate_content_signing_key();
+        let info = serde_json::to_string(&StoredIdentityInfo {
+            schema_version: RELAY_CONTENT_IDENTITY_SCHEMA_VERSION,
+            control_url: None,
+        })
+        .map_err(|error| format!("relay content identity could not be encoded: {error}"))?;
+        stored_credentials::write_in(
+            conn,
+            stored_credentials::RELAY_CONTENT_IDENTITY,
+            &STANDARD.encode(key.to_bytes()),
+            Some(&info),
+        )?;
+        Ok(key)
     })
-    .map_err(|error| format!("relay content identity could not be encoded: {error}"))?;
-    persist_bytes_atomically(path, body).await?;
-    Ok(key)
 }
 
 async fn load_existing_public_relay_identity(
-    path: &Path,
+    db: &Path,
     control_url: &str,
 ) -> Result<PublicRelayIdentity, String> {
-    let loaded = read_public_relay_identity(path).await?;
-    let Some(persisted) = loaded else {
+    let Some(persisted) = load_public_relay_identity_raw(db)? else {
         return Err(format!(
-            "public broker identity is missing at {}; refusing to generate a new key for an already enrolled relay",
-            path.display()
+            "public broker identity is missing in {}; refusing to generate a new key for an already enrolled relay",
+            db.display()
         ));
     };
-    identity_from_persisted(path, control_url, persisted)
+    identity_from_persisted(db, control_url, persisted)
 }
 
 async fn load_or_create_public_relay_identity(
-    path: &Path,
+    db: &Path,
     control_url: &str,
 ) -> Result<PublicRelayIdentity, String> {
-    if let Some(persisted) = read_public_relay_identity(path).await? {
-        return identity_from_persisted(path, control_url, persisted);
+    if let Some(persisted) = load_public_relay_identity_raw(db)? {
+        return identity_from_persisted(db, control_url, persisted);
     }
 
     let mut signing_seed = [0_u8; 32];
@@ -3613,21 +3488,12 @@ async fn load_or_create_public_relay_identity(
     let identity = PublicRelayIdentity {
         signing_key: SigningKey::from_bytes(&signing_seed),
     };
-    save_public_relay_identity(path, control_url, &identity).await?;
+    save_public_relay_identity(db, control_url, &identity).await?;
     Ok(identity)
 }
 
-async fn read_public_relay_identity(
-    path: &Path,
-) -> Result<Option<PersistedPublicRelayIdentity>, String> {
-    let path_owned = path.to_path_buf();
-    tokio::task::spawn_blocking(move || load_public_relay_identity_raw(&path_owned))
-        .await
-        .map_err(|error| format!("relay identity read task panicked: {error}"))?
-}
-
 fn identity_from_persisted(
-    path: &Path,
+    db: &Path,
     control_url: &str,
     persisted: PersistedPublicRelayIdentity,
 ) -> Result<PublicRelayIdentity, String> {
@@ -3635,15 +3501,15 @@ fn identity_from_persisted(
         return Err(format!(
             "unsupported broker relay identity schema {} in {}",
             persisted.schema_version,
-            path.display()
+            db.display()
         ));
     }
     let persisted_origin = access_release::normalize_control_origin(&persisted.control_url)?;
     let expected_origin = access_release::normalize_control_origin(control_url)?;
     if persisted_origin != expected_origin {
         return Err(format!(
-            "broker relay identity {} was created for {}, expected {}",
-            path.display(),
+            "broker relay identity in {} was created for {}, expected {}",
+            db.display(),
             persisted.control_url,
             control_url
         ));
@@ -3652,15 +3518,15 @@ fn identity_from_persisted(
         .decode(&persisted.relay_signing_seed)
         .map_err(|_| {
             format!(
-                "broker relay identity {} contains an invalid signing seed",
-                path.display()
+                "broker relay identity in {} contains an invalid signing seed",
+                db.display()
             )
         })?
         .try_into()
         .map_err(|_| {
             format!(
-                "broker relay identity {} contains an invalid signing seed",
-                path.display()
+                "broker relay identity in {} contains an invalid signing seed",
+                db.display()
             )
         })?;
     Ok(PublicRelayIdentity {
@@ -3669,83 +3535,242 @@ fn identity_from_persisted(
 }
 
 fn load_public_relay_identity_raw(
-    path: &Path,
+    db: &Path,
 ) -> Result<Option<PersistedPublicRelayIdentity>, String> {
-    const MAX_IDENTITY_BYTES: usize = 64 * 1024;
-    use std::io::Read;
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "failed to read broker relay identity {}: {error}",
-                path.display()
-            ))
-        }
+    let Some(stored) = stored_credentials::read(db, stored_credentials::PUBLIC_RELAY_IDENTITY)
+        .map_err(|error| {
+            format!(
+                "failed to read broker relay identity in {}: {error}",
+                db.display()
+            )
+        })?
+    else {
+        return Ok(None);
     };
-    #[cfg(windows)]
-    (|| {
-        if let Some(parent) = path.parent() {
-            crate::state_paths::ensure_state_directory(parent)?;
-        }
-        crate::windows_state_permissions::restrict_existing(path, false)
-    })()
-    .map_err(|error| {
-        format!(
-            "failed to restrict broker identity permissions {}: {error}",
-            path.display()
-        )
-    })?;
-    if let Ok(meta) = file.metadata() {
-        if meta.len() > MAX_IDENTITY_BYTES as u64 {
-            return Err(format!(
-                "broker relay identity {} exceeds {MAX_IDENTITY_BYTES} bytes",
-                path.display()
-            ));
-        }
-    }
-    let mut contents = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = file.read(&mut chunk).map_err(|error| {
+    let info: StoredIdentityInfo = serde_json::from_str(stored.info.as_deref().unwrap_or(""))
+        .map_err(|error| {
             format!(
-                "failed to read broker relay identity {}: {error}",
-                path.display()
+                "failed to decode broker relay identity in {}: {error}",
+                db.display()
             )
         })?;
-        if n == 0 {
-            break;
-        }
-        if contents.len().saturating_add(n) > MAX_IDENTITY_BYTES {
-            return Err(format!(
-                "broker relay identity {} exceeds {MAX_IDENTITY_BYTES} bytes",
-                path.display()
-            ));
-        }
-        contents.extend_from_slice(&chunk[..n]);
-    }
-    let persisted: PersistedPublicRelayIdentity =
-        serde_json::from_slice(&contents).map_err(|error| {
-            format!(
-                "failed to decode broker relay identity {}: {error}",
-                path.display()
-            )
-        })?;
-    Ok(Some(persisted))
+    Ok(Some(PersistedPublicRelayIdentity {
+        schema_version: info.schema_version,
+        control_url: info.control_url.unwrap_or_default(),
+        relay_signing_seed: stored.secret,
+    }))
 }
 
 async fn save_public_relay_identity(
-    path: &Path,
+    db: &Path,
     control_url: &str,
     identity: &PublicRelayIdentity,
 ) -> Result<(), String> {
-    let payload = serde_json::to_vec_pretty(&PersistedPublicRelayIdentity {
+    let info = serde_json::to_string(&StoredIdentityInfo {
         schema_version: PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION,
-        control_url: control_url.to_string(),
-        relay_signing_seed: STANDARD.encode(identity.signing_key.to_bytes()),
+        control_url: Some(control_url.to_string()),
     })
     .map_err(|error| format!("failed to encode broker relay identity: {error}"))?;
-    persist_bytes_atomically(path, payload).await
+    stored_credentials::write(
+        db,
+        stored_credentials::PUBLIC_RELAY_IDENTITY,
+        &STANDARD.encode(identity.signing_key.to_bytes()),
+        Some(&info),
+    )
+    .map_err(|error| {
+        format!(
+            "failed to save broker relay identity in {}: {error}",
+            db.display()
+        )
+    })
+}
+
+/// Holds the lock `cloud-activate` and `cloud unbind` take, so neither can change the
+/// broker identity while it is being moved into the database.
+pub(crate) struct LifecycleGuard(#[allow(dead_code)] BrokerLifecycleLock);
+
+pub(crate) fn hold_lifecycle_lock(beside: &Path) -> Result<LifecycleGuard, String> {
+    BrokerLifecycleLock::acquire_for_registration(beside).map(LifecycleGuard)
+}
+
+/// The identity files an older build kept beside `session.json`.
+// TODO(2026-12): remove with `migrate-storage` once every relay has been imported.
+pub(crate) struct LegacyBrokerFiles {
+    pub(crate) registration: PathBuf,
+    pub(crate) identity: PathBuf,
+    pub(crate) content_identity: PathBuf,
+}
+
+fn read_legacy_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("failed to read {}: {error}", path.display())),
+    }
+}
+
+fn signing_key_from_seed(seed: &str, what: &str) -> Result<SigningKey, String> {
+    let seed: [u8; 32] = STANDARD
+        .decode(seed.trim())
+        .ok()
+        .and_then(|seed| seed.as_slice().try_into().ok())
+        .ok_or_else(|| format!("{what} has an unusable seed"))?;
+    Ok(SigningKey::from_bytes(&seed))
+}
+
+/// Copy the files into `conn` (inside the caller's transaction) unchanged, read each
+/// back, and describe what was copied without printing any secret.
+pub(crate) fn import_legacy_broker_files(
+    conn: &rusqlite::Connection,
+    files: &LegacyBrokerFiles,
+) -> Result<Vec<String>, String> {
+    let mut report = Vec::new();
+    let registration = read_legacy_file(&files.registration)?;
+    let identity = read_legacy_file(&files.identity)?;
+    if registration.is_some() && identity.is_none() {
+        return Err(format!(
+            "{} exists but {} does not: this relay is enrolled and its identity is missing. \
+             Restore the identity file before importing; a new one would strand every paired phone.",
+            files.registration.display(),
+            files.identity.display()
+        ));
+    }
+    let copy = |kind: &str, secret: &str, info: &str| -> Result<(), String> {
+        stored_credentials::write_in(conn, kind, secret, Some(info))?;
+        let back = stored_credentials::read_in(conn, kind)?
+            .ok_or_else(|| format!("{kind} was not written"))?;
+        if back.secret != secret || back.info.as_deref() != Some(info) {
+            return Err(format!("{kind} read back differently than it was written"));
+        }
+        Ok(())
+    };
+
+    if let Some(bytes) = identity {
+        let persisted: PersistedPublicRelayIdentity = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("failed to decode {}: {error}", files.identity.display()))?;
+        if persisted.schema_version != PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported broker relay identity schema {} in {}",
+                persisted.schema_version,
+                files.identity.display()
+            ));
+        }
+        let key = signing_key_from_seed(
+            &persisted.relay_signing_seed,
+            &files.identity.display().to_string(),
+        )?;
+        let info = serde_json::to_string(&StoredIdentityInfo {
+            schema_version: persisted.schema_version,
+            control_url: Some(persisted.control_url.clone()),
+        })
+        .map_err(|error| error.to_string())?;
+        copy(
+            stored_credentials::PUBLIC_RELAY_IDENTITY,
+            &persisted.relay_signing_seed,
+            &info,
+        )?;
+        report.push(format!(
+            "Cloud relay identity for {}: public key {}",
+            persisted.control_url,
+            STANDARD.encode(key.verifying_key().to_bytes())
+        ));
+    }
+
+    if let Some(bytes) = registration {
+        let persisted: PersistedPublicRelayRegistration =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                format!("failed to decode {}: {error}", files.registration.display())
+            })?;
+        if persisted.schema_version != PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported broker registration cache schema {} in {}",
+                persisted.schema_version,
+                files.registration.display()
+            ));
+        }
+        let info = serde_json::to_string(&StoredRegistrationInfo {
+            schema_version: persisted.schema_version,
+            control_url: persisted.control_url.clone(),
+            relay_id: persisted.relay_id.clone(),
+            broker_room_id: persisted.broker_room_id.clone(),
+        })
+        .map_err(|error| error.to_string())?;
+        copy(
+            stored_credentials::PUBLIC_REGISTRATION,
+            &persisted.relay_refresh_token,
+            &info,
+        )?;
+        report.push(format!(
+            "Cloud registration: relay {} in room {} (token fingerprint {})",
+            persisted.relay_id,
+            persisted.broker_room_id,
+            bearer_fingerprint(&persisted.relay_refresh_token)
+        ));
+    }
+
+    if let Some(bytes) = read_legacy_file(&files.content_identity)? {
+        #[derive(Deserialize)]
+        struct LegacyContentIdentity {
+            schema_version: u32,
+            content_signing_seed: String,
+        }
+        let persisted: LegacyContentIdentity = serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "failed to decode {}: {error}",
+                files.content_identity.display()
+            )
+        })?;
+        if persisted.schema_version != RELAY_CONTENT_IDENTITY_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported relay content identity schema {} in {}",
+                persisted.schema_version,
+                files.content_identity.display()
+            ));
+        }
+        let key = signing_key_from_seed(
+            &persisted.content_signing_seed,
+            &files.content_identity.display().to_string(),
+        )?;
+        let info = serde_json::to_string(&StoredIdentityInfo {
+            schema_version: persisted.schema_version,
+            control_url: None,
+        })
+        .map_err(|error| error.to_string())?;
+        copy(
+            stored_credentials::RELAY_CONTENT_IDENTITY,
+            &persisted.content_signing_seed,
+            &info,
+        )?;
+        report.push(format!(
+            "self-hosted relay identity: public key {}",
+            STANDARD.encode(key.verifying_key().to_bytes())
+        ));
+    }
+    Ok(report)
+}
+
+/// A database of its own for one test, in a directory of its own so no other test's
+/// files sit beside it.
+#[cfg(test)]
+pub(crate) fn temp_state_db(prefix: &str) -> String {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("test state directory");
+    dir.join("sealwire.db").display().to_string()
+}
+
+#[cfg(test)]
+pub(crate) async fn save_test_public_identity(db: &str, control_url: &str, seed: [u8; 32]) {
+    let parsed = auth::parse_control_plane_url(control_url).expect("control url");
+    let identity = PublicRelayIdentity {
+        signing_key: SigningKey::from_bytes(&seed),
+    };
+    save_public_relay_identity(Path::new(db), parsed.as_str(), &identity)
+        .await
+        .expect("identity should save");
 }
 
 fn http_control_url(broker_ws_url: &str) -> String {

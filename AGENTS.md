@@ -60,11 +60,11 @@ cover cases that lose or corrupt data, or break security.
 **Do not stop, kill, or restart the user's relay** (`relay-server` on port 8787
 or whatever `npm run dev:full` is using) unless they explicitly ask you to. A
 running relay holds live team drivers, provider sessions, and in-memory state
-that a restart disrupts; patching `~/.agent-relay/session.json` while it is up
-also races the debounced writer and your edits get overwritten. Prefer the HTTP
+that a restart disrupts; editing `~/.sealwire/sealwire.db` underneath it puts
+rows on disk that its in-memory state no longer matches. Prefer the HTTP
 API (`revise`, `confirm`, `dismiss`, orchestrator tools) against the live
 instance. To test changes in isolation, spin up a **separate** relay on another
-port with its own `RELAY_STATE_PATH` (see below) — never touch the one the user
+port with its own `RELAY_STATE_DB` (see below) — never touch the one the user
 is working through.
 
 The relay is a plain JSON HTTP API on `127.0.0.1:8787` (`npm run dev:full`), so
@@ -80,7 +80,7 @@ non-empty `device_id` — any string; pairing is for remote clients.
 - `POST /api/session/start`, `GET /api/threads`, `GET /api/providers/:p/models`.
 
 `scripts/verify-orchestrator-mcp.mjs` is the worked example: it boots a relay on
-a free port with its own `RELAY_STATE_PATH` and drives it end to end. Copy that
+a free port with its own `RELAY_STATE_DB` and drives it end to end. Copy that
 rather than re-deriving it, and give your relay its own port and state path so it
 cannot disturb one already running.
 

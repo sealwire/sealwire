@@ -34,6 +34,7 @@ import {
   startRemoteSession,
   waitForRemoteMessageInput,
 } from "./e2e/harness/remote-session.mjs";
+import { readCredential } from "./e2e/harness/state-db.mjs";
 
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 60000);
 const ENROLLMENT_PROMPT =
@@ -48,10 +49,8 @@ async function main() {
   const brokerPort = await getFreePort();
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-enrollment-"));
-  const relayStatePath = path.join(stateDir, "session.json");
+  const relayStateDb = path.join(stateDir, "sealwire.db");
   const brokerStatePath = path.join(stateDir, "public-control.json");
-  const registrationPath = path.join(stateDir, "public-registration.json");
-  const identityPath = path.join(stateDir, "public-identity.json");
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-enrollment-workspace-"))
   );
@@ -65,19 +64,17 @@ async function main() {
 
   const relay = startPublicRelay({
     relayPort,
-    relayStatePath,
+    relayStateDb,
     brokerPort,
     lanIp,
     peerId: "browser-public-enrollment-relay",
-    registrationPath,
-    identityPath,
     extraEnv: USE_FAKE_PROVIDER ? { AGENT_PROVIDERS: "fake" } : {},
   });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
   await waitForBrokerConnection(`http://127.0.0.1:${relayPort}/api/session`);
 
-  const registration = await waitForRegistration(registrationPath);
-  const identity = await waitForIdentity(identityPath);
+  const registration = await waitForRegistration(relayStateDb);
+  const identity = await waitForIdentity(relayStateDb);
   assert.ok(registration.relay_id?.startsWith("relay-"));
   assert.ok(registration.broker_room_id?.startsWith("room-"));
   assert.ok(registration.relay_refresh_token?.startsWith("rref-"));
@@ -151,8 +148,7 @@ async function main() {
         relayPort,
         lanIp,
         workspaceDir,
-        registrationPath,
-        identityPath,
+        relayStateDb,
         pairingOrigin: pairingUrl ? new URL(pairingUrl).origin : null,
         relayId: registration.relay_id,
         brokerRoomId: registration.broker_room_id,
@@ -176,34 +172,32 @@ async function main() {
   }
 }
 
-async function waitForRegistration(registrationPath, timeoutMs = TIMEOUT_MS) {
+async function waitForRegistration(relayStateDb, timeoutMs = TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const raw = await fs.readFile(registrationPath, "utf8");
-      const parsed = JSON.parse(raw);
-      if (parsed?.relay_id && parsed?.broker_room_id && parsed?.relay_refresh_token) {
-        return parsed;
+      const stored = readCredential(relayStateDb, "public_registration");
+      if (stored?.info?.relay_id && stored.info.broker_room_id && stored.secret) {
+        return { ...stored.info, relay_refresh_token: stored.secret };
       }
     } catch {}
     await delay(250);
   }
-  throw new Error(`timed out waiting for relay registration file: ${registrationPath}`);
+  throw new Error(`timed out waiting for the relay registration in ${relayStateDb}`);
 }
 
-async function waitForIdentity(identityPath, timeoutMs = TIMEOUT_MS) {
+async function waitForIdentity(relayStateDb, timeoutMs = TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const raw = await fs.readFile(identityPath, "utf8");
-      const parsed = JSON.parse(raw);
-      if (parsed?.relay_signing_seed) {
-        return parsed;
+      const stored = readCredential(relayStateDb, "public_relay_identity");
+      if (stored?.secret) {
+        return { ...stored.info, relay_signing_seed: stored.secret };
       }
     } catch {}
     await delay(250);
   }
-  throw new Error(`timed out waiting for relay identity file: ${identityPath}`);
+  throw new Error(`timed out waiting for the relay identity in ${relayStateDb}`);
 }
 
 main().catch((error) => {

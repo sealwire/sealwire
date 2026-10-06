@@ -36,7 +36,7 @@ process.on("exit", () => {
 
 async function main() {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-cwd-drift-e2e-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const { mainCwd, linkedCwd } = await initRepoWithWorktree(stateDir);
 
   // CI already builds; local runs may not. Skip rebuild when the binary exists
@@ -50,7 +50,7 @@ async function main() {
   const relay = spawnManagedProcess("relay", relayBin, [], {
     AGENT_PROVIDERS: "fake",
     PORT: String(relayPort),
-    RELAY_STATE_PATH: statePath,
+    RELAY_STATE_DB: statePath,
   });
 
   try {

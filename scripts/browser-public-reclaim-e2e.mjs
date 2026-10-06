@@ -28,6 +28,7 @@ import {
   startRemoteSession,
   waitForRemoteMessageInput,
 } from "./e2e/harness/remote-session.mjs";
+import { readCredential, readStateRows } from "./e2e/harness/state-db.mjs";
 
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 60000);
 const BEFORE_RESTART_PROMPT =
@@ -50,7 +51,7 @@ async function main() {
   const brokerPort = await getFreePort();
   const relayPort = await getFreePort();
   const relayStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-reclaim-e2e-"));
-  const relayStatePath = path.join(relayStateDir, "session.json");
+  const relayStateDb = path.join(relayStateDir, "sealwire.db");
   const brokerStatePath = path.join(relayStateDir, "public-control.json");
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-public-reclaim-workspace-"))
@@ -66,7 +67,7 @@ async function main() {
   });
   await waitForHealth(`http://127.0.0.1:${brokerPort}/api/health`);
 
-  let relay = startRelay({ relayPort, relayStatePath, brokerPort, lanIp });
+  let relay = startRelay({ relayPort, relayStateDb, brokerPort, lanIp });
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
   await waitForBrokerConnection(`http://127.0.0.1:${relayPort}/api/session`);
 
@@ -133,15 +134,15 @@ async function main() {
     assertStoredPayloadSecretMetadata(authBeforeRestart);
     payloadSecretBeforeRestart = await readPersistedPayloadSecret(remotePage);
     assert.ok(payloadSecretBeforeRestart, "paired remote should persist a payload secret");
-    await waitForPersistedRelayState(relayStatePath, createdThreadId);
+    await waitForPersistedRelayState(relayStateDb, createdThreadId);
     await waitForPersistedPayloadSecret(
-      relayStatePath,
+      relayStateDb,
       authBeforeRestart.deviceId,
       payloadSecretBeforeRestart
     );
 
     await stopManagedProcess(relay);
-    relay = startRelay({ relayPort, relayStatePath, brokerPort, lanIp });
+    relay = startRelay({ relayPort, relayStateDb, brokerPort, lanIp });
     await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
     await waitForBrokerConnection(`http://127.0.0.1:${relayPort}/api/session`);
 
@@ -182,7 +183,7 @@ async function main() {
       "reclaim should not rotate the payload secret"
     );
     await waitForPersistedPayloadSecret(
-      relayStatePath,
+      relayStateDb,
       authAfterRestart.deviceId,
       payloadSecretAfterRestart
     );
@@ -254,10 +255,10 @@ async function main() {
   }
 }
 
-function startRelay({ relayPort, relayStatePath, brokerPort, lanIp }) {
+function startRelay({ relayPort, relayStateDb, brokerPort, lanIp }) {
   return startPublicRelay({
     relayPort,
-    relayStatePath,
+    relayStateDb,
     brokerPort,
     lanIp,
     brokerRoomId: BROKER_ROOM_ID,
@@ -317,14 +318,13 @@ async function readClaimCounters(page) {
   }));
 }
 
-async function waitForPersistedRelayState(statePath, expectedThreadId, timeoutMs = TIMEOUT_MS) {
+async function waitForPersistedRelayState(relayStateDb, expectedThreadId, timeoutMs = TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const raw = await fs.readFile(statePath, "utf8");
-      const parsed = JSON.parse(raw);
-      if (parsed?.active_thread_id === expectedThreadId) {
-        return parsed;
+      const settings = readStateRows(relayStateDb, "relay_setting");
+      if (settings.active_thread_id === expectedThreadId) {
+        return settings;
       }
     } catch {}
     await delay(250);
@@ -333,7 +333,7 @@ async function waitForPersistedRelayState(statePath, expectedThreadId, timeoutMs
 }
 
 async function waitForPersistedPayloadSecret(
-  statePath,
+  relayStateDb,
   deviceId,
   payloadSecret,
   timeoutMs = TIMEOUT_MS
@@ -342,12 +342,10 @@ async function waitForPersistedPayloadSecret(
   let lastPersistedSecret = null;
   while (Date.now() < deadline) {
     try {
-      const raw = await fs.readFile(statePath, "utf8");
-      const parsed = JSON.parse(raw);
-      const persistedSecret = parsed?.paired_devices?.[deviceId]?.payload_secret || null;
+      const persistedSecret = readCredential(relayStateDb, "device_payload", deviceId)?.secret || null;
       lastPersistedSecret = persistedSecret;
       if (persistedSecret === payloadSecret) {
-        return parsed;
+        return persistedSecret;
       }
     } catch {}
     await delay(250);

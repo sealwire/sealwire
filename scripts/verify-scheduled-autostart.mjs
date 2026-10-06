@@ -86,7 +86,7 @@ try {
     env: {
       ...process.env,
       PORT: String(port),
-      RELAY_STATE_PATH: path.join(stateDir, "session.json"),
+      RELAY_STATE_DB: path.join(stateDir, "sealwire.db"),
       AGENT_PROVIDERS: "fake",
       SEALWIRE_BETA: "1",
     },

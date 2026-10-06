@@ -111,6 +111,20 @@ pub(super) async fn execute_admitted(
         origin.ingress,
     )
     .await;
+    // A write is saved before its result is recorded, so a device is never told "done"
+    // about a change a restart would lose.
+    let result = match (admitted.class, result) {
+        (RequestClass::Write, Ok(outcome)) => match state.commit_core().await {
+            Ok(()) => Ok(outcome),
+            Err(error) => {
+                warn!(%error, action = action_kind.as_str(), "remote write could not be saved");
+                Err(RemoteActionFailure::from(format!(
+                    "the change was made but could not be saved: {error}"
+                )))
+            }
+        },
+        (_, result) => result,
+    };
 
     let AdmittedAttempt {
         from_peer_id,

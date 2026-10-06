@@ -1656,3 +1656,62 @@ fn csrf_checks_referer_when_origin_is_absent() {
         );
     }
 }
+
+// "Done" must mean saved: nothing else commits in this harness, so a row that is on
+// disk when the reply arrives was written by the request itself.
+#[tokio::test]
+async fn a_successful_change_is_on_disk_before_its_reply() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let project = tempfile::TempDir::new().expect("project tempdir");
+    let database = project.path().join("sealwire.db");
+    let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
+    let relay = std::sync::Arc::new(tokio::sync::RwLock::new(crate::state::RelayState::new(
+        project.path().display().to_string(),
+        change_tx.clone(),
+        crate::state::SecurityProfile::private(),
+    )));
+    relay
+        .write()
+        .await
+        .install_database(crate::usage::store::UsageStore::open(&database));
+    let context = AppContext {
+        app: crate::state::AppState::from_parts(relay, std::collections::HashMap::new(), change_tx),
+        launch_id: None,
+        security_headers: SecurityHeadersConfig::default(),
+        host_policy: HostPolicy::loopback_only(),
+    };
+    let router = build_router(context, WebAssets::Embedded);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/projects")
+                .header(header::HOST, "127.0.0.1:8787")
+                .header(HeaderName::from_static(CSRF_HEADER_NAME), CSRF_HEADER_VALUE)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"action":"create","name":"Saved before reply"}"#,
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("router should respond");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let saved: i64 = rusqlite::Connection::open(&database)
+        .expect("open")
+        .query_row(
+            "SELECT COUNT(*) FROM project WHERE body LIKE '%Saved before reply%'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query");
+    assert_eq!(
+        saved, 1,
+        "the project must be in the database when the reply arrives"
+    );
+}

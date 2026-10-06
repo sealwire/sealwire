@@ -62,7 +62,7 @@ async function main() {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "view-only-models-"));
   const relay = startLocalRelay({
     relayPort: port,
-    relayStatePath: path.join(stateDir, "session.json"),
+    relayStateDb: path.join(stateDir, "sealwire.db"),
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });
   const base = `http://127.0.0.1:${port}`;

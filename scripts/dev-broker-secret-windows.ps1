@@ -70,7 +70,7 @@ function Ensure-PrivateDirectory([string] $Path, [bool] $Dedicated) {
 }
 
 $StateDirectory = $env:SEALWIRE_DEV_SECRET_DIRECTORY
-Ensure-PrivateDirectory $StateDirectory ([System.IO.Path]::GetFileName($StateDirectory) -eq '.agent-relay')
+Ensure-PrivateDirectory $StateDirectory ([System.IO.Path]::GetFileName($StateDirectory) -eq '.sealwire')
 $Path = [System.IO.Path]::Combine($StateDirectory, $env:SEALWIRE_DEV_SECRET_FILENAME)
 $File = New-Object System.IO.FileInfo($Path)
 if ($File.Exists) {

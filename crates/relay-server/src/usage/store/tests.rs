@@ -207,43 +207,28 @@ fn migration_nine_removes_cached_input_from_legacy_codex_input() {
     );
 }
 
-/// **The load-bearing invariant of this whole module.**
-///
-/// `session.json` fails closed and catastrophically: one bad byte and
-/// `AppState::new` discards the entire file, unpairing every device. The ledger
-/// must fail the other way — an unreadable database costs you a number, never a
-/// relay.
-///
-/// This test pins the store half of that (a corrupt file degrades rather than
-/// panicking or returning an error the caller must handle);
-/// `relay_boot_survives_a_corrupt_token_ledger` pins the boot half.
+/// The database holds the relay's state now, so a file it cannot read stops the
+/// relay instead of quietly starting it empty; the file is left for inspection.
 #[test]
-fn a_corrupt_ledger_database_degrades_instead_of_failing_the_relay() {
+fn a_corrupt_database_is_refused_and_left_untouched() {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("sealwire.db");
+    let garbage = b"this is emphatically not a sqlite database".to_vec();
     let mut file = std::fs::File::create(&path).expect("create");
-    file.write_all(b"this is emphatically not a sqlite database")
-        .expect("write garbage");
+    file.write_all(&garbage).expect("write garbage");
     drop(file);
 
-    // Must not panic, and must not return an Err the caller has to handle.
-    let store = UsageStore::open(&path);
-
-    assert!(
-        !store.is_enabled(),
-        "a corrupt ledger must report itself disabled so a surface can say \
-         'unavailable' rather than render a confident zero"
-    );
-    // Every operation stays callable and inert.
-    store.record(&event(1, "codex", "gpt-5", 1_000));
-    assert!(store.by_provider_model(0, u64::MAX).is_empty());
-    assert!(store.by_day(0, u64::MAX).is_empty());
+    let error = UsageStore::open_at(&path)
+        .err()
+        .expect("a corrupt database is refused");
+    assert!(error.contains(&path.display().to_string()), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), garbage);
 }
 
 /// A file written by a NEWER build must not be downgraded under a build that
-/// cannot read it. Degrade this run instead.
+/// cannot read it.
 #[test]
-fn a_ledger_from_a_newer_build_is_refused_rather_than_downgraded() {
+fn a_database_from_a_newer_build_is_refused_rather_than_downgraded() {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("sealwire.db");
     {
@@ -252,10 +237,11 @@ fn a_ledger_from_a_newer_build_is_refused_rather_than_downgraded() {
             .expect("stamp a future version");
     }
 
-    let store = UsageStore::open(&path);
-    assert!(!store.is_enabled(), "a future schema degrades this run");
+    let error = UsageStore::open_at(&path)
+        .err()
+        .expect("a future schema is refused");
+    assert!(error.contains("newer than this build"), "{error}");
 
-    // And the file is left intact for the build that does understand it.
     let conn = Connection::open(&path).expect("reopen");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -1106,4 +1092,131 @@ fn an_old_database_whose_sidecar_cannot_be_removed_keeps_its_name() {
 
     assert_eq!(path, old);
     assert!(!dir.path().join("sealwire.db").exists());
+}
+
+/// The database holds credentials, so it and the files SQLite writes beside it are
+/// readable by the owner only, however the process umask is set.
+#[cfg(unix)]
+#[test]
+fn the_database_and_its_side_files_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("sealwire.db");
+    let store = UsageStore::open(&path);
+    store.record(&event(1, "codex", "gpt-5", 1_000));
+    for file in [
+        path.clone(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        let mode = std::fs::metadata(&file).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} is mode {mode:o}", file.display());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_readable_database_left_by_an_older_build_is_made_private_on_open() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("sealwire.db");
+    Connection::open(&path)
+        .expect("create")
+        .execute_batch("CREATE TABLE seed (x INTEGER);")
+        .expect("seed");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+    let _store = UsageStore::open(&path);
+
+    let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "mode {mode:o}");
+}
+
+#[test]
+fn a_review_comment_is_not_kept_without_its_created_event() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = open_in(&dir);
+    Connection::open(dir.path().join("sealwire.db"))
+        .expect("open")
+        .execute_batch(
+            "CREATE TRIGGER refuse_events BEFORE INSERT ON review_comment_event
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .expect("trigger");
+    let comment = ReviewComment {
+        id: "comment-1".to_string(),
+        scope: "team_run:run-1".to_string(),
+        author_kind: ReviewAuthorKind::Human,
+        author_role: None,
+        body: "nit".to_string(),
+        status: ReviewCommentStatus::Open,
+        anchor: LineAnchor {
+            path: "src/a.ts".to_string(),
+            side: CommentSide::New,
+            line: 1,
+            exact: "line-1".to_string(),
+            prefix: String::new(),
+            suffix: String::new(),
+            line_hash: "hash-1".to_string(),
+            window_hash: "window-1".to_string(),
+            base_commit: None,
+        },
+        created_at: 1,
+        updated_at: 1,
+    };
+
+    assert!(store.insert_review_comment(&comment).is_err());
+    assert!(
+        store
+            .get_review_comment("comment-1")
+            .expect("read")
+            .is_none(),
+        "a comment whose history could not be written must not be half-saved"
+    );
+}
+
+/// Resolving a comment returns the updated comment. It must not wait on the database
+/// lock it already holds, which would hang the request and every later database call.
+#[test]
+fn resolving_a_review_comment_returns_it_updated() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = open_in(&dir);
+    let comment = ReviewComment {
+        id: "comment-2".to_string(),
+        scope: "thread:thread-1".to_string(),
+        author_kind: ReviewAuthorKind::Human,
+        author_role: None,
+        body: "nit".to_string(),
+        status: ReviewCommentStatus::Open,
+        anchor: LineAnchor {
+            path: "src/a.ts".to_string(),
+            side: CommentSide::New,
+            line: 1,
+            exact: "line-1".to_string(),
+            prefix: String::new(),
+            suffix: String::new(),
+            line_hash: "hash-1".to_string(),
+            window_hash: "window-1".to_string(),
+            base_commit: None,
+        },
+        created_at: 1,
+        updated_at: 1,
+    };
+    store.insert_review_comment(&comment).expect("insert");
+
+    let (done, finished) = std::sync::mpsc::channel();
+    let worker = store.clone();
+    std::thread::spawn(move || {
+        let _ = done.send(worker.update_review_comment_status(
+            "comment-2",
+            ReviewCommentStatus::Resolved,
+            "resolved",
+            2,
+        ));
+    });
+    let updated = finished
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("resolving a comment hung on the database lock")
+        .expect("resolve");
+    assert_eq!(updated.status, ReviewCommentStatus::Resolved);
 }

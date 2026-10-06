@@ -15,7 +15,7 @@ use super::{pricing, TokenUsage};
 
 /// Bumped only by adding a numbered migration below. `user_version` is a plain
 /// integer SQLite keeps in the file header, so this needs no table of its own.
-const LEDGER_SCHEMA_VERSION: i64 = 16;
+const LEDGER_SCHEMA_VERSION: i64 = 17;
 
 /// The relay's one database, beside `session.json`.
 pub(crate) fn database_path(state_path: &Path) -> PathBuf {
@@ -66,6 +66,53 @@ fn adopt_token_usage_db(state_path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The database holds credentials, so it is created private and kept private.
+fn prepare_private_database_file(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    crate::state_paths::ensure_state_directory(parent)
+        .map_err(|error| format!("prepare {}: {error}", parent.display()))?;
+    match crate::instance_lock::create_new_private_file(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            restrict_private_file(path)
+                .map_err(|error| format!("restrict {}: {error}", path.display()))
+        }
+        Err(error) => Err(format!("create {}: {error}", path.display())),
+    }
+}
+
+/// SQLite creates `-wal` and `-shm` itself; tighten them in case an older build made them.
+fn restrict_database_side_files(path: &Path) -> Result<(), String> {
+    for suffix in ["-wal", "-shm"] {
+        let side = PathBuf::from(format!("{}{suffix}", path.display()));
+        match restrict_private_file(&side) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("restrict {}: {error}", side.display())),
+        }
+    }
+    Ok(())
+}
+
+fn restrict_private_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(windows)]
+    {
+        crate::windows_state_permissions::restrict_existing(path, false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::metadata(path).map(|_| ())
+    }
+}
+
 /// A single billable observation, ready to be written.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TokenEvent {
@@ -98,10 +145,15 @@ pub(crate) struct TokenEvent {
     pub(crate) phase: Option<String>,
 }
 
-/// The ledger handle. Cheap to clone; `None` inside means "degraded".
+/// The database handle. Cheap to clone; `None` inside means "no database" (tests).
 #[derive(Clone)]
 pub(crate) struct UsageStore {
     conn: Option<Arc<Mutex<Connection>>>,
+    /// The core rows as last committed. Held across a commit so commits land in order.
+    core: Arc<Mutex<crate::state::CommittedCore>>,
+    capture_order: Arc<std::sync::atomic::AtomicU64>,
+    /// Why the last core commit failed, until one succeeds again.
+    core_failure: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for UsageStore {
@@ -113,29 +165,51 @@ impl std::fmt::Debug for UsageStore {
 }
 
 impl UsageStore {
-    /// Open (or create) the ledger. **Never fails** — see the module docs.
+    /// Open (or create) the database. The relay cannot run without it.
+    pub(crate) fn open_at(path: &Path) -> Result<Self, String> {
+        // A unit test that falls back to the default path would open the user's real state.
+        #[cfg(test)]
+        {
+            let temp = std::env::temp_dir();
+            let real = temp.canonicalize().unwrap_or_else(|_| temp.clone());
+            assert!(
+                path.starts_with(&temp) || path.starts_with(&real),
+                "a test opened a database outside the temp dir: {}",
+                path.display()
+            );
+        }
+        let conn = Self::try_open(path).map_err(|error| {
+            format!(
+                "failed to open the state database {}: {error}",
+                path.display()
+            )
+        })?;
+        info!(path = %path.display(), "state database ready");
+        Ok(Self::from_connection(conn))
+    }
+
+    #[cfg(test)]
     pub(crate) fn open(path: &Path) -> Self {
-        match Self::try_open(path) {
-            Ok(conn) => {
-                info!(path = %path.display(), "token ledger ready");
-                Self {
-                    conn: Some(Arc::new(Mutex::new(conn))),
-                }
-            }
-            Err(error) => {
-                warn!(
-                    path = %path.display(),
-                    %error,
-                    "token ledger unavailable; usage reporting is disabled for this run"
-                );
-                Self::disabled()
-            }
+        Self::open_at(path).expect("open test database")
+    }
+
+    fn from_connection(conn: Connection) -> Self {
+        Self {
+            conn: Some(Arc::new(Mutex::new(conn))),
+            core: Arc::default(),
+            capture_order: Arc::default(),
+            core_failure: Arc::default(),
         }
     }
 
-    /// A ledger that records nothing and reports nothing.
+    /// A store that records nothing and reports nothing.
     pub(crate) fn disabled() -> Self {
-        Self { conn: None }
+        Self {
+            conn: None,
+            core: Arc::default(),
+            capture_order: Arc::default(),
+            core_failure: Arc::default(),
+        }
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -143,10 +217,7 @@ impl UsageStore {
     }
 
     fn try_open(path: &Path) -> Result<Connection, String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("create {}: {error}", parent.display()))?;
-        }
+        prepare_private_database_file(path)?;
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -160,12 +231,17 @@ impl UsageStore {
             .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
             .map_err(|error| format!("set WAL: {error}"))?;
         if !mode.eq_ignore_ascii_case("wal") {
-            warn!(mode, "token ledger could not enable WAL");
+            return Err(format!("could not enable WAL (journal mode is {mode})"));
         }
+        // FULL is what makes a committed transaction survive a power loss in WAL mode.
+        // `secure_delete` keeps a revoked device's secret from lingering in free pages.
+        conn.execute_batch("PRAGMA synchronous = FULL; PRAGMA secure_delete = FAST;")
+            .map_err(|error| format!("set pragmas: {error}"))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|error| format!("set busy_timeout: {error}"))?;
 
         migrate(&conn)?;
+        restrict_database_side_files(path)?;
         Ok(conn)
     }
 
@@ -1072,11 +1148,14 @@ impl UsageStore {
         let Some(conn) = self.conn.as_ref() else {
             return Err("review comment store unavailable".to_string());
         };
-        let conn = conn
+        let mut conn = conn
             .lock()
             .map_err(|error| format!("review comment store lock poisoned: {error}"))?;
+        let tx = conn
+            .transaction()
+            .map_err(|error| format!("begin review_comment: {error}"))?;
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO review_comment (
                 id, scope, author_kind, author_role, body, status,
                 path, side, line, exact, prefix, suffix, line_hash, window_hash,
@@ -1104,14 +1183,15 @@ impl UsageStore {
         )
         .map_err(|error| format!("insert review_comment: {error}"))?;
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO review_comment_event (comment_id, kind, at, detail)
              VALUES (?1, 'created', ?2, NULL)",
             params![comment.id, comment.created_at],
         )
         .map_err(|error| format!("insert review_comment_event: {error}"))?;
 
-        Ok(())
+        tx.commit()
+            .map_err(|error| format!("commit review_comment: {error}"))
     }
 
     pub(crate) fn get_review_comment(&self, id: &str) -> Result<Option<ReviewComment>, String> {
@@ -1121,24 +1201,7 @@ impl UsageStore {
         let conn = conn
             .lock()
             .map_err(|error| format!("review comment store lock poisoned: {error}"))?;
-
-        let mut statement = conn
-            .prepare(
-                "SELECT id, scope, author_kind, author_role, body, status,
-                        path, side, line, exact, prefix, suffix, line_hash, window_hash,
-                        base_commit, created_at, updated_at
-                 FROM review_comment
-                 WHERE id = ?1",
-            )
-            .map_err(|error| format!("prepare review_comment get: {error}"))?;
-
-        let mut rows = statement
-            .query_map([id], row_to_review_comment)
-            .map_err(|error| format!("query review_comment: {error}"))?;
-        Ok(rows
-            .next()
-            .transpose()
-            .map_err(|error| format!("read review_comment row: {error}"))?)
+        read_review_comment(&conn, id)
     }
 
     pub(crate) fn update_review_comment_status(
@@ -1151,11 +1214,14 @@ impl UsageStore {
         let Some(conn) = self.conn.as_ref() else {
             return Err("review comment store unavailable".to_string());
         };
-        let conn = conn
+        let mut conn = conn
             .lock()
             .map_err(|error| format!("review comment store lock poisoned: {error}"))?;
+        let tx = conn
+            .transaction()
+            .map_err(|error| format!("begin review_comment update: {error}"))?;
 
-        let updated = conn
+        let updated = tx
             .execute(
                 "UPDATE review_comment SET status = ?1, updated_at = ?2 WHERE id = ?3",
                 params![comment_status_str(status), at, id],
@@ -1165,15 +1231,18 @@ impl UsageStore {
             return Err(format!("no comment with id {id}"));
         }
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO review_comment_event (comment_id, kind, at, detail)
              VALUES (?1, ?2, ?3, NULL)",
             params![id, event_kind, at],
         )
         .map_err(|error| format!("insert review_comment_event: {error}"))?;
 
-        self.get_review_comment(id)?
-            .ok_or_else(|| format!("comment {id} disappeared after update"))
+        let comment = read_review_comment(&tx, id)?
+            .ok_or_else(|| format!("comment {id} disappeared after update"))?;
+        tx.commit()
+            .map_err(|error| format!("commit review_comment update: {error}"))?;
+        Ok(comment)
     }
 
     pub(crate) fn list_file_review_states_by_scope(
@@ -1267,6 +1336,24 @@ pub(crate) struct FileReviewStateRow {
     pub last_tick_at: Option<u64>,
     /// Full SHA-256 hex of the file at tick time. `None` means never ticked.
     pub content_hash: Option<String>,
+}
+
+fn read_review_comment(conn: &Connection, id: &str) -> Result<Option<ReviewComment>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, scope, author_kind, author_role, body, status,
+                    path, side, line, exact, prefix, suffix, line_hash, window_hash,
+                    base_commit, created_at, updated_at
+             FROM review_comment
+             WHERE id = ?1",
+        )
+        .map_err(|error| format!("prepare review_comment get: {error}"))?;
+    let mut rows = statement
+        .query_map([id], row_to_review_comment)
+        .map_err(|error| format!("query review_comment: {error}"))?;
+    rows.next()
+        .transpose()
+        .map_err(|error| format!("read review_comment row: {error}"))
 }
 
 fn author_kind_str(kind: ReviewAuthorKind) -> &'static str {
@@ -1773,7 +1860,14 @@ fn migrate(conn: &Connection) -> Result<(), String> {
                 |row| row.get(0),
             )
             .unwrap_or(0);
-        if has_token_event > 0 {
+        let has_phase: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('token_event') WHERE name = 'phase'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("migrate to 8: {error}"))?;
+        if has_token_event > 0 && has_phase == 0 {
             conn.execute_batch(
                 "BEGIN;
                  ALTER TABLE token_event ADD COLUMN phase TEXT;
@@ -2043,6 +2137,36 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         .map_err(|error| format!("migrate to 16: {error}"))?;
     }
 
+    if version < 17 {
+        // The relay's own state, moved here from session.json and the identity files.
+        let mut batch = String::from(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS meta (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS credential (
+                 kind       TEXT    NOT NULL,
+                 id         TEXT    NOT NULL,
+                 secret     TEXT    NOT NULL,
+                 info       TEXT,
+                 updated_at INTEGER NOT NULL,
+                 PRIMARY KEY (kind, id)
+             );\n",
+        );
+        for table in crate::state::CORE_ENTITY_TABLES {
+            batch.push_str(&format!(
+                "CREATE TABLE IF NOT EXISTS {table} (
+                     key  TEXT PRIMARY KEY,
+                     body TEXT NOT NULL
+                 );\n"
+            ));
+        }
+        batch.push_str("PRAGMA user_version = 17;\nCOMMIT;");
+        conn.execute_batch(&batch)
+            .map_err(|error| format!("migrate to 17: {error}"))?;
+    }
+
     Ok(())
 }
 
@@ -2054,6 +2178,7 @@ fn runtime_role_from_catalog_seat(seat: Option<&str>) -> String {
     }
 }
 
+mod core;
 mod injections;
 
 #[cfg(test)]

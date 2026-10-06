@@ -45,7 +45,7 @@ process.on("exit", () => {
 
 async function main() {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-cursor-e2e-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
 
   try {
     // --- first process ------------------------------------------------------
@@ -216,7 +216,7 @@ async function bootRelay(statePath) {
   const relay = spawnManagedProcess("relay", "cargo", ["run", "-p", "relay-server"], {
     AGENT_PROVIDERS: "cursor",
     PORT: String(port),
-    RELAY_STATE_PATH: statePath,
+    RELAY_STATE_DB: statePath,
   });
   await waitForHealth(`http://127.0.0.1:${port}/api/health`);
   return { port, relay };

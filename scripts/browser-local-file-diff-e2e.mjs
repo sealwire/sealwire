@@ -25,7 +25,7 @@ const TEST_FILE = "note.txt";
 async function main() {
   const relayPort = await getFreePort();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-file-diff-state-"));
-  const statePath = path.join(stateDir, "session.json");
+  const statePath = path.join(stateDir, "sealwire.db");
   const seedPath = path.join(stateDir, "fake-transcript-seed.json");
   const workspaceDir = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "agent-relay-file-diff-workspace-"))
@@ -64,7 +64,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: statePath,
+    relayStateDb: statePath,
     // Transcript history is no longer persisted in relay state (it is restored
     // from the provider on resume). The fake provider has no real session
     // store, so we hand it the seeded turnDiff transcript via this fixture file.

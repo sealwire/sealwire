@@ -1,20 +1,15 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
 use tokio::sync::{watch, RwLock};
-use tracing::warn;
+use tracing::error;
 
 use super::{
     Ask, DeviceRecord, Goal, PairedDevice, RelayState, ReviewJob, ReviewerThread, SessionBinding,
     TeamRun, ThreadSessionSettings, WorkflowRun, PERSISTED_STATE_VERSION,
 };
 
-const PERSISTENCE_DEBOUNCE: Duration = Duration::from_millis(150);
+const COMMIT_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Headroom added to the transcript clock when it is persisted, so the value on
 /// disk always sits AHEAD of every revision actually handed out.
@@ -252,7 +247,7 @@ impl PersistedRelayState {
             .active_thread_id
             .clone()
             .filter(|id| relay.session_is_materialized(id));
-        Self {
+        let state = Self {
             schema_version: PERSISTED_STATE_VERSION,
             active_thread_id,
             active_controller_device_id: relay.active_controller_device_id.clone(),
@@ -422,7 +417,11 @@ impl PersistedRelayState {
             transcript_clock: relay
                 .transcript_clock()
                 .saturating_add(TRANSCRIPT_CLOCK_PERSIST_HEADROOM),
-        }
+        };
+        // Every state a test builds also proves the database rows lose nothing.
+        #[cfg(test)]
+        super::core_store::assert_rows_round_trip(&state);
+        state
     }
 
     pub(super) fn settings_for_thread(&self, thread_id: &str) -> ThreadSessionSettings {
@@ -445,124 +444,17 @@ impl PersistedRelayState {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct PersistenceStore {
-    path: PathBuf,
-}
-
-impl PersistenceStore {
-    /// `RELAY_STATE_PATH` if set, else the shared `~/.agent-relay/session.json`
-    /// — deliberately NOT `<cwd>/…`, so the directory you launch from stops
-    /// being the identity of your relay. See [`crate::state_paths`].
-    pub(super) fn resolve(cwd: &Path) -> Self {
-        Self {
-            path: crate::state_paths::session_file_path(cwd),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn from_path(path: PathBuf) -> Self {
-        Self { path }
-    }
-
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub(super) async fn load(&self) -> Result<Option<PersistedRelayState>, String> {
-        let mut file = match tokio::fs::File::open(&self.path).await {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(format!("failed to read persisted state file: {error}"));
-            }
-        };
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .await
-                .map_err(|error| {
-                    format!("failed to restrict persisted state permissions: {error}")
-                })?;
-        }
-        let parent = self
-            .path
-            .parent()
-            .ok_or("persisted state path must have a parent directory")?
-            .to_path_buf();
-        #[cfg(windows)]
-        let state_path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::state_paths::ensure_state_directory(&parent)?;
-            #[cfg(windows)]
-            crate::windows_state_permissions::restrict_existing(&state_path, false)?;
-            Ok::<_, std::io::Error>(())
-        })
-        .await
-        .map_err(|error| format!("state directory task panicked: {error}"))?
-        .map_err(|error| format!("failed to prepare persisted state directory: {error}"))?;
-        let mut contents = Vec::new();
-        file.read_to_end(&mut contents)
-            .await
-            .map_err(|error| format!("failed to read persisted state file: {error}"))?;
-
-        let state: PersistedRelayState = serde_json::from_slice(&contents)
-            .map_err(|error| format!("failed to decode persisted state: {error}"))?;
-        if state.schema_version != PERSISTED_STATE_VERSION {
-            return Err(format!(
-                "unsupported persisted state version: {}",
-                state.schema_version
-            ));
-        }
-
-        Ok(Some(state))
-    }
-
-    pub(super) async fn save(&self, state: &PersistedRelayState) -> Result<(), String> {
-        let Some(parent) = self.path.parent() else {
-            return Err("persisted state path must have a parent directory".to_string());
-        };
-        let parent = parent.to_path_buf();
-
-        let serialized = serde_json::to_vec_pretty(state)
-            .map_err(|error| format!("failed to encode persisted state: {error}"))?;
-        let temporary_path = self.path.with_extension("tmp");
-
-        // Atomic exclusive-create, not check-then-write: closes both a
-        // TOCTOU race and a hard-link bypass a plain write would leave open.
-        // Runs on the blocking pool since it's sync I/O shared with
-        // `instance_lock::record_owner`.
-        let write_path = temporary_path.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::state_paths::ensure_state_directory(&parent)?;
-            crate::instance_lock::write_new_exclusive_with_mode(
-                &write_path,
-                &serialized,
-                Some(0o600),
-            )
-        })
-        .await
-        .map_err(|error| format!("temp file write task panicked: {error}"))?
-        .map_err(|error| format!("failed to write temporary persisted state file: {error}"))?;
-
-        tokio::fs::rename(&temporary_path, &self.path)
-            .await
-            .map_err(|error| format!("failed to replace persisted state file: {error}"))?;
-
-        Ok(())
-    }
-}
-
-pub(super) fn spawn_persistence_task(
+/// Commits whatever durable state changed, shortly after each change notice.
+///
+/// Operations whose reply promises the change is saved commit on their own before
+/// replying; this catches everything else, and writes nothing when nothing durable changed.
+pub(super) fn spawn_core_commit_task(
     relay: Arc<RwLock<RelayState>>,
     mut receiver: watch::Receiver<u64>,
-    persistence: PersistenceStore,
 ) {
     tokio::spawn(async move {
         while receiver.changed().await.is_ok() {
-            tokio::time::sleep(PERSISTENCE_DEBOUNCE).await;
+            tokio::time::sleep(COMMIT_DEBOUNCE).await;
             loop {
                 match receiver.has_changed() {
                     Ok(true) => {
@@ -575,17 +467,9 @@ pub(super) fn spawn_persistence_task(
                 }
             }
 
-            let state = {
-                let relay = relay.read().await;
-                PersistedRelayState::from_relay(&relay)
-            };
-
-            if let Err(error) = persistence.save(&state).await {
-                warn!(
-                    "failed to persist relay state to {}: {}",
-                    persistence.path().display(),
-                    error
-                );
+            let capture = relay.read().await.capture_core();
+            if let Some(Err(error)) = capture.map(super::core_store::CoreCapture::commit) {
+                error!(%error, "failed to save relay state");
             }
         }
     });
@@ -596,312 +480,18 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn startup_refuses_an_invalid_state_without_overwriting_it() {
+    async fn startup_refuses_a_database_it_cannot_read_without_overwriting_it() {
         let _lock = crate::state_paths::env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.json");
-        let original = b"not valid persisted JSON";
+        let path = dir.path().join("sealwire.db");
+        let original = b"not a sqlite database, and long enough to have a header";
         std::fs::write(&path, original).unwrap();
-        let _state_path = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", Some(&path));
+        let _state_db = crate::state_paths::EnvVarGuard::set("RELAY_STATE_DB", Some(&path));
         let error = crate::state::AppState::new(crate::broker::BrokerStartupContext::default())
             .await
             .err()
-            .expect("failed state loading must refuse startup");
-        assert!(error.contains("failed to decode persisted state"));
+            .expect("an unreadable database must refuse startup");
+        assert!(error.contains(&path.display().to_string()), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_state_permissions_cover_save_load_and_failed_rename() {
-        use crate::windows_state_permissions::{assert_private_acl, make_world_readable};
-
-        let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join(".agent-relay");
-        let path = directory.join("session.json");
-        let store = PersistenceStore::from_path(path.clone());
-        store.save(&sample_state()).await.unwrap();
-        assert_private_acl(&directory);
-        assert_private_acl(&path);
-        let original = std::fs::read(&path).unwrap();
-        make_world_readable(&directory);
-        make_world_readable(&path);
-        assert!(store.load().await.unwrap().is_some());
-        assert_private_acl(&directory);
-        assert_private_acl(&path);
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        store.save(&sample_state()).await.unwrap();
-        assert_private_acl(&path);
-
-        let invalid_path = directory.join("invalid.json");
-        std::fs::create_dir(&invalid_path).unwrap();
-        let invalid_store = PersistenceStore::from_path(invalid_path.clone());
-        assert!(invalid_store.save(&sample_state()).await.is_err());
-        assert_private_acl(&invalid_path.with_extension("tmp"));
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_state_permissions_preserve_a_shared_parent_directory() {
-        use crate::windows_state_permissions::{
-            acl_snapshot, assert_private_acl, make_world_readable,
-        };
-
-        let root = tempfile::tempdir().unwrap();
-        make_world_readable(root.path());
-        let before = acl_snapshot(root.path());
-        let path = root.path().join("session.json");
-        let store = PersistenceStore::from_path(path.clone());
-        store.save(&sample_state()).await.unwrap();
-        store.load().await.unwrap();
-        assert_private_acl(&path);
-        assert_eq!(acl_snapshot(root.path()), before);
-    }
-
-    // Only the fields WITHOUT `#[serde(default)]` need to be supplied here —
-    // everything else (maps/vecs the rest of the struct carries) defaults to
-    // empty, which is fine for a save() round-trip test that only cares about
-    // the temp-file write path, not the content.
-    fn sample_state() -> PersistedRelayState {
-        serde_json::from_str(
-            r#"{
-                "schema_version": 2,
-                "active_thread_id": null,
-                "active_controller_device_id": null,
-                "active_controller_last_seen_at": null,
-                "current_status": "idle",
-                "active_flags": [],
-                "current_cwd": "/tmp",
-                "model": "test-model",
-                "approval_policy": "untrusted",
-                "sandbox": "workspace-write",
-                "reasoning_effort": "medium"
-            }"#,
-        )
-        .expect("sample_state JSON must match PersistedRelayState's non-defaulted fields")
-    }
-
-    // `session.tmp` is a different filename than the state path itself, so
-    // the startup-time symlink check on the state path doesn't cover it.
-    #[tokio::test]
-    async fn save_refuses_a_preplanted_symlink_at_the_temp_file_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let victim = outside.path().join("victim.txt");
-        std::fs::write(&victim, b"do not touch me").unwrap();
-
-        let state_path = dir.path().join("session.json");
-        let temp_path = state_path.with_extension("tmp");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&victim, &temp_path).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&victim, &temp_path).unwrap();
-
-        let store = PersistenceStore::from_path(state_path.clone());
-        let result = store.save(&sample_state()).await;
-
-        assert!(
-            result.is_err(),
-            "save() must refuse to write through a pre-planted symlink at the temp file path"
-        );
-        assert_eq!(
-            std::fs::read(&victim).unwrap(),
-            b"do not touch me",
-            "the external file the planted symlink points to must be untouched"
-        );
-        assert!(
-            !state_path.exists(),
-            "save() must not have completed the rename onto the real state path either"
-        );
-    }
-
-    #[tokio::test]
-    async fn save_succeeds_when_no_temp_file_symlink_is_planted() {
-        let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join("session.json");
-        let store = PersistenceStore::from_path(state_path.clone());
-
-        store.save(&sample_state()).await.unwrap();
-
-        assert!(state_path.exists(), "save() must write the real state path");
-        assert!(
-            !state_path.with_extension("tmp").exists(),
-            "the temp file must be renamed away, not left behind"
-        );
-    }
-
-    // The launch directory must not be the identity of your relay. Resolving
-    // `<cwd>/.agent-relay/session.json` meant `cd ~/elsewhere && sealwire`
-    // silently opened a blank world (no threads, no projects, no paired
-    // devices) instead of the state the user has been building all along.
-    #[test]
-    fn resolves_one_shared_state_file_regardless_of_launch_directory() {
-        let _lock = crate::state_paths::env_lock();
-        let home = tempfile::tempdir().unwrap();
-        let _home = crate::state_paths::EnvVarGuard::set("HOME", Some(home.path()));
-        let _override = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", None);
-
-        let from_repo = PersistenceStore::resolve(Path::new("/tmp/workspace-a"))
-            .path()
-            .to_path_buf();
-        let from_elsewhere = PersistenceStore::resolve(Path::new("/tmp/workspace-b"))
-            .path()
-            .to_path_buf();
-
-        assert_eq!(
-            from_repo, from_elsewhere,
-            "two launch directories must resolve to the SAME session file, otherwise every \
-             directory gets its own forked history"
-        );
-        assert_eq!(
-            from_repo,
-            home.path().join(".agent-relay").join("session.json"),
-            "the shared default belongs under the user's home directory"
-        );
-    }
-
-    // The shared default is a default, not a cage: an explicit path is how a
-    // scratch/test relay stays isolated from the real one.
-    #[test]
-    fn an_explicit_state_path_still_wins_over_the_shared_default() {
-        let _lock = crate::state_paths::env_lock();
-        let home = tempfile::tempdir().unwrap();
-        let scratch = tempfile::tempdir().unwrap();
-        let explicit = scratch.path().join("scratch-session.json");
-        let _home = crate::state_paths::EnvVarGuard::set("HOME", Some(home.path()));
-        let _override = crate::state_paths::EnvVarGuard::set("RELAY_STATE_PATH", Some(&explicit));
-
-        assert_eq!(
-            PersistenceStore::resolve(Path::new("/tmp/workspace-a")).path(),
-            explicit,
-        );
-    }
-
-    // A hard link passes a symlink-only check but shares content with its
-    // victim via the inode.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn save_refuses_a_preplanted_hard_link_at_the_temp_file_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let victim = dir.path().join("victim.txt");
-        std::fs::write(&victim, b"do not touch me").unwrap();
-
-        let state_path = dir.path().join("session.json");
-        let temp_path = state_path.with_extension("tmp");
-        std::fs::hard_link(&victim, &temp_path).unwrap();
-
-        let store = PersistenceStore::from_path(state_path.clone());
-        let result = store.save(&sample_state()).await;
-
-        assert!(
-            result.is_err(),
-            "save() must refuse to write through a pre-planted hard link at the temp file path"
-        );
-        assert_eq!(
-            std::fs::read(&victim).unwrap(),
-            b"do not touch me",
-            "the external file the planted hard link points to must be untouched"
-        );
-        assert!(
-            !state_path.exists(),
-            "save() must not have completed the rename onto the real state path either"
-        );
-    }
-
-    #[tokio::test]
-    async fn save_recovers_from_an_ordinary_stale_leftover_temp_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join("session.json");
-        let temp_path = state_path.with_extension("tmp");
-        std::fs::write(&temp_path, b"stale leftover from a previous crash").unwrap();
-
-        let store = PersistenceStore::from_path(state_path.clone());
-        store.save(&sample_state()).await.unwrap();
-
-        assert!(state_path.exists(), "save() must write the real state path");
-        assert!(
-            !temp_path.exists(),
-            "the temp file must be renamed away, not left behind"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn state_and_dedicated_directory_are_private_on_save_and_load() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let state_dir = dir.path().join(".agent-relay");
-        let state_path = state_dir.join("session.json");
-        let store = PersistenceStore::from_path(state_path.clone());
-        store.save(&sample_state()).await.unwrap();
-        assert_eq!(
-            std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-
-        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(store.load().await.unwrap().is_some());
-        assert_eq!(
-            std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-
-        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        store.save(&sample_state()).await.unwrap();
-        assert_eq!(
-            std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn explicit_state_file_does_not_change_shared_directory_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = dir.path().join("custom-session.json");
-        let store = PersistenceStore::from_path(path.clone());
-        store.save(&sample_state()).await.unwrap();
-        store.load().await.unwrap();
-        assert_eq!(
-            std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-        assert_eq!(
-            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_failed_rename_does_not_leave_a_readable_temporary_state_file() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.json");
-        std::fs::create_dir(&path).unwrap();
-        let store = PersistenceStore::from_path(path.clone());
-        assert!(store.save(&sample_state()).await.is_err());
-        assert_eq!(
-            std::fs::metadata(path.with_extension("tmp"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
     }
 }

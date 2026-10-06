@@ -4,6 +4,7 @@ target
 tmp
 markdown
 .agent-relay
+.sealwire
 .env
 .env.*
 node_modules

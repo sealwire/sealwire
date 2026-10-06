@@ -1,6 +1,6 @@
-//! Enforces "one live relay-server per `RELAY_STATE_PATH`" so a second
-//! process for the same session file refuses to start rather than becoming a
-//! second concurrent writer (which corrupts/forks `session.json`).
+//! Enforces "one live relay-server per `RELAY_STATE_DB`" so a second process for
+//! the same database refuses to start rather than becoming a second writer that
+//! overwrites the first one's rows from its own copy of the state.
 //!
 //! `dev:restart:*` scripts `pkill` the previous relay-server first, so
 //! they're unaffected. `npx sealwire` and the desktop app don't — starting a
@@ -35,11 +35,11 @@
 //! pre-planted symlink/hard-link at that exact name.
 //!
 //! What's *not* defended: an agent session actively racing relay-server
-//! after startup — e.g. swapping `.agent-relay` for a symlink mid-session so
-//! the next persistence save re-resolves the path through it and lands
-//! `session.json` outside the workspace. Closing that needs every write pinned
-//! to a directory handle opened once (`openat`-style, e.g. via `cap-std`)
-//! rather than a path re-resolved fresh on each save.
+//! after startup — e.g. swapping `.sealwire` for a symlink mid-session so a
+//! later open re-resolves the path through it and lands the database outside
+//! the workspace. Closing that needs every open pinned to a directory handle
+//! opened once (`openat`-style, e.g. via `cap-std`) rather than a path
+//! re-resolved fresh each time.
 //!
 //! This is a deliberate risk-acceptance, not an oversight — but note the
 //! reason is narrower than "the agent has no privilege boundary anyway". Under
@@ -120,7 +120,7 @@ pub(crate) fn resolve_identity(state_path: &Path) -> io::Result<PathBuf> {
 ///
 /// A plain `std::fs::canonicalize` would almost do this job, except it (a)
 /// follows a symlink at any level unconditionally, with no escape boundary —
-/// a workspace can commit `.agent-relay` (or `session.json`) as a symlink
+/// a workspace can commit `.sealwire` (or `sealwire.db`) as a symlink
 /// out of the workspace, and canonicalize would happily follow it — and (b)
 /// requires the whole path to already exist, which breaks a *dangling*
 /// symlink (`alias.json -> not-created-yet.json`) that should still resolve
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn only_one_of_two_concurrent_acquires_wins() {
         let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join(".agent-relay/session.json");
+        let state_path = dir.path().join(".sealwire/sealwire.db");
 
         let first = acquire_within(&state_path, dir.path()).unwrap();
         let guard = match first {
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn releasing_the_lock_lets_a_later_acquire_win() {
         let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join(".agent-relay/session.json");
+        let state_path = dir.path().join(".sealwire/sealwire.db");
 
         let first = acquire_within(&state_path, dir.path()).unwrap();
         drop(first);
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn already_running_reports_recorded_owner_when_present() {
         let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join(".agent-relay/session.json");
+        let state_path = dir.path().join(".sealwire/sealwire.db");
 
         let first = acquire_within(&state_path, dir.path()).unwrap();
         let guard = match first {
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn already_running_is_none_when_no_owner_recorded() {
         let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join(".agent-relay/session.json");
+        let state_path = dir.path().join(".sealwire/sealwire.db");
 
         let _guard = acquire_within(&state_path, dir.path()).unwrap();
         assert!(matches!(
@@ -634,7 +634,7 @@ mod tests {
         let victim = outside.path().join("victim.txt");
         std::fs::write(&victim, b"do not touch me").unwrap();
 
-        let state_path = workspace.path().join(".agent-relay/session.json");
+        let state_path = workspace.path().join(".sealwire/sealwire.db");
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&victim, &state_path).unwrap();
@@ -795,7 +795,7 @@ mod tests {
         )));
     }
 
-    // `.agent-relay` itself as a symlink out of the workspace must redirect
+    // `.sealwire` itself as a symlink out of the workspace must redirect
     // session.json/lock/owner-info together — refuse it, not just a
     // symlinked leaf file.
     #[test]
@@ -803,11 +803,11 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
 
-        let state_path = workspace.path().join(".agent-relay/session.json");
+        let state_path = workspace.path().join(".sealwire/sealwire.db");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(outside.path(), workspace.path().join(".agent-relay")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join(".sealwire")).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(outside.path(), workspace.path().join(".agent-relay"))
+        std::os::windows::fs::symlink_dir(outside.path(), workspace.path().join(".sealwire"))
             .unwrap();
 
         assert!(resolve_identity_within(&state_path, workspace.path()).is_err());
@@ -820,23 +820,23 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(
             workspace.path().join("real-state-dir"),
-            workspace.path().join(".agent-relay"),
+            workspace.path().join(".sealwire"),
         )
         .unwrap();
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(
             workspace.path().join("real-state-dir"),
-            workspace.path().join(".agent-relay"),
+            workspace.path().join(".sealwire"),
         )
         .unwrap();
 
         let via_alias = resolve_identity_within(
-            &workspace.path().join(".agent-relay/session.json"),
+            &workspace.path().join(".sealwire/sealwire.db"),
             workspace.path(),
         )
         .unwrap();
         let via_real = resolve_identity_within(
-            &workspace.path().join("real-state-dir/session.json"),
+            &workspace.path().join("real-state-dir/sealwire.db"),
             workspace.path(),
         )
         .unwrap();

@@ -28,7 +28,7 @@ async function main() {
 
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: path.join(stateDir, "session.json"),
+    relayStateDb: path.join(stateDir, "sealwire.db"),
     codexHomeDir,
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });

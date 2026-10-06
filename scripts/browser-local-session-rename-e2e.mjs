@@ -69,13 +69,13 @@ async function renameFocusedTab(page, threadId, text, shotName = "") {
 async function main() {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "sealwire-rename-"));
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "sealwire-rename-cwd-"));
-  const relayStatePath = path.join(stateDir, "session.json");
+  const relayStateDb = path.join(stateDir, "sealwire.db");
   const relayPort = await getFreePort();
   const baseUrl = `http://127.0.0.1:${relayPort}`;
 
   let relay = startLocalRelay({
     relayPort,
-    relayStatePath,
+    relayStateDb,
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });
   await waitForHealth(`${baseUrl}/api/health`, TIMEOUT_MS);
@@ -183,7 +183,7 @@ async function main() {
     await stopManagedProcess(relay);
     relay = startLocalRelay({
       relayPort,
-      relayStatePath,
+      relayStateDb,
       extraEnv: { AGENT_PROVIDERS: "fake" },
     });
     await waitForHealth(`${baseUrl}/api/health`, TIMEOUT_MS);

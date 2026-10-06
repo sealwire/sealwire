@@ -7,16 +7,14 @@
 //! cannot race activate/unbind on the same registration/identity files.
 
 use std::fs::{File, OpenOptions};
+#[cfg(not(unix))]
 use std::io;
 use std::path::{Path, PathBuf};
 
 use fs4::FileExt;
 use sha2::{Digest, Sha256};
 
-use super::{
-    load_public_relay_registration_raw, PersistedPublicRelayRegistration,
-    PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
-};
+use super::{PersistedPublicRelayRegistration, PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION};
 
 const LIFECYCLE_LOCK_FILE: &str = "public-broker-lifecycle.lock";
 pub(crate) const BEARER_FINGERPRINT_HEX_CHARS: usize = 16;
@@ -270,35 +268,43 @@ impl RegistrationIdentity {
     }
 }
 
-/// Delete registration only if it still matches the expected identity+fingerprint.
-/// Returns true when the matching file was removed; false when missing/replaced.
+/// Delete the registration only if it still matches the expected identity+fingerprint,
+/// checked and removed in one transaction. False when it is missing or was replaced.
 pub(crate) fn delete_registration_if_matches(
-    path: &Path,
+    db: &Path,
     expected: &RegistrationIdentity,
 ) -> Result<bool, String> {
-    let Some(current) = load_public_relay_registration_raw(path)? else {
-        return Ok(false);
-    };
-    if current.schema_version != PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION {
-        return Err(format!(
-            "unsupported broker registration cache schema {} in {}",
-            current.schema_version,
-            path.display()
-        ));
-    }
-    let current_fp = bearer_fingerprint(&current.relay_refresh_token);
-    let matches = current.relay_id == expected.relay_id
-        && current.broker_room_id == expected.broker_room_id
-        && current_fp == expected.bearer_fingerprint
-        && normalize_control_url_loose(&current.control_url) == expected.control_url;
-    if !matches {
-        return Ok(false);
-    }
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.to_string()),
-    }
+    super::stored_credentials::transact(db, |conn| {
+        let Some(stored) = super::stored_credentials::read_in(
+            conn,
+            super::stored_credentials::PUBLIC_REGISTRATION,
+        )?
+        else {
+            return Ok(false);
+        };
+        let info: super::StoredRegistrationInfo =
+            serde_json::from_str(stored.info.as_deref().unwrap_or("")).map_err(|error| {
+                format!(
+                    "failed to decode broker registration in {}: {error}",
+                    db.display()
+                )
+            })?;
+        if info.schema_version != PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported broker registration cache schema {} in {}",
+                info.schema_version,
+                db.display()
+            ));
+        }
+        let matches = info.relay_id == expected.relay_id
+            && info.broker_room_id == expected.broker_room_id
+            && bearer_fingerprint(&stored.secret) == expected.bearer_fingerprint
+            && normalize_control_url_loose(&info.control_url) == expected.control_url;
+        if !matches {
+            return Ok(false);
+        }
+        super::stored_credentials::delete_in(conn, super::stored_credentials::PUBLIC_REGISTRATION)
+    })
 }
 
 fn normalize_control_url_loose(raw: &str) -> String {
@@ -328,23 +334,34 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    fn write_reg(path: &Path, token: &str) {
-        let payload = serde_json::to_vec_pretty(&PersistedPublicRelayRegistration {
-            schema_version: PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
-            control_url: "http://127.0.0.1:9".into(),
-            relay_id: "relay-1".into(),
-            broker_room_id: "room-1".into(),
-            relay_refresh_token: token.into(),
+    fn write_reg(db: &Path, token: &str) {
+        let info = serde_json::json!({
+            "schema_version": PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION,
+            "control_url": "http://127.0.0.1:9",
+            "relay_id": "relay-1",
+            "broker_room_id": "room-1",
         })
+        .to_string();
+        super::super::stored_credentials::write(
+            db,
+            super::super::stored_credentials::PUBLIC_REGISTRATION,
+            token,
+            Some(&info),
+        )
         .unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, payload).unwrap();
+    }
+
+    /// The stored refresh token, standing in for the whole registration.
+    fn token_of(db: &Path) -> Option<String> {
+        super::super::load_public_relay_registration_raw(db)
+            .unwrap()
+            .map(|registration| registration.relay_refresh_token)
     }
 
     #[test]
     fn cas_delete_refuses_replaced_registration() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("public-broker-registration.json");
+        let path = dir.path().join("sealwire.db");
         write_reg(&path, "token-a");
         let expected = RegistrationIdentity {
             control_url: "http://127.0.0.1:9".into(),
@@ -357,13 +374,13 @@ mod tests {
             delete_registration_if_matches(&path, &expected).unwrap(),
             false
         );
-        assert!(path.exists());
+        assert!(token_of(&path).is_some());
     }
 
     #[test]
     fn cas_delete_removes_matching_registration() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("public-broker-registration.json");
+        let path = dir.path().join("sealwire.db");
         write_reg(&path, "token-a");
         let expected = RegistrationIdentity {
             control_url: "http://127.0.0.1:9".into(),
@@ -372,13 +389,13 @@ mod tests {
             bearer_fingerprint: bearer_fingerprint("token-a"),
         };
         assert!(delete_registration_if_matches(&path, &expected).unwrap());
-        assert!(!path.exists());
+        assert!(token_of(&path).is_none());
     }
 
     #[test]
     fn lifecycle_lock_serializes_two_holders() {
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
+        let reg = dir.path().join("sealwire.db");
         let barrier = Arc::new(Barrier::new(2));
         let saw_second_blocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -414,7 +431,7 @@ mod tests {
     #[test]
     fn lifecycle_lock_file_is_created_mode_0600() {
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
+        let reg = dir.path().join("sealwire.db");
         let _lock = BrokerLifecycleLock::acquire_for_registration(&reg).unwrap();
         let lock_path = lifecycle_lock_path(&reg);
         use std::os::unix::fs::PermissionsExt;
@@ -428,7 +445,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
+        let reg = dir.path().join("sealwire.db");
         let lock_path = lifecycle_lock_path(&reg);
         std::fs::write(&lock_path, b"").unwrap();
         std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -442,7 +459,7 @@ mod tests {
     #[test]
     fn lifecycle_lock_refuses_symlink() {
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
+        let reg = dir.path().join("sealwire.db");
         let lock_path = lifecycle_lock_path(&reg);
         let target = dir.path().join("elsewhere");
         std::fs::write(&target, b"x").unwrap();
@@ -462,7 +479,7 @@ mod tests {
     #[test]
     fn lifecycle_lock_detects_entry_replaced_after_open_without_touching_target() {
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
+        let reg = dir.path().join("sealwire.db");
         let lock_path = lifecycle_lock_path(&reg);
         let target = dir.path().join("elsewhere");
         std::fs::write(&target, b"target-must-stay-unchanged").unwrap();
@@ -488,7 +505,7 @@ mod tests {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
+        let reg = dir.path().join("sealwire.db");
         let lock_path = lifecycle_lock_path(&reg);
         // Create the initial lock inode so the open/validate path is warm.
         std::fs::write(&lock_path, b"").unwrap();
@@ -529,7 +546,7 @@ mod tests {
     #[test]
     fn two_simultaneous_activate_critical_sections_serialize() {
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
+        let reg = dir.path().join("sealwire.db");
         let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let start = Arc::new(Barrier::new(2));
 
@@ -540,7 +557,7 @@ mod tests {
             thread::spawn(move || {
                 start.wait();
                 let _lock = BrokerLifecycleLock::acquire_for_registration(&reg).unwrap();
-                if reg.exists() {
+                if token_of(&reg).is_some() {
                     return "already-linked".to_string();
                 }
                 // Simulated remote bind while holding the lock.
@@ -559,7 +576,7 @@ mod tests {
         assert!(outcomes.contains(&"wrote"));
         assert!(outcomes.contains(&"already-linked"));
         assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let raw = std::fs::read_to_string(&reg).unwrap();
+        let raw = token_of(&reg).unwrap();
         assert!(
             raw.contains("token-a") ^ raw.contains("token-b"),
             "exactly one coherent registration must remain: {raw}"
@@ -571,7 +588,7 @@ mod tests {
     #[test]
     fn activate_then_unbind_current_is_serializable() {
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, "token-current");
         let expected = RegistrationIdentity {
             control_url: "http://127.0.0.1:9".into(),
@@ -608,13 +625,13 @@ mod tests {
         // we must not lose a coherent end state via stale overwrite races.
         if deleted {
             // Unbind won the race and cleared current; activate then wrote newer.
-            assert!(reg.exists());
-            let raw = std::fs::read_to_string(&reg).unwrap();
+            assert!(token_of(&reg).is_some());
+            let raw = token_of(&reg).unwrap();
             assert!(raw.contains("token-newer"));
         } else {
             // Activate replaced first; unbind CAS left newer intact.
-            assert!(reg.exists());
-            let raw = std::fs::read_to_string(&reg).unwrap();
+            assert!(token_of(&reg).is_some());
+            let raw = token_of(&reg).unwrap();
             assert!(raw.contains("token-newer"));
             assert!(!raw.contains("token-current"));
         }
@@ -623,7 +640,7 @@ mod tests {
     #[test]
     fn unbind_old_then_activate_new_under_lock() {
         let dir = tempfile::tempdir().unwrap();
-        let reg = dir.path().join("public-broker-registration.json");
+        let reg = dir.path().join("sealwire.db");
         write_reg(&reg, "token-old");
         let expected = RegistrationIdentity {
             control_url: "http://127.0.0.1:9".into(),
@@ -636,7 +653,7 @@ mod tests {
             write_reg(&reg, "token-new");
         })
         .unwrap();
-        let raw = std::fs::read_to_string(&reg).unwrap();
+        let raw = token_of(&reg).unwrap();
         assert!(raw.contains("token-new"));
         assert!(!raw.contains("token-old"));
     }

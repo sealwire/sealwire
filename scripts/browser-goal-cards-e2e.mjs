@@ -95,7 +95,7 @@ async function main() {
   const relayPort = await getFreePort();
   const relay = startLocalRelay({
     relayPort,
-    relayStatePath: path.join(base, "session.json"),
+    relayStateDb: path.join(base, "sealwire.db"),
     extraEnv: {
       AGENT_PROVIDERS: "fake",
       FAKE_PROVIDER_CONTROL_DIR: path.join(base, "control"),

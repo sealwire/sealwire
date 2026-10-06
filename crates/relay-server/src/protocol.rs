@@ -76,6 +76,9 @@ pub struct HealthResponse {
     pub provider: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_id: Option<String>,
+    /// Why the relay's last attempt to save its state failed, while it keeps failing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
