@@ -246,6 +246,7 @@ export function buildViewOnlyPin({
   priorEntries = [],
   priorOlderCursor = null,
   priorPageRevision = null,
+  lastReadOrderSeq = (page?.entries ?? priorEntries).at(-1)?.order_seq ?? null,
   historyExtended = false,
   loading = false,
   error = false,
@@ -260,6 +261,7 @@ export function buildViewOnlyPin({
     pageRevision: page
       ? (Number.isSafeInteger(page.revision) ? page.revision : null)
       : priorPageRevision,
+    lastReadOrderSeq,
     generation,
     // Which RUN of the relay these item ids came from — distinct from `generation`
     // above, which counts this client's own navigations. A restart renumbers ids, so

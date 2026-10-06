@@ -1,223 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { THREAD, entry, baseSnapshot, createLifecycleHarness } from "./test-support/lifecycle-harness.mjs";
 
-// lifecycle.js transitively imports dom.js, which queries the document at
-// import time — stub it the same way send-snapshot-clobber.test.mjs does.
-const nodes = new Map();
-function fakeNode(selector) {
-  if (!nodes.has(selector)) {
-    nodes.set(selector, {
-      selector,
-      value: "",
-      disabled: false,
-      hidden: true,
-      textContent: "",
-      dataset: {},
-      style: {},
-      classList: { add() {}, contains: () => false, remove() {}, toggle() {} },
-      addEventListener() {},
-      removeEventListener() {},
-      setAttribute() {},
-      removeAttribute() {},
-      appendChild() {},
-      querySelector: () => null,
-      querySelectorAll: () => [],
-    });
-  }
-  return nodes.get(selector);
-}
-
-globalThis.document = {
-  querySelector: fakeNode,
-  querySelectorAll: () => [],
-  addEventListener() {},
-  removeEventListener() {},
-  createElement: () => fakeNode("created"),
-  get body() {
-    return fakeNode("body");
-  },
-};
-globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
-globalThis.window = {
-  location: { origin: "http://127.0.0.1:9999" },
-  setTimeout,
-  clearTimeout,
-  addEventListener() {},
-  removeEventListener() {},
-  dispatchEvent() {},
-  localStorage: globalThis.localStorage,
-  matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
-  navigator: { userAgent: "node" },
-};
-
-const { createLifecycleController, snapshotIsInteractive } = await import("./lifecycle.js");
+const { snapshotIsInteractive } = await import("./lifecycle.js");
 const { createSessionController } = await import("../session-controller.js");
-const { createStreamController } = await import("./stream.js");
-const { settleTranscriptProjection } = await import("../transcript/store.js");
 const { createThreadListStore } = await import("../../shared/thread-list-store.js");
-const {
-  createTranscriptFlushScheduler,
-  TRANSCRIPT_FLUSH_MIN_WINDOW_MS,
-} = await import("../../shared/transcript-flush-scheduler.js");
-
-/**
- * A minimal fake clock: `tick` advances time and fires due timers (in due
- * order). Mirrors the harness in shared/transcript-flush-scheduler.test.mjs.
- */
-function createManualClock(startTime = 0) {
-  let currentTime = startTime;
-  const timers = new Map();
-  let nextId = 0;
-  return {
-    now: () => currentTime,
-    setTimer(callback, delayMs) {
-      const id = ++nextId;
-      timers.set(id, { callback, dueAt: currentTime + delayMs });
-      return id;
-    },
-    clearTimer(id) {
-      timers.delete(id);
-    },
-    tick(ms) {
-      currentTime += ms;
-      for (;;) {
-        const due = [...timers.entries()]
-          .filter(([, timer]) => timer.dueAt <= currentTime)
-          .sort((a, b) => a[1].dueAt - b[1].dueAt)[0];
-        if (!due) {
-          break;
-        }
-        const [id, timer] = due;
-        timers.delete(id);
-        timer.callback();
-      }
-    },
-  };
-}
-
-const THREAD = "thread-1";
-
-function entry(itemId, text, overrides = {}) {
-  return {
-    item_id: itemId,
-    kind: "agent_text",
-    text,
-    status: "completed",
-    turn_id: "turn-1",
-    tool: null,
-    content_state: "full",
-    ...overrides,
-  };
-}
-
-function baseSnapshot(overrides = {}) {
-  return {
-    active_thread_id: THREAD,
-    active_turn_id: null,
-    current_status: "idle",
-    transcript: [],
-    transcript_revision: 1,
-    transcript_truncated: false,
-    pending_approvals: [],
-    pending_ask_user_questions: [],
-    pending_pairing_requests: [],
-    thread_activity: [],
-    logs: [],
-    ...overrides,
-  };
-}
-
-/// Builds the stream + lifecycle controllers sharing ONE real scheduler
-/// instance, the same way session-controller.js wires ctx in production —
-/// the seam where a snapshot landing between a delta's state write and its
-/// pending frame used to paint twice.
-function buildHarness({ apiFetch, onThreadsUpdated } = {}) {
-  const clock = createManualClock();
-  const rendered = [];
-  const state = {
-    deviceId: "device-1",
-    session: null,
-    viewThreadId: null,
-    viewOnlyThread: null,
-    transcriptHydrationThreadId: THREAD,
-    transcriptHydrationOrder: [],
-    transcriptHydrationEntries: new Map(),
-    transcriptHydrationOlderCursor: null,
-    transcriptHydrationSignature: null,
-    transcriptHydrationStatus: "idle",
-    transcriptHydrationFetchedRevision: null,
-    localUiStore: { getState: () => ({ clearTranscriptDetailLoading() {} }) },
-  };
-
-  function renderSession(session) {
-    rendered.push(session);
-  }
-
-  const transcriptFlushScheduler = createTranscriptFlushScheduler({
-    // Late-bound through ctx in production; here the wrapper below is the
-    // only render path, so closing over it directly is equivalent.
-    render: () => {
-      if (state.session) {
-        renderSessionAndClearPendingFlush(state.session);
-      }
-    },
-    now: clock.now,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-    isHidden: () => false,
-  });
-
-  // Mirrors session-controller.js's real renderSessionAndClearPendingFlush:
-  // settle, not just cancel, before painting. The only caller (render()
-  // above) always passes state.session itself, so re-reading it after
-  // settle (which reassigns state.session) is enough — no spread-copy
-  // session to reconcile here.
-  function renderSessionAndClearPendingFlush(_session) {
-    transcriptFlushScheduler.cancel();
-    settleTranscriptProjection(state);
-    return renderSession(state.session);
-  }
-
-  const ctx = {
-    state,
-    apiFetch: apiFetch || (async () => ({ ok: true, json: async () => ({ ok: true, data: {} }) })),
-    onThreadsUpdated,
-    logLine: () => {},
-    renderSession: renderSessionAndClearPendingFlush,
-    canCurrentDeviceWrite: () => true,
-    seedDefaults: () => {},
-    setSelectedCwd: () => {},
-    setThreadRoute: () => {},
-    renderOverviewState: () => {},
-    renderSessionUnavailable: () => {},
-    renderThreadListMessage: () => {},
-    renderThreads: () => {},
-    runViewTransition: (fn) => fn(),
-    setStartControlsBusy: () => {},
-    liveElement: () => null,
-    isViewingConversation: () => true,
-    queryClient: null,
-    transcriptFlushScheduler,
-    ensureConversationTranscript: () => {},
-
-    applySessionSnapshot: () => {},
-    cancelSessionPoll: () => {},
-    cancelStreamReconnect: () => {},
-    scheduleSessionPoll: () => {},
-    scheduleThreadsPoll: () => {},
-    scheduleStreamReconnect: () => {},
-  };
-
-  const lifecycle = createLifecycleController(ctx);
-  const stream = createStreamController(ctx);
-
-  return { clock, ctx, lifecycle, rendered, state, stream, transcriptFlushScheduler };
-}
+const { TRANSCRIPT_FLUSH_MIN_WINDOW_MS } = await import("../../shared/transcript-flush-scheduler.js");
 
 test("thread-list loads notify the composer after updated titles land without a session render", async () => {
   let rows = [{ id: "peer", name: "中文安全审查", provider: "codex", cwd: "/tmp/project" }];
   const updates = [];
-  const harness = buildHarness({
+  const harness = createLifecycleHarness({
     apiFetch: async () => ({ ok: true, json: async () => ({ ok: true, data: { threads: rows } }) }),
     onThreadsUpdated: () => updates.push(harness.state.threads.map((thread) => thread.name)),
   });
@@ -238,7 +31,7 @@ test("thread-list loads notify the composer after updated titles land without a 
 });
 
 test("a snapshot interleaved with a pending delta flush renders exactly once, keeping the longer delta text over the truncated preview", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot({ transcript: [entry("agent-1", "Hello", { status: "running" })] });
   h.state.transcriptHydrationOrder = ["agent-1"];
   h.state.transcriptHydrationEntries = new Map([
@@ -291,7 +84,7 @@ test("a snapshot interleaved with a pending delta flush renders exactly once, ke
 // snapshot overlay runs, so nothing is left pending to later re-derive from
 // the (window-only) old state and clobber the fresher merged transcript.
 test("a snapshot introducing a brand-new entry keeps it after a same-flush pending delta for another item", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot({ transcript: [entry("agent-1", "Hello", { status: "running" })] });
   h.state.transcriptHydrationOrder = ["agent-1"];
   h.state.transcriptHydrationEntries = new Map([
@@ -352,7 +145,7 @@ test("a snapshot introducing a brand-new entry keeps it after a same-flush pendi
 // ever restreamed. The fix must synchronize the snapshot's tail merge into
 // the canonical window, not just the returned object.
 test("a delta for an entry the snapshot just introduced does not erase the snapshot's own text at settle", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot({ transcript: [entry("agent-1", "Hello", { status: "running" })] });
   h.state.transcriptHydrationOrder = ["agent-1"];
   h.state.transcriptHydrationEntries = new Map([
@@ -403,7 +196,7 @@ test("a delta for an entry the snapshot just introduced does not erase the snaps
 // before it overwrites state.session — unlike remote, which guards this
 // unconditionally via preserveVisibleTranscriptText.
 test("a snapshot arriving before hydration ever loads does not overwrite longer streamed text with a shorter/compacted body", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot({
     transcript: [
       entry("agent-1", "Hello world, this is the full streamed answer", { status: "running" }),
@@ -433,7 +226,7 @@ test("a snapshot arriving before hydration ever loads does not overwrite longer 
 });
 
 test("an ordinary streaming snapshot coalesces rather than painting immediately", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot();
 
   h.lifecycle.applySessionSnapshot(baseSnapshot({ transcript: [entry("agent-1", "hi")] }));
@@ -444,7 +237,7 @@ test("an ordinary streaming snapshot coalesces rather than painting immediately"
 });
 
 test("a snapshot adding a pending approval flushes on the same tick", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot();
 
   h.lifecycle.applySessionSnapshot(
@@ -455,7 +248,7 @@ test("a snapshot adding a pending approval flushes on the same tick", () => {
 });
 
 test("a snapshot resolving a pending approval flushes on the same tick", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot({
     pending_approvals: [{ request_id: "approval-1", summary: "Run" }],
   });
@@ -466,7 +259,7 @@ test("a snapshot resolving a pending approval flushes on the same tick", () => {
 });
 
 test("a snapshot adding a pending AskUserQuestion flushes on the same tick", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot();
 
   h.lifecycle.applySessionSnapshot(
@@ -477,7 +270,7 @@ test("a snapshot adding a pending AskUserQuestion flushes on the same tick", () 
 });
 
 test("a snapshot whose turn completes (goes idle) flushes on the same tick", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot({ active_turn_id: "turn-1", current_status: "active" });
 
   h.lifecycle.applySessionSnapshot(baseSnapshot({ active_turn_id: null, current_status: "idle" }));
@@ -490,7 +283,7 @@ test("a snapshot whose turn completes (goes idle) flushes on the same tick", () 
 });
 
 test("a snapshot adding a failed transcript entry flushes on the same tick, even while the turn stays idle", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot({ active_turn_id: null, current_status: "idle" });
 
   h.lifecycle.applySessionSnapshot(
@@ -509,7 +302,7 @@ test("a snapshot adding a failed transcript entry flushes on the same tick, even
 });
 
 test("a snapshot reporting the workspace missing flushes on the same tick", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot();
 
   h.lifecycle.applySessionSnapshot(
@@ -520,7 +313,7 @@ test("a snapshot reporting the workspace missing flushes on the same tick", () =
 });
 
 test("a snapshot switching the active thread flushes on the same tick", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot({ active_thread_id: "thread-1" });
 
   h.lifecycle.applySessionSnapshot(baseSnapshot({ active_thread_id: "thread-2" }));
@@ -546,7 +339,7 @@ test("a snapshot switching the active thread flushes on the same tick", () => {
 // freeze a pin missing the last thing the user watched stream in
 // (lifecycle.js:938 running before the settle at :997).
 test("a snapshot switching threads stashes the outgoing session for the view-only pin, with its pending delta already settled into it", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   h.state.session = baseSnapshot({
     active_thread_id: THREAD,
     transcript: [entry("agent-1", "Hello", { status: "running" })],
@@ -591,7 +384,7 @@ test("a snapshot switching threads stashes the outgoing session for the view-onl
 });
 
 test("the very first snapshot (no previous session) flushes immediately", () => {
-  const h = buildHarness();
+  const h = createLifecycleHarness();
   assert.equal(h.state.session, null);
 
   h.lifecycle.applySessionSnapshot(baseSnapshot());

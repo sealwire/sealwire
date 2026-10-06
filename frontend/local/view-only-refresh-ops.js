@@ -124,6 +124,7 @@ export function createViewOnlyRefreshOps({
       priorEntries: prior?.entries || [],
       priorOlderCursor: prior?.olderCursor ?? null,
       priorPageRevision: prior?.pageRevision ?? null,
+      lastReadOrderSeq: prior?.lastReadOrderSeq ?? null,
       historyExtended: Boolean(prior?.historyExtended),
       loading: true,
       loadError: prior?.loadError ?? null,
@@ -248,6 +249,7 @@ export function createViewOnlyRefreshOps({
           terminal,
         }),
         historyExtended: refreshed.historyExtended,
+        lastReadOrderSeq: page.entries?.at(-1)?.order_seq ?? null,
       });
       state.viewOnlyThread =
         (livePin?.tailGap && livePin?.deltaDuringFetch) || viewOnlyPinBehindResync(livePin, built)
@@ -287,6 +289,7 @@ export function createViewOnlyRefreshOps({
         priorEntries: livePin?.entries || [],
         priorOlderCursor: livePin?.olderCursor ?? null,
         priorPageRevision: livePin?.pageRevision ?? null,
+        lastReadOrderSeq: livePin?.lastReadOrderSeq ?? null,
         historyExtended: Boolean(livePin?.historyExtended),
         error: true,
         loadError: error?.message || String(error),

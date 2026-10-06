@@ -235,6 +235,31 @@ test("rapid A-B-A navigation and a streamed delta survive a stale tail response"
   assert.deepEqual(state.viewOnlyThread.entries.map(row => row.text), ["Hello", "streamed next row"]);
 });
 
+test("a pin's last server-read row survives deltas, loading, older pages and a failed refresh", async () => {
+  const { state, pending, ops } = harness();
+  const first = ops.loadViewOnlyTranscript("a");
+  pending.shift().resolve(numberedPage(20, 30));
+  await first;
+  const returning = ops.loadViewOnlyTranscript("a");
+  assert.equal(state.viewOnlyThread.lastReadOrderSeq, 29 * 1048576);
+  state.viewOnlyThread = applyDeltaToViewOnlyPin(state.viewOnlyThread, {
+    thread_id: "a", transcript_generation: "run-1", item_id: "a-40", order_seq: 40 * 1048576,
+    turn_id: "turn-1", delta_kind: "agent_text", text_offset: 0, delta: "streamed ahead",
+  });
+  pending.shift().resolve(numberedPage(25, 35));
+  await returning;
+  assert.equal(state.viewOnlyThread.entries.at(-1).item_id, "a-40");
+  assert.equal(state.viewOnlyThread.lastReadOrderSeq, 34 * 1048576, "merged deltas must not advance the server-read boundary");
+  const older = ops.loadOlderViewOnlyTranscript();
+  pending.shift().resolve(numberedPage(15, 25));
+  await older;
+  assert.equal(state.viewOnlyThread.lastReadOrderSeq, 34 * 1048576);
+  const failed = ops.loadViewOnlyTranscript("a");
+  pending.shift().reject(new Error("offline"));
+  await failed;
+  assert.equal(state.viewOnlyThread.lastReadOrderSeq, 34 * 1048576);
+});
+
 test("a failed background refresh keeps cached messages visible", async () => {
   const { state, pending, ops } = harness();
   const first = ops.loadViewOnlyTranscript("a");

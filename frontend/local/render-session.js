@@ -749,7 +749,7 @@ export function createSessionRenderer({
     if (
       viewingConversation &&
       session.active_thread_id &&
-      session.transcript_truncated &&
+      (session.transcript_truncated || state.transcriptHydrationNeedsTailRepair) &&
       // A read-only projection paginates through its own pin (app.js
       // loadOlderViewOnlyTranscript). Feeding the projection into the shared
       // hydration pipeline would re-key the hydration store — which belongs to

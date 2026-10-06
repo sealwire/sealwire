@@ -63,6 +63,7 @@ import {
   workspaceRepairResolved,
 } from "../workspace-repair.js";
 import {
+  adoptViewOnlyTranscript,
   restoreHydratedTranscript,
   settleTranscriptProjection,
   switchTranscriptHydrationThread,
@@ -1071,6 +1072,7 @@ export function createLifecycleController(ctx) {
       state.transcriptPreserveScroll = false;
     }
     if (snapshot?.active_thread_id !== previousThreadId) {
+      adoptViewOnlyTranscript(state, snapshot);
       state.localUiStore.getState().clearTranscriptDetailLoading();
     }
 

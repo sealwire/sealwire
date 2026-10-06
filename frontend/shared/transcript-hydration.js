@@ -4,9 +4,8 @@ import { fetchOlderPageUntilRead, isTranscriptCursorRejected } from "./transcrip
 function createStartableRequest(run) {
   let start;
   const promise = new Promise((resolve, reject) => {
-    // Both callers provide an async function, so even an adapter that throws
-    // synchronously is surfaced as a rejected promise here. The important
-    // ordering is that the owner promise exists and is stored before run starts.
+    // Install the owner before running; async callers also turn synchronous
+    // adapter failures into rejections on the same cleanup path.
     start = () => run().then(resolve, reject);
   });
   return { promise, start };
@@ -28,6 +27,9 @@ export async function hydrateTranscript(
     progressBeforeFetch = false,
     minInitialEntries = 0,
     maxInitialPages = 1,
+    bridgeTarget = null,
+    bridgeProgressPages = 3,
+    isBackfillCurrent = () => true,
   }
 ) {
   const { signature, shouldHydrate, alreadyComplete, existingPromise } = store.prepareTranscriptHydration(
@@ -51,17 +53,13 @@ export async function hydrateTranscript(
     applyTranscriptHydrationProgress(state, store, onProgress);
   }
 
-  // Install the promise owner before invoking fetchPage. Most fetchers return a
-  // rejected promise on failure, but an injected adapter may throw before it can
-  // return one. Starting through this deferred handle keeps that synchronous
-  // failure on the same ownership-safe catch/finally path instead of referencing
-  // `hydrationPromise` while its declaration is still being initialized.
+  const hasBridgeTarget = Number.isSafeInteger(bridgeTarget?.orderSeq);
   const { promise: hydrationPromise, start: startHydration } = createStartableRequest(async () => {
+    const isBridgeRequestCurrent = () => !bridgeTarget
+      || state.transcriptHydrationPromise === hydrationPromise;
     try {
-      // Captured BEFORE the fetch, not after: a same-thread per-item delta
-      // refusal (session/stream.js) bumps this while this fetch is in flight,
-      // and neither the thread id nor the signature checks below notice that —
-      // see isRefusalEpochStale.
+      // A same-thread delta refusal can invalidate this read without changing
+      // either its thread id or signature; capture the epoch before fetching.
       const capturedRefusalEpoch = state.transcriptRefusalEpoch;
       const page = await fetchPage({
         threadId: snapshot.active_thread_id,
@@ -80,25 +78,10 @@ export async function hydrateTranscript(
       if (isRefusalEpochStale(state, capturedRefusalEpoch)) {
         return;
       }
+      if (!isBridgeRequestCurrent()) return;
 
-      // Freshness gate before the merge. A non-prepend tail merge used to RESET
-      // the order to the page's ids, orphaning anything the page did not carry
-      // (older scrolled-in history, or an id a live SSE delta had just
-      // appended) — still present in `entries`, never rendered again, and
-      // unrecoverable, since a later same-id merge only re-adds an id that is
-      // new to `entries`. `createMergedTranscriptHydrationPagePatch`'s
-      // non-prepend branch now delegates to `mergeTailPageOrder`
-      // (shared/authoritative-tail-merge.js) instead, which keeps anything the
-      // page does not carry above or below it rather than dropping it — see
-      // "a tail page merges into the loaded window instead of replacing its
-      // order" (transcript-hydration-store.test.mjs). That closed the
-      // order-loss failure mode this gate was originally written against, but
-      // the gate itself still earns its keep independently: the thread-id and
-      // signature checks below are a basic identity/freshness check on the
-      // page's own content, not a workaround for the merge. If the thread or
-      // signature changed while this fetch was in flight, the page is stale:
-      // release the loading gate and discard it so a fresh fetch, re-armed at
-      // the new revision, rebuilds the tail.
+      // A changed thread or signature makes the fetched tail stale. Discard it
+      // before merging so the current snapshot can request a fresh tail.
       if (store.getTranscriptHydrationThreadId(state) !== snapshot.active_thread_id) {
         return;
       }
@@ -110,11 +93,19 @@ export async function hydrateTranscript(
       store.mergeTranscriptHydrationPage(state, withBodyRevision(page, snapshot), { prepend: false });
 
       let loadedPages = 1;
+      let oldestReadOrderSeq = page.entries?.[0]?.order_seq ?? Infinity;
+      const needsBridge = () => hasBridgeTarget
+        && oldestReadOrderSeq > bridgeTarget.orderSeq;
+      const needsInitialHistory = () => state.transcriptHydrationOrder.length < minInitialEntries
+        && loadedPages < maxInitialPages;
+      // Streamed text can span unread tool rows; row count alone cannot prove
+      // the new tail connects to the last server read.
       while (
-        state.transcriptHydrationOrder.length < minInitialEntries &&
         state.transcriptHydrationOlderCursor != null &&
-        loadedPages < maxInitialPages
+        (needsBridge() || needsInitialHistory())
       ) {
+        if (!isBackfillCurrent()) return;
+        store.beginTranscriptHydration(state, "loading");
         const capturedOlderPageRefusalEpoch = state.transcriptRefusalEpoch;
         const before = state.transcriptHydrationOlderCursor;
         const olderPage = await fetchOlderPageUntilRead(
@@ -122,7 +113,9 @@ export async function hydrateTranscript(
           {
             isCurrent: () =>
               store.getTranscriptHydrationThreadId(state) === snapshot.active_thread_id
-              && store.getTranscriptHydrationCursor(state) === before,
+              && store.getTranscriptHydrationCursor(state) === before
+              && isBackfillCurrent()
+              && isBridgeRequestCurrent(),
             wait: waitBeforeRetry,
           }
         );
@@ -135,25 +128,37 @@ export async function hydrateTranscript(
         if (isRefusalEpochStale(state, capturedOlderPageRefusalEpoch)) {
           return;
         }
+        if (!isBridgeRequestCurrent()) return;
+        if (olderPage.prev_cursor === before) {
+          throw new Error("transcript history cursor did not advance");
+        }
         store.mergeTranscriptHydrationPage(state, withBodyRevision(olderPage, snapshot), { prepend: true });
         loadedPages += 1;
+        oldestReadOrderSeq = olderPage.entries?.[0]?.order_seq ?? oldestReadOrderSeq;
         if (store.getTranscriptHydrationThreadId(state) !== snapshot.active_thread_id) {
           return;
         }
-        if (store.getTranscriptHydrationSignature(state) !== signature) {
+        if (needsBridge() && (loadedPages - 1) % bridgeProgressPages === 0) {
+          store.beginTranscriptHydration(state, "loading");
+          applyTranscriptHydrationProgress(state, store, onProgress);
+        }
+        // The same running turn may append rows while older pages arrive;
+        // their generation and per-row revisions still fence the bridge.
+        const isSameRunningTurn = bridgeTarget && snapshot.active_turn_id
+          && state.session?.active_turn_id === snapshot.active_turn_id;
+        if (store.getTranscriptHydrationSignature(state) !== signature && !isSameRunningTurn) {
           store.clearTranscriptHydrationFetchedRevision(state);
           return;
         }
       }
 
-      // Two different questions, and folding them together is what made the
-      // settled-tail repair skip exactly the long transcripts it exists for.
-      //
-      // "Which revision are these bodies from" is answered by having merged the
-      // tail at all, so it is recorded unconditionally. "Have we reached the top
-      // of history" is what `prev_cursor == null` answers, and that is what
-      // decides whether the window is COMPLETE.
-      store.recordTranscriptHydrationRevision(state, snapshot.transcript_revision ?? null);
+      // A fresh tail establishes body freshness even if older history remains.
+      const completedBridge = hasBridgeTarget && !needsBridge() ? bridgeTarget : null;
+      store.recordTranscriptHydrationRevision(
+        state,
+        snapshot.transcript_revision ?? null,
+        completedBridge
+      );
       if (page.prev_cursor == null) {
         store.markTranscriptHydrationComplete(state, snapshot.transcript_revision ?? null);
       }
@@ -167,9 +172,8 @@ export async function hydrateTranscript(
       }
       onError(error);
     } finally {
-      // Clear by promise identity, not signature: a new entry joining mid-fetch
-      // re-keys the signature, and a signature gate would leak this promise (which
-      // then blocks loadOlderTranscript / scroll-up).
+      // Mid-fetch entries can change the signature; identity-based cleanup
+      // avoids leaving a promise that blocks later history reads.
       store.clearTranscriptHydrationPromise(state, hydrationPromise);
     }
   });

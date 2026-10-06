@@ -49,6 +49,7 @@ export function createClearedTranscriptHydrationPatch() {
     // A tail shell was seen since the last tail fetch; see prepareTranscriptHydrationState.
     transcriptTailSawShells: false,
     transcriptHydrationNeedsTailRepair: false,
+    transcriptHydrationBridgeTarget: null,
   };
 }
 
@@ -102,6 +103,7 @@ export function stashTranscriptHydrationForThread(state, extra = null) {
     unresolved: [...unresolvedRowsOf(state).keys()],
     bodyRevisions: new Map(rowBodyRevisionsOf(state)),
     seenRevisions: new Map(rowSeenRevisionsOf(state)),
+    bridgeTarget: state.transcriptHydrationBridgeTarget ?? null,
     ...(extra ? { extra } : {}),
   });
   while (cache.size > MAX_RETAINED_HYDRATION_THREADS) {
@@ -153,6 +155,8 @@ export function restoreTranscriptHydrationForThread(state, threadId) {
     ),
     transcriptRowBodyRevisions: new Map(stash.bodyRevisions || []),
     transcriptRowSeenRevisions: new Map(stash.seenRevisions || []),
+    transcriptHydrationBridgeTarget: stash.bridgeTarget ?? null,
+    transcriptHydrationNeedsTailRepair: stash.bridgeTarget != null,
     // Leave status idle: the next snapshot's prepareTranscriptHydration recomputes
     // whether the tail still needs a fetch, merging onto the restored window.
     transcriptHydrationStatus: "idle",
@@ -845,26 +849,18 @@ export function createClearedTranscriptHydrationPromisePatch(state, promise) {
   };
 }
 
-/**
- * The `transcript_revision` a tail's cached bodies were fetched at.
- *
- * Deliberately NOT `transcriptHydrationFetchedRevision`, which answers a
- * different question -- "did we already ARM a fetch at this revision" -- and is
- * what stops a settle from re-arming an identical one an RTT later. Overloading
- * it suppressed re-arms the pipeline depends on within a revision.
- *
- * Recorded so a later snapshot can tell "my cache IS the current text" from "my
- * cache is merely longer than a fixed-size preview" — the distinction the
- * settled-turn freshness check turns on. Deliberately separate from
- * "the window is complete": a long thread's tail page always has history above
- * it, and folding the two together meant the revision was never recorded for
- * exactly the transcripts the repair targets.
- */
-export function createTranscriptHydrationRevisionPatch(bodyRevision) {
+// Body freshness is independent of fetch scheduling and history completeness.
+// Restore the adopted cursor only after fresh pages have connected to it.
+export function createTranscriptHydrationRevisionPatch(bodyRevision, completedBridge = null) {
   return {
     transcriptHydrationBodyRevision: bodyRevision ?? null,
     transcriptTailSawShells: false,
     transcriptHydrationNeedsTailRepair: false,
+    transcriptHydrationBridgeTarget: null,
+    ...(completedBridge ? {
+      transcriptHydrationOlderCursor: completedBridge.olderCursor,
+      transcriptHydrationStatus: completedBridge.olderCursor == null ? "complete" : "idle",
+    } : {}),
   };
 }
 

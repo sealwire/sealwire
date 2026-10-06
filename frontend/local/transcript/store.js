@@ -28,6 +28,8 @@ import {
   settleTranscriptProjection as settlePendingTranscriptProjection,
 } from "../../shared/transcript-projection.js";
 import { clearViewedThreadCache } from "../../shared/viewed-thread-cache.js";
+import { transcriptPageMatchesGeneration } from "../../shared/transcript-generation.js";
+import { transcriptRowKey } from "../../shared/transcript-row-key.js";
 
 function applyLocalTranscriptPatch(state, patch) {
   if (!patch) {
@@ -52,6 +54,50 @@ export function clearTranscriptHydration(state) {
 export function switchTranscriptHydrationThread(state, nextThreadId) {
   stashTranscriptHydrationForThread(state);
   applyLocalTranscriptPatch(state, restoreTranscriptHydrationForThread(state, nextThreadId));
+}
+
+// Becoming active releases the view-only pin; its loaded rows must reach the
+// live window before a compacted snapshot becomes the displayed transcript.
+export function adoptViewOnlyTranscript(state, snapshot) {
+  const pin = state.viewOnlyThread;
+  if (
+    !pin?.entries?.length
+    || pin.threadId !== snapshot?.active_thread_id
+    || !transcriptPageMatchesGeneration(pin.relayGeneration, snapshot.transcript_generation)
+  ) {
+    return;
+  }
+
+  if (!transcriptPageMatchesGeneration(state.transcriptHydrationGeneration, snapshot.transcript_generation)) {
+    applyLocalTranscriptPatch(state, {
+      ...createClearedTranscriptHydrationPatch(),
+      transcriptHydrationThreadId: snapshot.active_thread_id,
+    });
+  }
+  const firstRetainedRow = state.transcriptHydrationEntries.get(state.transcriptHydrationOrder[0]);
+  const firstViewedRow = pin.entries[0];
+  const canRetainOlderCursor = firstRetainedRow
+    && firstRetainedRow.order_seq <= firstViewedRow.order_seq
+    && state.transcriptHydrationEntries.has(transcriptRowKey(firstViewedRow));
+  const olderCursor = canRetainOlderCursor ? state.transcriptHydrationOlderCursor : pin.olderCursor;
+  // The pin includes deltas newer than its last page read, so that page's
+  // revision cannot be used to reject the text currently on screen.
+  mergeTranscriptHydrationPage(state, {
+    thread_id: pin.threadId,
+    entries: pin.entries,
+    prev_cursor: olderCursor,
+  }, { prepend: true });
+  // Background tool rows and terminal states do not all arrive as deltas.
+  // Fresh pages must connect to the last server read before restoring the cursor.
+  applyLocalTranscriptPatch(state, {
+    transcriptHydrationGeneration: snapshot.transcript_generation,
+    transcriptHydrationBaseSnapshot: snapshot,
+    transcriptHydrationStatus: state.transcriptHydrationOlderCursor == null ? "complete" : "idle",
+    transcriptHydrationNeedsTailRepair: true,
+    transcriptHydrationBridgeTarget: Number.isSafeInteger(pin.lastReadOrderSeq)
+      ? { orderSeq: pin.lastReadOrderSeq, olderCursor: state.transcriptHydrationOlderCursor }
+      : null,
+  });
 }
 
 /// Append a live transcript delta to the loaded window.
@@ -116,8 +162,8 @@ export function clearTranscriptHydrationFetchedRevision(state) {
   applyLocalTranscriptPatch(state, createClearedTranscriptHydrationFetchedRevisionPatch());
 }
 
-export function recordTranscriptHydrationRevision(state, fetchedRevision) {
-  applyLocalTranscriptPatch(state, createTranscriptHydrationRevisionPatch(fetchedRevision));
+export function recordTranscriptHydrationRevision(state, bodyRevision, completedBridge = null) {
+  applyLocalTranscriptPatch(state, createTranscriptHydrationRevisionPatch(bodyRevision, completedBridge));
 }
 
 export function markTranscriptHydrationComplete(state, fetchedRevision) {
