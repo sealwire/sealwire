@@ -325,13 +325,35 @@ impl AppState {
     ) -> String {
         let ask_id = new_ask_id();
         let mut relay = self.relay.write().await;
+        // Known peers keep their card while the brief is written.
+        // An unresolved peer must leave the failure visible in the asker's scope.
+        let existing_peer = request
+            .peer_thread_id
+            .as_deref()
+            .filter(|peer| relay.thread_cwd(peer).is_some());
+        let peer_thread_id = existing_peer.unwrap_or_default().to_string();
+        let peer_provider = match existing_peer {
+            Some(peer) => relay
+                .runtime_for_thread(peer)
+                .and_then(|runtime| runtime.summary.as_ref())
+                .map(|summary| summary.provider.clone())
+                .filter(|provider| !provider.is_empty())
+                .or_else(|| relay.provider_hint_for_thread(peer))
+                .unwrap_or_default(),
+            None => request.provider.clone().unwrap_or_default(),
+        };
+        let peer_model = request.model.clone().or_else(|| {
+            existing_peer
+                .and_then(|peer| relay.thread_settings(peer))
+                .map(|settings| settings.model)
+                .filter(|model| !model.is_empty())
+        });
         let mut ask = Ask::new(
             ask_id.clone(),
             prechecked.asker_thread_id.clone(),
-            // Filled in when the peer exists; until then this is the delegation.
-            String::new(),
-            request.provider.clone().unwrap_or_default(),
-            request.model.clone(),
+            peer_thread_id,
+            peer_provider,
+            peer_model,
             request.effort.clone(),
             prechecked.message.clone(),
             prechecked.asker_cwd.clone(),

@@ -31898,6 +31898,116 @@ watchdog settle this Blocked",
     }
 
     #[tokio::test]
+    async fn a_reused_delegate_keeps_its_peer_on_record_while_the_brief_is_pending() {
+        let project = TempDir::new().expect("tempdir");
+        let cwd = project.path().to_string_lossy().to_string();
+        let (app, _p, _o) = build_app(&cwd).await;
+        grant_workspace(&app, &cwd).await;
+        pair_device(&app, "phone", vec![cwd.clone()]).await;
+        let asker = goal_session(&app, &cwd).await;
+        let peer = goal_session(&app, &cwd).await;
+        app.rename_thread(
+            &peer,
+            crate::protocol::RenameThreadInput {
+                name: Some("Existing delegate".to_string()),
+                device_id: None,
+            },
+        )
+        .await
+        .expect("rename the peer");
+        let peer_model = {
+            let mut relay = app.relay.write().await;
+            let mut previous = crate::state::delegation::Ask::new(
+                "previous-round".to_string(),
+                asker.clone(),
+                peer.clone(),
+                "fake".to_string(),
+                None,
+                None,
+                "check the retry loop".to_string(),
+                cwd.clone(),
+                None,
+                relay_api::delegation::StartedBy::Person,
+            );
+            previous.finish("The first pass is done.".to_string());
+            previous.delivered = true;
+            relay.insert_ask(previous);
+            relay.ensure_runtime_for_thread(&asker).active_turn_id =
+                Some("hold-the-brief".to_string());
+            relay.thread_settings(&peer).expect("peer settings").model
+        };
+
+        let ask_id = app
+            .delegate_detached(
+                &asker,
+                AskRequest {
+                    device_id: Some("phone".to_string()),
+                    started_by: relay_api::delegation::StartedBy::Person,
+                    peer_thread_id: Some(peer.clone()),
+                    provider: None,
+                    model: None,
+                    effort: None,
+                    message: "continue checking the retry loop".to_string(),
+                },
+            )
+            .await
+            .expect("reuse is accepted before the brief finishes");
+        {
+            let relay = app.relay.read().await;
+            let pending = relay.ask(&ask_id).expect("accepted record");
+            assert_eq!(pending.peer_thread_id, peer);
+            assert_eq!(pending.peer_provider, "fake");
+            assert_eq!(pending.peer_model.as_deref(), Some(peer_model.as_str()));
+            assert!(pending.sent_at.is_none(), "the brief is still pending");
+            let visible = relay.reviews_response(Some("phone")).asks;
+            assert_eq!(visible.len(), 2, "both rounds remain visible");
+            assert!(visible.iter().all(|ask| ask.peer_thread_id == peer));
+            assert!(visible.iter().all(|ask| ask.peer_provider == "fake"));
+            assert!(visible
+                .iter()
+                .all(|ask| ask.peer_title.as_deref() == Some("Existing delegate")));
+        }
+
+        app.settle_and_deliver_asks_at(crate::state::unix_now() + 24 * 60 * 60)
+            .await;
+        app.report_back(
+            &peer,
+            "A stale answer must not finish the pending round.".to_string(),
+            Vec::new(),
+        )
+        .await
+        .expect_err("a named peer has not been handed this round yet");
+        {
+            let mut relay = app.relay.write().await;
+            assert!(!relay
+                .ask(&ask_id)
+                .expect("pending round")
+                .status
+                .is_terminal());
+            relay.ensure_runtime_for_thread(&asker).active_turn_id = None;
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                {
+                    let relay = app.relay.read().await;
+                    let ask = relay.ask(&ask_id).expect("same round");
+                    assert_eq!(ask.peer_thread_id, peer);
+                    assert_eq!(ask.peer_provider, "fake");
+                    assert!(ask.error.is_none(), "{ask:?}");
+                    if ask.sent_at.is_some() {
+                        assert_eq!(relay.asks_of_asker(&asker).len(), 2);
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the same round is sent to the original peer");
+    }
+
+    #[tokio::test]
     async fn a_delegate_that_fails_in_the_background_says_so_on_its_record() {
         // The caller has already been told it was accepted, so a failure after that has
         // only one place left to surface: the record the panel is showing.
