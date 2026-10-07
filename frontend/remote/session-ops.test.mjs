@@ -9066,6 +9066,19 @@ async function settle(times = 6) {
   }
 }
 
+// Each frame is encrypted and decrypted through WebCrypto's thread pool, so a loaded
+// runner needs more than a fixed number of ticks. Returns either way: the asserts explain.
+async function settleUntil(predicate, timeoutMs = 5000) {
+  const startedAt = Date.now();
+  while (!predicate() && Date.now() - startedAt < timeoutMs) {
+    await nextTick();
+  }
+  await settle();
+}
+
+const hasTranscriptRow = (state, itemId) =>
+  (state.session.transcript || []).some((entry) => entry.item_id === itemId);
+
 test("a run change releases the view-only pin, refetches once, and re-pins under the new run", async () => {
   activeBrowser = installBrowserStubs();
 
@@ -9138,7 +9151,7 @@ test("a run change releases the view-only pin, refetches once, and re-pins under
 
   // Seed the gen-A pin the production way.
   await viewRemoteThread("viewed-thread");
-  await settle();
+  await settleUntil(() => hasTranscriptRow(state, "gen-a-viewed"));
   const fetchesAfterPin = transcriptFetches.length;
   assert.ok(fetchesAfterPin >= 1, "the pin was established by a real fetch");
   assert.ok(
@@ -9149,7 +9162,7 @@ test("a run change releases the view-only pin, refetches once, and re-pins under
   // The relay restarts: same viewed thread, new run.
   generationForPages = "gen-b";
   applySessionSnapshot(liveUnder("gen-b"));
-  await settle();
+  await settleUntil(() => hasTranscriptRow(state, "gen-b-viewed"));
 
   assert.equal(
     transcriptFetches.length,
@@ -9257,13 +9270,13 @@ for (const [fromGeneration, toGeneration, label] of [
     state.realSession = liveUnder(fromGeneration);
 
     await viewRemoteThread("viewed-thread");
-    await settle();
+    await settleUntil(() => hasTranscriptRow(state, tag(fromGeneration)));
     const before = transcriptFetches.length;
     assert.ok(before >= 1, "pinned under the starting run");
 
     generationForPages = toGeneration;
     applySessionSnapshot(liveUnder(toGeneration));
-    await settle();
+    await settleUntil(() => hasTranscriptRow(state, tag(toGeneration)));
 
     assert.equal(transcriptFetches.length, before + 1, "the boundary dispatched exactly one refetch");
     const ids = (state.session.transcript || []).map((entry) => entry.item_id);

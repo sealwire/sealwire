@@ -1024,9 +1024,11 @@ async fn production_session_proves_possession_before_the_public_broker_seats_it(
     let state = broker_test_state();
     {
         let mut change_rx = state.subscribe();
+        // A pong still missing at the next ping ends the session, so the interval is the
+        // real deadline; at 40ms a loaded runner missed it.
         let liveness = BrokerLivenessConfig {
-            ping_interval: Duration::from_millis(40),
-            pong_timeout: Duration::from_millis(200),
+            ping_interval: Duration::from_millis(200),
+            pong_timeout: Duration::from_secs(1),
         };
         let mut session = std::pin::pin!(run_broker_session_with_liveness(
             &state,
@@ -1128,7 +1130,7 @@ async fn production_session_proves_possession_before_the_public_broker_seats_it(
             result = &mut session => panic!("seated session ended during the stolen-ticket attempt: {result:?}"),
             _ = attack => {}
         }
-        let pong_deadline = Instant::now() + Duration::from_millis(500);
+        let pong_deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < pong_deadline {
             tokio::select! {
                 result = &mut session => panic!("seated session ended before a broker pong: {result:?}"),
@@ -1148,8 +1150,8 @@ async fn production_session_proves_possession_before_the_public_broker_seats_it(
         &mut change_rx,
         &config,
         BrokerLivenessConfig {
-            ping_interval: Duration::from_millis(40),
-            pong_timeout: Duration::from_millis(200),
+            ping_interval: Duration::from_secs(30),
+            pong_timeout: Duration::from_secs(30),
         },
     ));
     let reconnect_deadline = Instant::now() + Duration::from_secs(5);
@@ -1423,8 +1425,8 @@ async fn production_session_answers_a_phone_hello_with_the_pinned_identity() {
         &mut change_rx,
         &config,
         BrokerLivenessConfig {
-            ping_interval: Duration::from_millis(40),
-            pong_timeout: Duration::from_millis(200),
+            ping_interval: Duration::from_secs(30),
+            pong_timeout: Duration::from_secs(30),
         },
     );
     let phone = async {
@@ -1750,8 +1752,8 @@ async fn production_session_runs_a_signed_phone_action_once_through_a_real_broke
         &mut change_rx,
         &config,
         BrokerLivenessConfig {
-            ping_interval: Duration::from_millis(40),
-            pong_timeout: Duration::from_millis(200),
+            ping_interval: Duration::from_secs(30),
+            pong_timeout: Duration::from_secs(30),
         },
     );
     let phone = async {

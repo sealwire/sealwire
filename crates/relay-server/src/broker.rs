@@ -3753,11 +3753,14 @@ pub(crate) fn import_legacy_broker_files(
 /// files sit beside it.
 #[cfg(test)]
 pub(crate) fn temp_state_db(prefix: &str) -> String {
+    // macOS clocks tick in microseconds, so two tests can read the same time.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()));
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{unique}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("test state directory");
     dir.join("sealwire.db").display().to_string()
 }
