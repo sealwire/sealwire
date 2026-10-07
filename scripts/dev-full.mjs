@@ -23,13 +23,15 @@ const defaultBrokerUrl = `ws://${defaultBrokerHost}:${brokerPort}`;
 const brokerPublicUrl = process.env.RELAY_BROKER_PUBLIC_URL || defaultBrokerUrl;
 const buildMetaPath = new URL("../web/build-meta.json", import.meta.url);
 
+// Only the local Cloud stand-in (restart-dev-cloud-pg.sh) runs a broker. A local relay
+// on a broker would need a self-hosted signing key, which Cloud-paired phones block.
+const withBroker = process.env.RELAY_BROKER_AUTH_MODE?.trim().toLowerCase() === "public";
+
 const sharedEnv = {
   ...process.env,
   RELAY_DEV_SERVER_PORT: relayPort,
   RELAY_DEV_BROKER_PORT: brokerPort,
 };
-
-const brokerTicketSecret = resolveDevBrokerTicketSecret();
 
 const buildEnv = {
   ...sharedEnv,
@@ -37,27 +39,38 @@ const buildEnv = {
   RELAY_DEV_RELOAD_PORT: reloadPort,
 };
 
-const brokerEnv = {
-  ...sharedEnv,
-  PORT: process.env.RELAY_BROKER_PORT || brokerPort,
-  BIND_HOST:
-    process.env.RELAY_BROKER_BIND_HOST || process.env.BIND_HOST || defaultBrokerBindHost,
-  RELAY_BROKER_TICKET_SECRET: brokerTicketSecret,
-};
-if (process.env.RELAY_BROKER_AUTH_MODE?.trim().toLowerCase() === "public") {
-  brokerEnv.RELAY_BROKER_PUBLIC_ISSUER_SECRET = resolveDevBrokerIssuerSecret();
-}
-
 const relayEnv = {
   ...sharedEnv,
   PORT: process.env.RELAY_SERVER_PORT || relayPort,
   BIND_HOST: process.env.RELAY_SERVER_BIND_HOST || "127.0.0.1",
-  RELAY_BROKER_URL: process.env.RELAY_BROKER_URL || defaultBrokerUrl,
-  RELAY_BROKER_PUBLIC_URL: brokerPublicUrl,
-  RELAY_BROKER_CHANNEL_ID: process.env.RELAY_BROKER_CHANNEL_ID || "dev-room",
-  RELAY_BROKER_PEER_ID: process.env.RELAY_BROKER_PEER_ID || "local-relay",
-  RELAY_BROKER_TICKET_SECRET: brokerTicketSecret,
 };
+let brokerEnv = null;
+if (withBroker) {
+  const brokerTicketSecret = resolveDevBrokerTicketSecret();
+  brokerEnv = {
+    ...sharedEnv,
+    PORT: process.env.RELAY_BROKER_PORT || brokerPort,
+    BIND_HOST:
+      process.env.RELAY_BROKER_BIND_HOST || process.env.BIND_HOST || defaultBrokerBindHost,
+    RELAY_BROKER_TICKET_SECRET: brokerTicketSecret,
+    RELAY_BROKER_PUBLIC_ISSUER_SECRET: resolveDevBrokerIssuerSecret(),
+  };
+  Object.assign(relayEnv, {
+    RELAY_BROKER_URL: process.env.RELAY_BROKER_URL || defaultBrokerUrl,
+    RELAY_BROKER_PUBLIC_URL: brokerPublicUrl,
+    RELAY_BROKER_CHANNEL_ID: process.env.RELAY_BROKER_CHANNEL_ID || "dev-room",
+    RELAY_BROKER_PEER_ID: process.env.RELAY_BROKER_PEER_ID || "local-relay",
+    RELAY_BROKER_TICKET_SECRET: brokerTicketSecret,
+  });
+} else {
+  // The relay joins a broker whenever RELAY_BROKER_URL is set, so a value left in
+  // the shell would quietly put a local relay back on one.
+  for (const key of Object.keys(relayEnv)) {
+    if (key.toUpperCase().startsWith("RELAY_BROKER_")) {
+      delete relayEnv[key];
+    }
+  }
+}
 
 const children = [];
 let shuttingDown = false;
@@ -115,13 +128,13 @@ process.on("SIGTERM", () => shutdown(0));
 
 await ensurePortsAreAvailable([
   { name: "relay-server", port: relayPort },
-  { name: "relay-broker", port: brokerPort },
+  ...(withBroker ? [{ name: "relay-broker", port: brokerPort }] : []),
   { name: "dev-reload", port: reloadPort },
 ]);
 
 startReloadServer();
 
-console.log("[dev:full] Building frontend assets for relay-server and relay-broker...");
+console.log("[dev:full] Building frontend assets...");
 await runCommand(npmCommand, ["run", "build"], buildEnv);
 logCurrentBuildMeta("Initial frontend build");
 watchFrontendBuildMeta();
@@ -140,16 +153,15 @@ await runCommand(
   console.warn(`[dev:full] target prune skipped: ${error.message}`);
 });
 
-console.log("[dev:full] Starting frontend build watcher, relay-broker, and relay-server...");
 console.log(`[dev:full] Relay:  http://127.0.0.1:${relayPort}`);
-console.log(`[dev:full] Broker: http://127.0.0.1:${brokerPort}`);
-if (detectedLanIp && !localhostOnly) {
-  console.log(`[dev:full] LAN broker: http://${detectedLanIp}:${brokerPort}`);
-}
-if (brokerPublicUrl !== defaultBrokerUrl) {
-  console.log(`[dev:full] Pairing links will use broker public URL: ${brokerPublicUrl}`);
+if (withBroker) {
+  console.log(`[dev:full] Broker: http://127.0.0.1:${brokerPort}`);
+  if (detectedLanIp && !localhostOnly) {
+    console.log(`[dev:full] LAN broker: http://${detectedLanIp}:${brokerPort}`);
+  }
+  console.log(`[dev:full] Pairing links use ${brokerPublicUrl}`);
 } else {
-  console.log(`[dev:full] Pairing links default to ${brokerPublicUrl}`);
+  console.log("[dev:full] local mode — no broker; phone pairing needs the Cloud relay");
 }
 console.log("[dev:full] Static frontend assets are served from ./web and rebuilt on change.");
 
@@ -159,7 +171,9 @@ spawnManaged(
   ["run", "build", "--", "--watch"],
   buildEnv
 );
-spawnManaged("relay-broker", "cargo", ["run", "-p", "relay-broker"], brokerEnv);
+if (brokerEnv) {
+  spawnManaged("relay-broker", "cargo", ["run", "-p", "relay-broker"], brokerEnv);
+}
 // Build with the private crate when this checkout has it.
 // Without this, `scripts/with-private.sh npm run dev:full` would swap the private
 // crate in and then build a relay that ignores it — a dev loop where task teams

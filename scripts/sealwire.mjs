@@ -203,6 +203,7 @@ if (brokerConfig) {
     "sealwire: local mode — no public broker; remote pairing disabled."
   );
 } else {
+  stripBrokerEnv(env);
   console.warn(
     "sealwire: no public broker configured; starting localhost-only relay. " +
       "Set AGENT_RELAY_PUBLIC_BROKER_URL or pass `--broker` to enable remote pairing."

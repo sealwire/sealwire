@@ -190,3 +190,15 @@ test("`--broker <url>` still connects (local command did not break remote mode)"
     "`--broker` must still forward RELAY_BROKER_URL to the server"
   );
 });
+
+test("plain `sealwire` with no broker configured strips an ambient RELAY_BROKER_URL", async () => {
+  const { code, broker, stderr } = await runLauncher({
+    extraEnv: { RELAY_BROKER_URL: "wss://leaked.example.com" },
+  });
+  assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
+  assert.equal(
+    broker.RELAY_BROKER_URL,
+    "<unset>",
+    "a local launch must never hand the server a broker URL it was not asked to use"
+  );
+});
