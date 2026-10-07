@@ -74,7 +74,7 @@ async fn write_test_public_identity(path: &str, control_url: &str, seed: [u8; 32
 fn stored_registration(
     db: impl AsRef<std::path::Path>,
 ) -> Option<PersistedPublicRelayRegistration> {
-    load_public_relay_registration_raw(db.as_ref()).unwrap()
+    only_public_relay_registration(db.as_ref()).unwrap()
 }
 
 /// Everything the stored registration says, to check what did and did not end up in it.
@@ -87,7 +87,7 @@ fn stored_registration_text(db: impl AsRef<std::path::Path>) -> String {
 }
 
 fn stored_identity_seed(db: impl AsRef<std::path::Path>) -> Option<String> {
-    load_public_relay_identity_raw(db.as_ref())
+    only_public_relay_identity(db.as_ref())
         .unwrap()
         .map(|identity| identity.relay_signing_seed)
 }
@@ -1579,6 +1579,7 @@ async fn production_session_answers_a_phone_hello_with_the_pinned_identity() {
                 last_peer_id: Some(phone_peer.clone()),
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                pairing_broker: None,
             })
             .await;
         let claim_id = "claim-live";
@@ -1739,6 +1740,7 @@ async fn production_session_runs_a_signed_phone_action_once_through_a_real_broke
             last_peer_id: None,
             broker_join_ticket_expires_at: None,
             path_scope: Vec::new(),
+            pairing_broker: None,
         })
         .await;
     let binding = request_auth::RelayRequestBinding {
@@ -1937,6 +1939,141 @@ async fn production_session_runs_a_signed_phone_action_once_through_a_real_broke
     }
 }
 
+const CLOUD_CONTROL: &str = "https://app.sealwire.dev/";
+const OTHER_CONTROL: &str = "https://broker.example.net/";
+
+fn test_registration(relay_id: &str) -> PublicRelayRegistration {
+    PublicRelayRegistration {
+        relay_id: relay_id.into(),
+        broker_room_id: format!("room-{relay_id}"),
+        relay_refresh_token: format!("refresh-{relay_id}"),
+    }
+}
+
+#[tokio::test]
+async fn one_database_keeps_a_registration_and_identity_per_cloud_broker() {
+    let db = temp_registration_path("agent-relay-two-brokers");
+    let db_path = std::path::Path::new(&db);
+    save_public_relay_registration(db_path, CLOUD_CONTROL, &test_registration("relay-cloud"))
+        .await
+        .expect("cloud registration saves");
+    write_test_public_identity(&db, CLOUD_CONTROL, [1_u8; 32]).await;
+
+    let pending = PendingPublicEnrollment {
+        control_url: Url::parse(OTHER_CONTROL).unwrap(),
+        state_db: db_path.to_path_buf(),
+    };
+    let locked =
+        enroll_public_relay_if_absent(&pending, || async { Ok(test_registration("relay-other")) })
+            .await
+            .expect("a second broker enrolls beside the first");
+    assert_eq!(locked.disposition, EnrollmentDisposition::Enrolled);
+    drop(locked);
+    let other_identity = load_or_create_public_relay_identity(db_path, OTHER_CONTROL)
+        .await
+        .expect("the second broker gets an identity");
+
+    let cloud = load_public_relay_registration(db_path, CLOUD_CONTROL)
+        .await
+        .unwrap()
+        .expect("the first broker's registration is kept");
+    assert_eq!(cloud.relay_id, "relay-cloud");
+    let other = load_public_relay_registration(db_path, OTHER_CONTROL)
+        .await
+        .unwrap()
+        .expect("the second broker's registration is stored");
+    assert_eq!(other.relay_id, "relay-other");
+    let cloud_identity = load_existing_public_relay_identity(db_path, CLOUD_CONTROL)
+        .await
+        .expect("the first broker's identity still loads");
+    assert_eq!(
+        cloud_identity.signing_key.to_bytes(),
+        [1_u8; 32],
+        "enrolling with another broker must not touch the first one's key"
+    );
+    assert_ne!(
+        other_identity.signing_key.to_bytes(),
+        [1_u8; 32],
+        "each broker sees its own relay key"
+    );
+}
+
+fn seed_paired_phone(db: &str, device_id: &str, pinned_relay_key: Option<&str>) {
+    let mut body = serde_json::json!({
+        "device_id": device_id,
+        "label": device_id,
+        "device_verify_key": "",
+        "created_at": 1,
+        "last_seen_at": null,
+        "last_peer_id": null,
+    });
+    if let Some(key) = pinned_relay_key {
+        body["pairing_broker"] = serde_json::json!({
+            "broker_url": "wss://app.sealwire.dev",
+            "broker_room_id": "room",
+            "relay_peer_id": "relay",
+            "relay_verify_key": key,
+        });
+    }
+    super::stored_credentials::transact(std::path::Path::new(db), |conn| {
+        conn.execute(
+            "INSERT INTO paired_device (key, body) VALUES (?1, ?2)",
+            rusqlite::params![device_id, body.to_string()],
+        )
+        .map_err(|error| error.to_string())?;
+        crate::state::put_credential(
+            conn,
+            crate::state::DEVICE_PAYLOAD_SECRET,
+            device_id,
+            "payload",
+            None,
+            1,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .expect("paired phone seeds");
+}
+
+fn stored_content_identity(db: &str) -> Option<String> {
+    super::stored_credentials::read(
+        std::path::Path::new(db),
+        super::stored_credentials::RELAY_CONTENT_IDENTITY,
+    )
+    .unwrap()
+    .map(|stored| stored.secret)
+}
+
+#[tokio::test]
+async fn a_missing_self_hosted_key_blocks_startup_only_for_phones_that_pinned_a_lost_key() {
+    let db = temp_registration_path("agent-relay-content-key-cloud-phones");
+    write_test_public_identity(&db, CLOUD_CONTROL, [9_u8; 32]).await;
+    let cloud_key = STANDARD.encode(
+        SigningKey::from_bytes(&[9_u8; 32])
+            .verifying_key()
+            .to_bytes(),
+    );
+    seed_paired_phone(&db, "phone-cloud", Some(&cloud_key));
+    seed_paired_phone(&db, "phone-unrecorded", None);
+    load_or_create_relay_content_identity(std::path::Path::new(&db))
+        .await
+        .expect("phones paired through Cloud never pinned the self-hosted key");
+    assert!(stored_content_identity(&db).is_some());
+
+    let db = temp_registration_path("agent-relay-content-key-lost");
+    seed_paired_phone(&db, "phone-lost", Some(&STANDARD.encode([3_u8; 32])));
+    let refused = load_or_create_relay_content_identity(std::path::Path::new(&db))
+        .await
+        .expect_err("a phone pinned a key this database no longer holds");
+    assert!(
+        refused.contains("phone-lost"),
+        "name the stranded phone: {refused}"
+    );
+    assert!(
+        stored_content_identity(&db).is_none(),
+        "a lost key must not be silently replaced"
+    );
+}
+
 #[tokio::test]
 async fn self_hosted_content_identity_survives_restart_and_refuses_a_missing_paired_key() {
     let _cloud = cloud_env_lock().lock().expect("cloud env lock");
@@ -1995,26 +2132,16 @@ async fn self_hosted_content_identity_survives_restart_and_refuses_a_missing_pai
     );
 
     super::stored_credentials::transact(&db, |conn| {
-        super::stored_credentials::delete_in(
-            conn,
-            super::stored_credentials::RELAY_CONTENT_IDENTITY,
-        )?;
-        crate::state::put_credential(
-            conn,
-            crate::state::DEVICE_PAYLOAD_SECRET,
-            "phone-1",
-            "payload",
-            None,
-            1,
-        )
-        .map_err(|error| error.to_string())
+        crate::state::delete_credential(conn, super::stored_credentials::RELAY_CONTENT_IDENTITY, "")
+            .map_err(|error| error.to_string())
     })
-    .expect("a paired phone without the identity it pinned");
+    .expect("the identity is lost");
+    seed_paired_phone(db.to_str().expect("db path"), "phone-1", Some(&first_key));
     let lost = BrokerConfig::from_env().await;
-    let message = lost.expect_err("missing identity with paired devices");
+    let message = lost.expect_err("missing identity with a phone that pinned it");
     assert!(
-        message.contains("paired devices"),
-        "identity loss must say the phones need a trusted re-pair: {message}"
+        message.contains("phone-1"),
+        "identity loss must name the phones that need a trusted re-pair: {message}"
     );
     assert!(
         stored(&db).is_none(),
@@ -2876,6 +3003,7 @@ mod transcript_delta_delivery {
                     last_peer_id: Some(peer_id.to_string()),
                     broker_join_ticket_expires_at: None,
                     path_scope: Vec::new(),
+                    pairing_broker: None,
                 },
             );
             relay.mark_surface_peer_online(peer_id);
@@ -3070,6 +3198,7 @@ mod transcript_delta_delivery {
                 last_peer_id: Some("peer-2".to_string()),
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                pairing_broker: None,
             },
         );
         for peer in ["peer-1", "peer-2"] {
@@ -3270,6 +3399,7 @@ async fn encrypted_broker_state_parts(
             last_peer_id: None,
             broker_join_ticket_expires_at: None,
             path_scope: Vec::new(),
+            pairing_broker: None,
         },
     );
     seed_test_request_sessions(&mut *relay.write().await);
@@ -3779,6 +3909,7 @@ async fn one_slow_action_does_not_deafen_the_relay_to_every_other_device() {
                 last_peer_id: None,
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                pairing_broker: None,
             },
         );
         seed_test_request_sessions(&mut *relay.write().await);
@@ -5809,6 +5940,7 @@ async fn private_broker_state(cwd: &str) -> AppState {
             last_peer_id: None,
             broker_join_ticket_expires_at: None,
             path_scope: Vec::new(),
+            pairing_broker: None,
         },
     );
     seed_test_request_sessions(&mut *relay.write().await);
@@ -6536,12 +6668,15 @@ async fn enrolled_relay_refuses_to_mint_a_replacement_identity() {
         None,
     )
     .await
-    .expect_err("an identity for a different control url must fail");
-    assert!(mismatched.contains("was created for"), "got: {mismatched}");
+    .expect_err("another broker's identity is not this broker's");
+    assert!(
+        mismatched.contains("refusing to generate"),
+        "got: {mismatched}"
+    );
     assert_eq!(
         stored_identity_seed(&registration_path).expect("identity should remain"),
         before,
-        "a control-url mismatch must not rewrite the identity file"
+        "another broker's identity must not be rewritten"
     );
 }
 
@@ -6802,7 +6937,7 @@ async fn cloud_activate_cached_registration_emits_witness_without_prompt() {
     std::env::remove_var("RELAY_STATE_DB");
     assert_eq!(code, 0);
     assert!(
-        load_public_relay_registration_raw(std::path::Path::new(&registration_path))
+        only_public_relay_registration(std::path::Path::new(&registration_path))
             .unwrap()
             .is_some()
     );
@@ -6923,7 +7058,7 @@ async fn enroll_release_reenroll_different_key_lifecycle() {
         crate::broker::access_release::ReleaseOutcome::Released
     );
     assert!(
-        load_public_relay_registration_raw(std::path::Path::new(&registration_path))
+        only_public_relay_registration(std::path::Path::new(&registration_path))
             .unwrap()
             .is_none()
     );
@@ -7086,7 +7221,7 @@ async fn production_activate_then_matching_release_clears() {
         outcome,
         crate::broker::access_release::ReleaseOutcome::Released
     );
-    assert!(load_public_relay_registration_raw(&registration_path)
+    assert!(only_public_relay_registration(&registration_path)
         .unwrap()
         .is_none());
 }
@@ -7486,7 +7621,7 @@ async fn production_release_then_activate_reenrolls_cleanly() {
         outcome,
         crate::broker::access_release::ReleaseOutcome::Released
     );
-    assert!(load_public_relay_registration_raw(&registration_path)
+    assert!(only_public_relay_registration(&registration_path)
         .unwrap()
         .is_none());
 
@@ -7565,6 +7700,7 @@ async fn snapshot_publish_state(security: SecurityProfile) -> AppState {
             last_peer_id: Some("surface-yesterday".to_string()),
             broker_join_ticket_expires_at: None,
             path_scope: Vec::new(),
+            pairing_broker: None,
         },
     );
     seed_test_request_sessions(&mut *relay.write().await);
@@ -7670,6 +7806,7 @@ pub(super) async fn folder_limited_phone_state(phone_dir: &str, session_dir: &st
                 last_peer_id: None,
                 broker_join_ticket_expires_at: None,
                 path_scope: vec![phone_dir.to_string()],
+                pairing_broker: None,
             },
         );
         seed_test_request_sessions(&mut relay);

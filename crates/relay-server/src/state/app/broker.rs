@@ -9,13 +9,13 @@ impl AppState {
         relay.broker_configured = true;
     }
 
-    pub(crate) async fn set_broker_channel(
-        &self,
-        channel_id: Option<String>,
-        peer_id: Option<String>,
-    ) {
+    pub(crate) async fn set_broker_channel(&self, config: &crate::broker::BrokerConfig) {
         let mut relay = self.relay.write().await;
-        relay.set_broker_target(channel_id, peer_id);
+        relay.set_broker_target(
+            Some(config.broker_room_id().to_string()),
+            Some(config.relay_peer_id().to_string()),
+            Some(config.pairing_broker()),
+        );
         relay.notify();
     }
 

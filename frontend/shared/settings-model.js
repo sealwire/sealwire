@@ -83,6 +83,50 @@ export function splitDeviceRecords(records) {
   return { current, past };
 }
 
+/** Scheme, host and port tell brokers apart; the host alone is the friendlier label. */
+function brokerAddress(url) {
+  try {
+    const parsed = new URL(url);
+    const address = parsed.origin === "null" ? url : parsed.origin;
+    return { address, host: parsed.host || url };
+  } catch {
+    return { address: url, host: url };
+  }
+}
+
+/**
+ * Current devices by the broker each was paired through: this relay's broker first,
+ * other brokers by name, devices paired before this was recorded last.
+ */
+export function groupDevicesByBroker(records) {
+  const groups = new Map();
+  for (const record of records || []) {
+    const url = record?.pairing_broker_url || null;
+    const { address, host } = url ? brokerAddress(url) : { address: null, host: null };
+    const current = Boolean(url && record.pairing_broker_current);
+    const key = url ? `${current ? "current" : "other"}:${address}` : "unrecorded";
+    if (!groups.has(key)) {
+      groups.set(key, { key, host, address, current, recorded: Boolean(url), records: [] });
+    }
+    groups.get(key).records.push(record);
+  }
+  const hostUses = new Map();
+  for (const group of groups.values()) {
+    if (group.recorded) {
+      hostUses.set(group.host, (hostUses.get(group.host) || 0) + 1);
+    }
+  }
+  for (const group of groups.values()) {
+    if (group.recorded && hostUses.get(group.host) > 1) {
+      group.host = group.address;
+    }
+  }
+  const rank = (group) => (group.current ? 0 : group.recorded ? 1 : 2);
+  return [...groups.values()].sort(
+    (left, right) => rank(left) - rank(right) || String(left.host).localeCompare(String(right.host))
+  );
+}
+
 /** "6 revoked devices", "1 rejected device", "1 revoked, 2 rejected devices" */
 export function pastDevicesLabel(records) {
   const revoked = records.filter((record) => record?.lifecycle_state === "revoked").length;

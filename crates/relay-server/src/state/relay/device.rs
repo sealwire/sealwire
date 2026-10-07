@@ -38,6 +38,18 @@ pub(crate) struct PendingPairing {
     pub(crate) expires_at: u64,
     #[serde(default)]
     pub(crate) path_scope: Vec<String>,
+    #[serde(default)]
+    pub(crate) pairing_broker: Option<PairingBroker>,
+}
+
+/// What a pairing QR told the phone: where to dial and which relay key to trust.
+/// A phone can only reach this relay while all four still match.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PairingBroker {
+    pub(crate) broker_url: String,
+    pub(crate) broker_room_id: String,
+    pub(crate) relay_peer_id: String,
+    pub(crate) relay_verify_key: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -54,6 +66,9 @@ pub(crate) struct PairedDevice {
     pub(crate) broker_join_ticket_expires_at: Option<u64>,
     #[serde(default)]
     pub(crate) path_scope: Vec<String>,
+    /// `None` for a device paired before this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pairing_broker: Option<PairingBroker>,
 }
 
 impl std::fmt::Debug for PairedDevice {
@@ -71,6 +86,7 @@ impl std::fmt::Debug for PairedDevice {
                 &self.broker_join_ticket_expires_at,
             )
             .field("path_scope", &self.path_scope)
+            .field("pairing_broker", &self.pairing_broker)
             .finish()
     }
 }
@@ -136,6 +152,8 @@ impl DeviceRecord {
             broker_join_ticket_expires_at: self.broker_join_ticket_expires_at,
             fingerprint: device_fingerprint(Some(&self.device_verify_key)),
             path_scope: self.path_scope.clone(),
+            pairing_broker_url: None,
+            pairing_broker_current: false,
         }
     }
 }
@@ -361,6 +379,7 @@ impl RelayState {
                 created_at: now,
                 expires_at: prepared.expires_at,
                 path_scope: prepared.path_scope.clone(),
+                pairing_broker: None,
             },
         );
         Ok(owed)
@@ -403,38 +422,40 @@ impl RelayState {
         )
     }
 
-    pub fn render_pairing_ticket_view(
-        &self,
+    /// The QR for an installed pairing. The phone that approves it is recorded with
+    /// this same `broker`, so the device list can never disagree with what it pinned.
+    pub fn issue_pairing_ticket_view(
+        &mut self,
         prepared: &PreparedPairingTicket,
-        broker_url: &str,
-        broker_room_id: &str,
+        broker: &PairingBroker,
         pairing_join_ticket: &str,
-        relay_peer_id: &str,
-        relay_verify_key: &str,
     ) -> PairingTicketView {
+        if let Some(pending) = self.pending_pairings.get_mut(&prepared.pairing_id) {
+            pending.pairing_broker = Some(broker.clone());
+        }
         let pairing_payload = pairing_payload(
             &prepared.pairing_id,
             &prepared.pairing_secret,
             prepared.expires_at,
-            broker_url,
-            broker_room_id,
+            &broker.broker_url,
+            &broker.broker_room_id,
             pairing_join_ticket,
-            relay_peer_id,
-            relay_verify_key,
+            &broker.relay_peer_id,
+            &broker.relay_verify_key,
             self.security.mode(),
             &prepared.path_scope,
         );
-        let pairing_url = pairing_url(broker_url, &pairing_payload);
+        let pairing_url = pairing_url(&broker.broker_url, &pairing_payload);
         let pairing_qr_svg = pairing_qr_svg(&pairing_url);
 
         PairingTicketView {
             pairing_id: prepared.pairing_id.clone(),
             pairing_secret: prepared.pairing_secret.clone(),
             expires_at: prepared.expires_at,
-            broker_url: broker_url.to_string(),
-            broker_channel_id: broker_room_id.to_string(),
+            broker_url: broker.broker_url.clone(),
+            broker_channel_id: broker.broker_room_id.clone(),
             pairing_join_ticket: pairing_join_ticket.to_string(),
-            relay_peer_id: relay_peer_id.to_string(),
+            relay_peer_id: broker.relay_peer_id.clone(),
             security_mode: self.security.mode(),
             pairing_payload,
             pairing_url,
@@ -490,6 +511,7 @@ impl RelayState {
                     last_peer_id: Some(peer_id.to_string()),
                     broker_join_ticket_expires_at,
                     path_scope: pending.path_scope.clone(),
+                    pairing_broker: pending.pairing_broker.clone(),
                 });
 
             device.label = label;
@@ -499,6 +521,7 @@ impl RelayState {
             device.last_peer_id = Some(peer_id.to_string());
             device.broker_join_ticket_expires_at = broker_join_ticket_expires_at;
             device.path_scope = pending.path_scope.clone();
+            device.pairing_broker = pending.pairing_broker.clone();
             device.clone()
         };
         self.bind_surface_peer_to_device(&approved_device.device_id, peer_id);
@@ -1426,6 +1449,7 @@ mod tests {
             last_peer_id: None,
             broker_join_ticket_expires_at: None,
             path_scope: Vec::new(),
+            pairing_broker: None,
         };
         let printed = format!("{device:?}");
         assert!(!printed.contains("s3cret-payload-value"), "{printed}");

@@ -145,21 +145,27 @@ test("`sealwire cloud` attaches to the hosted broker by default", async () => {
   assert.equal(broker.RELAY_CLOUD_EXPECTED_BEARER_FP, "abcdef0123456789");
 });
 
-test("`sealwire cloud --broker <url>` overrides the hosted default", async () => {
-  const { code, broker, stderr } = await runLauncher({
+test("`sealwire cloud --broker <url>` is refused: cloud only ever means SealWire Cloud", async () => {
+  const { code, broker, preflight, stderr } = await runLauncher({
     args: ["cloud", "--broker", "wss://broker.example.com"],
   });
-  assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(broker.RELAY_BROKER_URL, "wss://broker.example.com");
+  assert.equal(code, 2, `exit=${code}\nstderr:\n${stderr}`);
+  assert.match(stderr, /npx sealwire --broker/, "point at the command that does take a broker");
+  assert.equal(preflight.argv, undefined, "no enrollment may start against the named broker");
+  assert.equal(broker.RELAY_BROKER_URL, undefined, "the relay must not start");
 });
 
-test("`sealwire cloud` prefers a configured broker origin over the hosted default", async () => {
-  const { code, broker, stderr } = await runLauncher({
+test("`sealwire cloud` ignores a configured broker origin; that is the default for `npx sealwire`", async () => {
+  const { code, broker, preflight, stderr } = await runLauncher({
     args: ["cloud"],
-    extraEnv: { AGENT_RELAY_PUBLIC_BROKER_URL: "wss://configured.example.com" },
+    extraEnv: {
+      AGENT_RELAY_PUBLIC_BROKER_URL: "wss://configured.example.com",
+      AGENT_RELAY_PUBLIC_BROKER_ORIGIN: "wss://configured-origin.example.com",
+    },
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(broker.RELAY_BROKER_URL, "wss://configured.example.com");
+  assert.equal(preflight.RELAY_BROKER_CONTROL_URL, HOSTED_BROKER_HTTP);
+  assert.equal(broker.RELAY_BROKER_URL, HOSTED_BROKER_WS);
 });
 
 test("`sealwire cloud` derives a coherent broker set (ambient RELAY_BROKER_URL cannot split it)", async () => {
@@ -184,17 +190,6 @@ test("`sealwire cloud` forces public auth mode over an ambient self_hosted", asy
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
   assert.equal(broker.RELAY_BROKER_AUTH_MODE, "public");
-});
-
-test("`sealwire cloud --broker <url>` wins over an ambient RELAY_BROKER_URL for every endpoint", async () => {
-  const { code, broker, stderr } = await runLauncher({
-    args: ["cloud", "--broker", "wss://flag.example.com"],
-    extraEnv: { RELAY_BROKER_URL: "wss://ambient.example.com" },
-  });
-  assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(broker.RELAY_BROKER_URL, "wss://flag.example.com");
-  assert.equal(broker.RELAY_BROKER_PUBLIC_URL, "wss://flag.example.com");
-  assert.equal(broker.RELAY_BROKER_CONTROL_URL, "https://flag.example.com");
 });
 
 test("`--broker` honors an explicit split-horizon RELAY_BROKER_PUBLIC_URL", async () => {
@@ -227,15 +222,6 @@ test("`--broker` pins the websocket URL to the flag over an ambient RELAY_BROKER
   });
   assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
   assert.equal(broker.RELAY_BROKER_URL, "wss://flag.example.com");
-});
-
-test("`sealwire cloud --broker <url>` forces public auth even with ambient self_hosted", async () => {
-  const { code, broker, stderr } = await runLauncher({
-    args: ["cloud", "--broker", "wss://custom.example.com"],
-    extraEnv: { RELAY_BROKER_AUTH_MODE: "self_hosted" },
-  });
-  assert.equal(code, 0, `exit=${code}\nstderr:\n${stderr}`);
-  assert.equal(broker.RELAY_BROKER_AUTH_MODE, "public");
 });
 
 test("`sealwire cloud --no-broker` is rejected as contradictory", async () => {
@@ -393,7 +379,7 @@ test("`sealwire cloud` strips activation secrets before PATH probes spawn", asyn
 
 test("broker URL with userinfo is rejected without echoing credentials", async () => {
   const { code, stdout, stderr } = await runLauncher({
-    args: ["cloud", "--broker", "wss://user:s3cret@broker.example.com"],
+    args: ["--broker", "wss://user:s3cret@broker.example.com"],
   });
   assert.notEqual(code, 0);
   assert.match(stderr, /userinfo|username or password/i);

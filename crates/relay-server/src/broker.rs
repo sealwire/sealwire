@@ -1333,6 +1333,15 @@ impl BrokerConfig {
         &self.content_signing_key
     }
 
+    pub(crate) fn pairing_broker(&self) -> crate::state::PairingBroker {
+        crate::state::PairingBroker {
+            broker_url: self.public_base_url.clone(),
+            broker_room_id: self.broker_room_id.clone(),
+            relay_peer_id: self.relay_peer_id.clone(),
+            relay_verify_key: self.content_verify_key(),
+        }
+    }
+
     async fn persist_self_hosted_content_key_if_configured(&mut self) -> Result<(), String> {
         if self.auth.relay_identity_key().is_some() {
             return Ok(());
@@ -1420,12 +1429,7 @@ async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
     let change_rx = state.subscribe();
     let broker_state = state.clone();
     tokio::spawn(async move {
-        broker_state
-            .set_broker_channel(
-                Some(config.broker_room_id().to_string()),
-                Some(config.relay_peer_id().to_string()),
-            )
-            .await;
+        broker_state.set_broker_channel(&config).await;
         broker_state
             .push_runtime_log(
                 "info",
@@ -1613,12 +1617,7 @@ async fn run_public_broker_enrollment_loop(state: AppState, pending: PendingPubl
                 match config_result {
                     Ok(Some(config)) => {
                         let change_rx = state.subscribe();
-                        state
-                            .set_broker_channel(
-                                Some(config.broker_room_id().to_string()),
-                                Some(config.relay_peer_id().to_string()),
-                            )
-                            .await;
+                        state.set_broker_channel(&config).await;
                         state
                             .push_runtime_log(
                                 "info",
@@ -3233,14 +3232,19 @@ struct StoredRegistrationInfo {
 
 pub(crate) fn load_public_relay_registration_raw(
     db: &Path,
+    control_url: &str,
 ) -> Result<Option<PersistedPublicRelayRegistration>, String> {
-    let Some(stored) = stored_credentials::read(db, stored_credentials::PUBLIC_REGISTRATION)
-        .map_err(|error| {
-            format!(
-                "failed to read broker registration in {}: {error}",
-                db.display()
-            )
-        })?
+    let Some(stored) = stored_credentials::read_for_origin(
+        db,
+        stored_credentials::PUBLIC_REGISTRATION,
+        control_url,
+    )
+    .map_err(|error| {
+        format!(
+            "failed to read broker registration in {}: {error}",
+            db.display()
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -3263,20 +3267,15 @@ pub(crate) fn load_public_relay_registration_raw(
 fn load_matching_registration_for_enrollment(
     pending: &PendingPublicEnrollment,
 ) -> Result<Option<PublicRelayRegistration>, String> {
-    let Some(persisted) = load_public_relay_registration_raw(&pending.state_db)? else {
+    let Some(persisted) =
+        load_public_relay_registration_raw(&pending.state_db, pending.control_url.as_str())?
+    else {
         return Ok(None);
     };
     if persisted.schema_version != PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION {
         return Err(format!(
             "unsupported broker registration cache schema {} in {}",
             persisted.schema_version,
-            pending.state_db.display()
-        ));
-    }
-    if persisted.control_url != pending.control_url.as_str() {
-        return Err(format!(
-            "broker registration cache {} belongs to a different control origin; \
-             refusing to overwrite it",
             pending.state_db.display()
         ));
     }
@@ -3358,7 +3357,7 @@ async fn load_public_relay_registration(
     db: &Path,
     expected_control_url: &str,
 ) -> Result<Option<PublicRelayRegistration>, String> {
-    let Some(persisted) = load_public_relay_registration_raw(db)? else {
+    let Some(persisted) = load_public_relay_registration_raw(db, expected_control_url)? else {
         return Ok(None);
     };
     if persisted.schema_version != PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION {
@@ -3367,9 +3366,6 @@ async fn load_public_relay_registration(
             persisted.schema_version,
             db.display()
         ));
-    }
-    if persisted.control_url != expected_control_url {
-        return Ok(None);
     }
 
     Ok(Some(PublicRelayRegistration {
@@ -3391,11 +3387,12 @@ async fn save_public_relay_registration(
         broker_room_id: registration.broker_room_id.clone(),
     })
     .map_err(|error| format!("failed to encode broker registration: {error}"))?;
-    stored_credentials::write(
+    stored_credentials::write_for_origin(
         db,
         stored_credentials::PUBLIC_REGISTRATION,
+        control_url,
         &registration.relay_refresh_token,
-        Some(&info),
+        &info,
     )
     .map_err(|error| {
         format!(
@@ -3440,11 +3437,31 @@ async fn load_or_create_relay_content_identity(db: &Path) -> Result<SigningKey, 
                 .ok_or_else(|| unusable("has an unusable seed"))?;
             return Ok(SigningKey::from_bytes(&seed));
         }
-        if stored_credentials::paired_device_count_in(conn)? > 0 {
+        // A phone can only be stranded by a new key if it pinned one this database lost.
+        let held = held_public_relay_verify_keys(conn)?;
+        let mut stranded = Vec::new();
+        let mut unrecorded = 0;
+        for (device_id, pinned) in crate::state::paired_device_relay_keys(conn)? {
+            match pinned {
+                Some(key) if !held.contains(&key) => stranded.push(device_id),
+                Some(_) => {}
+                None => unrecorded += 1,
+            }
+        }
+        if !stranded.is_empty() {
+            stranded.sort();
             return Err(format!(
-                "relay content identity in {} is missing but this relay already has paired devices; restore the database or pair the phones again after removing those devices",
-                db.display()
+                "relay content identity in {} is missing but {} paired with it; restore the database or pair them again after removing them",
+                db.display(),
+                stranded.join(", ")
             ));
+        }
+        if unrecorded > 0 {
+            warn!(
+                unrecorded,
+                "creating a self-hosted relay key; phones paired before relay keys were recorded \
+                 will need pairing again if they were paired with an earlier self-hosted key"
+            );
         }
         let key = generate_content_signing_key();
         let info = serde_json::to_string(&StoredIdentityInfo {
@@ -3462,11 +3479,26 @@ async fn load_or_create_relay_content_identity(db: &Path) -> Result<SigningKey, 
     })
 }
 
+/// The public half of every Cloud-style broker identity this database still holds.
+fn held_public_relay_verify_keys(
+    conn: &rusqlite::Connection,
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut held = std::collections::HashSet::new();
+    for (id, seed, _) in
+        crate::state::list_credentials(conn, stored_credentials::PUBLIC_RELAY_IDENTITY)
+            .map_err(|error| format!("read broker relay identities: {error}"))?
+    {
+        let key = signing_key_from_seed(&seed, &format!("broker relay identity {id:?}"))?;
+        held.insert(STANDARD.encode(key.verifying_key().to_bytes()));
+    }
+    Ok(held)
+}
+
 async fn load_existing_public_relay_identity(
     db: &Path,
     control_url: &str,
 ) -> Result<PublicRelayIdentity, String> {
-    let Some(persisted) = load_public_relay_identity_raw(db)? else {
+    let Some(persisted) = load_public_relay_identity_raw(db, control_url)? else {
         return Err(format!(
             "public broker identity is missing in {}; refusing to generate a new key for an already enrolled relay",
             db.display()
@@ -3479,7 +3511,7 @@ async fn load_or_create_public_relay_identity(
     db: &Path,
     control_url: &str,
 ) -> Result<PublicRelayIdentity, String> {
-    if let Some(persisted) = load_public_relay_identity_raw(db)? {
+    if let Some(persisted) = load_public_relay_identity_raw(db, control_url)? {
         return identity_from_persisted(db, control_url, persisted);
     }
 
@@ -3536,14 +3568,19 @@ fn identity_from_persisted(
 
 fn load_public_relay_identity_raw(
     db: &Path,
+    control_url: &str,
 ) -> Result<Option<PersistedPublicRelayIdentity>, String> {
-    let Some(stored) = stored_credentials::read(db, stored_credentials::PUBLIC_RELAY_IDENTITY)
-        .map_err(|error| {
-            format!(
-                "failed to read broker relay identity in {}: {error}",
-                db.display()
-            )
-        })?
+    let Some(stored) = stored_credentials::read_for_origin(
+        db,
+        stored_credentials::PUBLIC_RELAY_IDENTITY,
+        control_url,
+    )
+    .map_err(|error| {
+        format!(
+            "failed to read broker relay identity in {}: {error}",
+            db.display()
+        )
+    })?
     else {
         return Ok(None);
     };
@@ -3571,11 +3608,12 @@ async fn save_public_relay_identity(
         control_url: Some(control_url.to_string()),
     })
     .map_err(|error| format!("failed to encode broker relay identity: {error}"))?;
-    stored_credentials::write(
+    stored_credentials::write_for_origin(
         db,
         stored_credentials::PUBLIC_RELAY_IDENTITY,
+        control_url,
         &STANDARD.encode(identity.signing_key.to_bytes()),
-        Some(&info),
+        &info,
     )
     .map_err(|error| {
         format!(
@@ -3763,6 +3801,47 @@ pub(crate) fn temp_state_db(prefix: &str) -> String {
     let dir = std::env::temp_dir().join(format!("{prefix}-{}-{unique}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("test state directory");
     dir.join("sealwire.db").display().to_string()
+}
+
+/// The control URL of the one `kind` entry a test database holds, if any.
+#[cfg(test)]
+fn only_control_url(db: &Path, kind: &str) -> Option<String> {
+    let rows = stored_credentials::transact(db, |conn| {
+        crate::state::list_credentials(conn, kind).map_err(|error| error.to_string())
+    })
+    .expect("credentials read");
+    assert!(
+        rows.len() <= 1,
+        "expected at most one {kind} entry, found {}",
+        rows.len()
+    );
+    rows.first().map(|(_, _, info)| {
+        serde_json::from_str::<serde_json::Value>(info.as_deref().unwrap_or(""))
+            .expect("info is json")["control_url"]
+            .as_str()
+            .expect("info names a control url")
+            .to_string()
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn only_public_relay_registration(
+    db: &Path,
+) -> Result<Option<PersistedPublicRelayRegistration>, String> {
+    match only_control_url(db, stored_credentials::PUBLIC_REGISTRATION) {
+        Some(control_url) => load_public_relay_registration_raw(db, &control_url),
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn only_public_relay_identity(
+    db: &Path,
+) -> Result<Option<PersistedPublicRelayIdentity>, String> {
+    match only_control_url(db, stored_credentials::PUBLIC_RELAY_IDENTITY) {
+        Some(control_url) => load_public_relay_identity_raw(db, &control_url),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]

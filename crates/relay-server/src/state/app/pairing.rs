@@ -48,13 +48,10 @@ impl AppState {
         for result in relay.install_pairing_ticket(&prepared, unix_now())? {
             relay.queue_broker_message(super::BrokerPendingMessage::PairingResult(result));
         }
-        let ticket = relay.render_pairing_ticket_view(
+        let ticket = relay.issue_pairing_ticket_view(
             &prepared,
-            broker.public_base_url(),
-            broker.broker_room_id(),
+            &broker.pairing_broker(),
             &pairing_credential.token,
-            broker.relay_peer_id(),
-            &broker.content_verify_key(),
         );
         relay.push_log(
             "info",

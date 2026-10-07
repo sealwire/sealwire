@@ -186,7 +186,7 @@ async fn an_import_keeps_state_identity_and_history_and_leaves_the_old_files() {
     );
 
     // The relay finds the same identity, registration and push key it had.
-    let registration = crate::broker::load_public_relay_registration_raw(db)
+    let registration = crate::broker::only_public_relay_registration(db)
         .unwrap()
         .expect("registration");
     assert_eq!(registration.relay_id(), "relay-1");

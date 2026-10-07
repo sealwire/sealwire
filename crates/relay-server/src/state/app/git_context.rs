@@ -501,6 +501,7 @@ mod tests {
                 last_peer_id: Some("peer-test".to_string()),
                 broker_join_ticket_expires_at: None,
                 path_scope,
+                pairing_broker: None,
             },
         );
     }

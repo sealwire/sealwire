@@ -6797,6 +6797,7 @@ tree; got {}",
                 last_peer_id: Some("peer-test".to_string()),
                 broker_join_ticket_expires_at: None,
                 path_scope,
+                pairing_broker: None,
             },
         );
     }
@@ -19443,6 +19444,7 @@ resurrected into a turn that never completes: {:?}",
                     last_peer_id: Some("peer-test".to_string()),
                     broker_join_ticket_expires_at: None,
                     path_scope: vec![other_scope.to_string()],
+                    pairing_broker: None,
                 },
             );
         }
@@ -19483,6 +19485,7 @@ resurrected into a turn that never completes: {:?}",
                     last_peer_id: Some("peer-test".to_string()),
                     broker_join_ticket_expires_at: None,
                     path_scope: vec![other_scope.to_string()],
+                    pairing_broker: None,
                 },
             );
         }
@@ -19760,6 +19763,7 @@ resurrected into a turn that never completes: {:?}",
                     // (/var/folders → /private/var/folders) don't produce false misses.
                     path_scope: crate::state::normalize_allowed_roots(vec![in_cwd.to_string()])
                         .expect("scope should normalize"),
+                    pairing_broker: None,
                 },
             );
         }
@@ -19865,6 +19869,7 @@ resurrected into a turn that never completes: {:?}",
                     last_peer_id: Some("peer-test".to_string()),
                     broker_join_ticket_expires_at: None,
                     path_scope: Vec::new(),
+                    pairing_broker: None,
                 },
             );
         }
@@ -27389,6 +27394,7 @@ the provider, not forwarded ({turn_models:?})"
                     last_peer_id: Some("peer-test".to_string()),
                     broker_join_ticket_expires_at: None,
                     path_scope: vec![other.path().to_str().unwrap().to_string()],
+                    pairing_broker: None,
                 },
             );
         }

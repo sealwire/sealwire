@@ -275,9 +275,10 @@ pub(crate) fn delete_registration_if_matches(
     expected: &RegistrationIdentity,
 ) -> Result<bool, String> {
     super::stored_credentials::transact(db, |conn| {
-        let Some(stored) = super::stored_credentials::read_in(
+        let Some(stored) = super::stored_credentials::read_for_origin_in(
             conn,
             super::stored_credentials::PUBLIC_REGISTRATION,
+            &expected.control_url,
         )?
         else {
             return Ok(false);
@@ -303,7 +304,11 @@ pub(crate) fn delete_registration_if_matches(
         if !matches {
             return Ok(false);
         }
-        super::stored_credentials::delete_in(conn, super::stored_credentials::PUBLIC_REGISTRATION)
+        super::stored_credentials::delete_for_origin_in(
+            conn,
+            super::stored_credentials::PUBLIC_REGISTRATION,
+            &expected.control_url,
+        )
     })
 }
 
@@ -353,7 +358,7 @@ mod tests {
 
     /// The stored refresh token, standing in for the whole registration.
     fn token_of(db: &Path) -> Option<String> {
-        super::super::load_public_relay_registration_raw(db)
+        super::super::only_public_relay_registration(db)
             .unwrap()
             .map(|registration| registration.relay_refresh_token)
     }

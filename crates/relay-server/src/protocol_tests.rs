@@ -897,6 +897,8 @@ fn local_web_control_plane_metadata_does_not_shell_normal_live_transcript() {
             path_scope: vec![format!(
                 "/Users/example/workspaces/review-project-{index:02}/subdirectory"
             )],
+            pairing_broker_url: None,
+            pairing_broker_current: false,
         })
         .collect();
 
@@ -1948,6 +1950,8 @@ fn control_plane_flood_keeps_both_surfaces_bounded_without_shelling_live_text() 
                 broker_join_ticket_expires_at: Some(1_750_003_600 + index),
                 fingerprint: Some(format!("sha256:{}", "0".repeat(48))),
                 path_scope: vec![format!("/Users/example/workspaces/project-{index:03}")],
+                pairing_broker_url: None,
+                pairing_broker_current: false,
             })
             .collect();
         snapshot
@@ -2014,6 +2018,8 @@ fn control_plane_cap_keeps_actionable_device_records_not_terminal_junk() {
         broker_join_ticket_expires_at: None,
         fingerprint: None,
         path_scope: vec![],
+        pairing_broker_url: None,
+        pairing_broker_current: false,
     });
     // ...followed by 50 approved devices, exceeding the LocalWeb cap of 48.
     for index in 0..50 {
@@ -2028,6 +2034,8 @@ fn control_plane_cap_keeps_actionable_device_records_not_terminal_junk() {
             broker_join_ticket_expires_at: None,
             fingerprint: None,
             path_scope: vec![],
+            pairing_broker_url: None,
+            pairing_broker_current: false,
         });
     }
     snapshot.device_records = device_records;

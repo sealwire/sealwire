@@ -8,7 +8,8 @@ use rusqlite::Connection;
 pub(crate) const PUBLIC_REGISTRATION: &str = "public_registration";
 pub(crate) const PUBLIC_RELAY_IDENTITY: &str = "public_relay_identity";
 pub(crate) const RELAY_CONTENT_IDENTITY: &str = "relay_content_identity";
-/// Each of these kinds has one entry per database.
+/// The id of a kind with one entry per database: the self-hosted key, and the Cloud
+/// entries an older build wrote before each broker had its own.
 const ONLY: &str = "";
 const PENDING_RELEASE_META: &str = "public_pending_release";
 
@@ -50,12 +51,6 @@ pub(crate) fn write_in(
         .map_err(|error| format!("write {kind}: {error}"))
 }
 
-pub(crate) fn delete_in(conn: &Connection, kind: &str) -> Result<bool, String> {
-    crate::state::delete_credential(conn, kind, ONLY)
-        .map(|removed| removed > 0)
-        .map_err(|error| format!("delete {kind}: {error}"))
-}
-
 pub(crate) fn read(db: &Path, kind: &str) -> Result<Option<StoredCredential>, String> {
     transact(db, |conn| read_in(conn, kind))
 }
@@ -64,28 +59,128 @@ pub(crate) fn write(db: &Path, kind: &str, secret: &str, info: Option<&str>) -> 
     transact(db, |conn| write_in(conn, kind, secret, info))
 }
 
-pub(crate) fn paired_device_count_in(conn: &Connection) -> Result<i64, String> {
-    crate::state::count_credentials(conn, crate::state::DEVICE_PAYLOAD_SECRET)
-        .map_err(|error| format!("count paired devices: {error}"))
+/// A Cloud-style broker's registration or identity, found by the control origin in its
+/// `info`. Each broker has its own, so one database can be enrolled with several.
+fn row_for_origin(
+    conn: &Connection,
+    kind: &str,
+    control_url: &str,
+) -> Result<Option<(String, StoredCredential)>, String> {
+    let wanted = super::access_release::normalize_control_origin(control_url)?;
+    let mut found = None;
+    for (id, secret, info) in crate::state::list_credentials(conn, kind)
+        .map_err(|error| format!("read {kind}: {error}"))?
+    {
+        let origin = info
+            .as_deref()
+            .and_then(|info| serde_json::from_str::<serde_json::Value>(info).ok())
+            .and_then(|info| info.get("control_url")?.as_str().map(str::to_string))
+            .ok_or_else(|| format!("{kind} entry {id:?} names no control url"))
+            .and_then(|url| super::access_release::normalize_control_origin(&url))?;
+        if origin == wanted {
+            if found.is_some() {
+                return Err(format!("{kind} has two entries for {wanted}"));
+            }
+            found = Some((id, StoredCredential { secret, info }));
+        }
+    }
+    Ok(found)
 }
 
-pub(crate) fn read_pending_release(db: &Path) -> Result<Option<String>, String> {
+pub(crate) fn read_for_origin_in(
+    conn: &Connection,
+    kind: &str,
+    control_url: &str,
+) -> Result<Option<StoredCredential>, String> {
+    row_for_origin(conn, kind, control_url).map(|found| found.map(|(_, stored)| stored))
+}
+
+/// `info` must name `control_url`, or the entry could never be found again.
+pub(crate) fn write_for_origin_in(
+    conn: &Connection,
+    kind: &str,
+    control_url: &str,
+    secret: &str,
+    info: &str,
+) -> Result<(), String> {
+    let id = match row_for_origin(conn, kind, control_url)? {
+        Some((id, _)) => id,
+        None => super::access_release::normalize_control_origin(control_url)?,
+    };
+    crate::state::put_credential(
+        conn,
+        kind,
+        &id,
+        secret,
+        Some(info),
+        crate::state::unix_now(),
+    )
+    .map_err(|error| format!("write {kind}: {error}"))
+}
+
+pub(crate) fn delete_for_origin_in(
+    conn: &Connection,
+    kind: &str,
+    control_url: &str,
+) -> Result<bool, String> {
+    let Some((id, _)) = row_for_origin(conn, kind, control_url)? else {
+        return Ok(false);
+    };
+    crate::state::delete_credential(conn, kind, &id)
+        .map(|removed| removed > 0)
+        .map_err(|error| format!("delete {kind}: {error}"))
+}
+
+pub(crate) fn read_for_origin(
+    db: &Path,
+    kind: &str,
+    control_url: &str,
+) -> Result<Option<StoredCredential>, String> {
+    transact(db, |conn| read_for_origin_in(conn, kind, control_url))
+}
+
+pub(crate) fn write_for_origin(
+    db: &Path,
+    kind: &str,
+    control_url: &str,
+    secret: &str,
+    info: &str,
+) -> Result<(), String> {
     transact(db, |conn| {
-        crate::state::read_meta(conn, PENDING_RELEASE_META)
+        write_for_origin_in(conn, kind, control_url, secret, info)
+    })
+}
+
+/// One per broker, so unbinding one cannot erase another's unconfirmed release.
+fn pending_release_key(control_url: &str) -> Result<String, String> {
+    let origin = super::access_release::normalize_control_origin(control_url)?;
+    Ok(format!("{PENDING_RELEASE_META}:{origin}"))
+}
+
+pub(crate) fn read_pending_release(db: &Path, control_url: &str) -> Result<Option<String>, String> {
+    let key = pending_release_key(control_url)?;
+    transact(db, |conn| {
+        crate::state::read_meta(conn, &key)
             .map_err(|error| format!("read pending release: {error}"))
     })
 }
 
-pub(crate) fn write_pending_release(db: &Path, marker: &str) -> Result<(), String> {
+pub(crate) fn write_pending_release(
+    db: &Path,
+    control_url: &str,
+    marker: &str,
+) -> Result<(), String> {
+    let key = pending_release_key(control_url)?;
     transact(db, |conn| {
-        crate::state::write_meta(conn, PENDING_RELEASE_META, marker)
+        crate::state::write_meta(conn, &key, marker)
             .map_err(|error| format!("write pending release: {error}"))
     })
 }
 
-pub(crate) fn clear_pending_release(db: &Path) -> Result<(), String> {
+pub(crate) fn clear_pending_release(db: &Path, control_url: &str) -> Result<(), String> {
+    let key = pending_release_key(control_url)?;
     transact(db, |conn| {
-        conn.execute("DELETE FROM meta WHERE key = ?1", [PENDING_RELEASE_META])
+        conn.execute("DELETE FROM meta WHERE key = ?1", [&key])
             .map(|_| ())
             .map_err(|error| format!("clear pending release: {error}"))
     })

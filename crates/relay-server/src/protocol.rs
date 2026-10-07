@@ -1501,6 +1501,10 @@ pub struct DeviceRecordView {
     pub fingerprint: Option<String>,
     #[serde(default)]
     pub path_scope: Vec<String>,
+    /// The broker this device's pairing QR named; `None` when it was not recorded.
+    pub pairing_broker_url: Option<String>,
+    /// Whether that pairing is the broker and relay key this relay is on now.
+    pub pairing_broker_current: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]

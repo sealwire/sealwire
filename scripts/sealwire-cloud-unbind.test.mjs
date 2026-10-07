@@ -105,12 +105,21 @@ test("`sealwire cloud unbind` strips activation secrets from child env", async (
   assert.doesNotMatch(JSON.stringify(captured), new RegExp(secret));
 });
 
-test("`sealwire cloud unbind` honors --broker origin", async () => {
-  const { code, captured } = await runLauncher({
+test("`sealwire cloud unbind --broker` is refused: only SealWire Cloud is unbound", async () => {
+  const { code, stderr, captured } = await runLauncher({
     args: ["cloud", "unbind", "--broker", "https://broker.example.test"],
   });
+  assert.equal(code, 2, `exit=${code}\nstderr:\n${stderr}`);
+  assert.equal(captured.argv, undefined, "nothing may be released");
+});
+
+test("`sealwire cloud unbind` ignores a configured broker origin", async () => {
+  const { code, captured } = await runLauncher({
+    args: ["cloud", "unbind"],
+    extraEnv: { AGENT_RELAY_PUBLIC_BROKER_URL: "https://configured.example.test" },
+  });
   assert.equal(code, 0);
-  assert.equal(captured.RELAY_BROKER_CONTROL_URL, "https://broker.example.test");
+  assert.equal(captured.RELAY_BROKER_CONTROL_URL, HOSTED_BROKER_HTTP);
 });
 
 test("`unbind` alone is rejected", async () => {

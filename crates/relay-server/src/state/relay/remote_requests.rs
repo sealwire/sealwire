@@ -560,6 +560,7 @@ mod tests {
                 last_peer_id: None,
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                pairing_broker: None,
             },
         );
         relay

@@ -41,7 +41,7 @@ pub use self::ask_user_question::{parse_ask_user_questions, PendingAskUserQuesti
 mod mcp_marks;
 pub(crate) use self::device::{
     BrokerPendingMessage, ClaimChallenge, CompletedPairing, DeviceRecord, IssuedClaimChallenge,
-    PairedDevice, PendingPairing, PendingPairingRequest, PendingPairingResult,
+    PairedDevice, PairingBroker, PendingPairing, PendingPairingRequest, PendingPairingResult,
     PendingTranscriptDelta, TranscriptDeltaKind,
 };
 pub(crate) use self::injections::{
@@ -426,6 +426,8 @@ pub struct RelayState {
     pub broker_configured: bool,
     pub broker_channel_id: Option<String>,
     pub broker_peer_id: Option<String>,
+    /// What a pairing QR from this relay would name now; `None` when it is on no broker.
+    pub(crate) current_pairing_broker: Option<PairingBroker>,
     pub active_thread_id: Option<String>,
     pub active_controller_device_id: Option<String>,
     pub active_controller_last_seen_at: Option<u64>,
@@ -774,6 +776,7 @@ impl RelayState {
             broker_configured: false,
             broker_channel_id: None,
             broker_peer_id: None,
+            current_pairing_broker: None,
             active_thread_id: None,
             active_controller_device_id: None,
             active_controller_last_seen_at: None,
@@ -4622,7 +4625,11 @@ so {} never got it — hand over again when you are ready.",
         let mut device_records = device_records
             .values()
             .cloned()
-            .map(|record| record.to_view())
+            .map(|record| {
+                let mut view = record.to_view();
+                self.fill_pairing_broker(&mut view);
+                view
+            })
             .collect::<Vec<_>>();
         device_records.sort_by(|left, right| {
             device_state_sort_key(left.lifecycle_state)
@@ -4643,6 +4650,20 @@ so {} never got it — hand over again when you are ready.",
             .collect::<Vec<_>>();
         pending_pairing_requests.sort_by(|left, right| left.requested_at.cmp(&right.requested_at));
         (device_records, paired_devices, pending_pairing_requests)
+    }
+
+    fn fill_pairing_broker(&self, view: &mut crate::protocol::DeviceRecordView) {
+        let pairing = match view.lifecycle_state {
+            // A phone still waiting can only have come through the broker the relay is on.
+            crate::protocol::DeviceLifecycleState::Pending => self.current_pairing_broker.as_ref(),
+            _ => self
+                .paired_devices
+                .get(&view.device_id)
+                .and_then(|device| device.pairing_broker.as_ref()),
+        };
+        view.pairing_broker_url = pairing.map(|pairing| pairing.broker_url.clone());
+        view.pairing_broker_current =
+            pairing.is_some() && pairing == self.current_pairing_broker.as_ref();
     }
 
     fn devices_revision_for(
@@ -6213,9 +6234,15 @@ so {} never got it — hand over again when you are ready.",
         }
     }
 
-    pub fn set_broker_target(&mut self, channel_id: Option<String>, peer_id: Option<String>) {
+    pub fn set_broker_target(
+        &mut self,
+        channel_id: Option<String>,
+        peer_id: Option<String>,
+        pairing_broker: Option<PairingBroker>,
+    ) {
         self.broker_channel_id = channel_id;
         self.broker_peer_id = peer_id;
+        self.current_pairing_broker = pairing_broker;
     }
 
     pub fn set_active_turn(&mut self, turn_id: Option<String>) {

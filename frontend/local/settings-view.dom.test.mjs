@@ -160,6 +160,87 @@ test("a device is one row; its fingerprint shows only after opening it", () => {
   }
 });
 
+test("Devices groups phones by the broker they were paired through, this relay's broker first", () => {
+  const records = [
+    device("mobile-old", { label: "Old phone" }),
+    device("mobile-lan", {
+      label: "LAN phone",
+      pairing_broker_url: "ws://192.168.1.20:8788",
+      pairing_broker_current: false,
+    }),
+    device("mobile-cloud", {
+      label: "Cloud phone",
+      pairing_broker_url: "wss://app.sealwire.dev",
+      pairing_broker_current: true,
+    }),
+  ];
+  const { props } = baseProps();
+  const view = render({ ...props, devices: { ...props.devices, records } });
+  try {
+    const groups = [...view.host.querySelectorAll("[data-broker-group]")].map((group) => ({
+      title: group.querySelector(".settings-device-group-title").textContent,
+      devices: [...group.querySelectorAll("[data-device-id]")].map((row) => row.dataset.deviceId),
+    }));
+    assert.deepEqual(
+      groups.map((group) => group.devices),
+      [["mobile-cloud"], ["mobile-lan"], ["mobile-old"]],
+      "this relay's broker comes first and phones with no recorded broker come last"
+    );
+    assert.match(groups[0].title, /app\.sealwire\.dev/);
+    assert.match(groups[0].title, /this relay's broker/i);
+    assert.match(groups[1].title, /192\.168\.1\.20:8788/);
+    assert.match(groups[1].title, /can't reach this relay/i);
+    assert.match(groups[2].title, /broker not recorded/i);
+  } finally {
+    view.cleanup();
+  }
+});
+
+test("phones on one broker share a group; the same host over ws and wss are two brokers", () => {
+  const on = (url) => ({ pairing_broker_url: url, pairing_broker_current: false });
+  const records = [
+    device("mobile-plain", on("ws://broker.example:8443")),
+    device("mobile-tls-1", on("wss://broker.example:8443")),
+    device("mobile-tls-2", on("wss://broker.example:8443")),
+  ];
+  const { props } = baseProps();
+  const view = render({ ...props, devices: { ...props.devices, records } });
+  try {
+    const groups = [...view.host.querySelectorAll("[data-broker-group]")].map((group) => ({
+      title: group.querySelector(".settings-device-group-name").textContent,
+      devices: [...group.querySelectorAll("[data-device-id]")].map((row) => row.dataset.deviceId).sort(),
+    }));
+    assert.deepEqual(
+      groups.map((group) => group.devices).sort((a, b) => a.length - b.length),
+      [["mobile-plain"], ["mobile-tls-1", "mobile-tls-2"]]
+    );
+    assert.notEqual(groups[0].title, groups[1].title, "two brokers must not read as one");
+  } finally {
+    view.cleanup();
+  }
+});
+
+test("a device's details name the full broker address it was paired through", () => {
+  const records = [
+    device("mobile-cloud", { pairing_broker_url: "wss://app.sealwire.dev", pairing_broker_current: true }),
+    device("mobile-old"),
+  ];
+  const { props } = baseProps();
+  const view = render({ ...props, devices: { ...props.devices, records } });
+  try {
+    const detail = (id) => {
+      const row = view.host.querySelector(`[data-device-id='${id}']`);
+      click(row.querySelector(".settings-row-toggle"));
+      const label = [...row.querySelectorAll(".settings-field dt")].find((dt) => dt.textContent === "Broker");
+      return label?.nextElementSibling?.textContent;
+    };
+    assert.equal(detail("mobile-cloud"), "wss://app.sealwire.dev");
+    assert.equal(detail("mobile-old"), "Not recorded");
+  } finally {
+    view.cleanup();
+  }
+});
+
 test("revoked devices fold into one line and list only id and date, four at a time", () => {
   const revoked = Array.from({ length: 6 }, (_, index) =>
     device(`old-${index}`, { lifecycle_state: "revoked", state_changed_at: NOW_SECONDS - index })

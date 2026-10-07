@@ -6,6 +6,7 @@ import { SettingsHint, SettingsPage, SettingsSection } from "../shared/settings-
 import {
   deviceStatusLine,
   expiresInLabel,
+  groupDevicesByBroker,
   pastDevicesLabel,
   pathScopeLabel,
   splitDeviceRecords,
@@ -80,18 +81,29 @@ export function DevicesPage({ active, devices, pairing, roots, formatTimestamp, 
       { title: "Paired", meta: String(current.length) },
       current.length
         ? h(
-            "ul",
-            { className: "settings-list", id: "paired-devices-list" },
-            ...current.map((record) =>
-              h(DeviceRow, {
-                key: record.device_id,
-                canRevokeOthers: approvedCount > 1,
-                formatTimestamp,
-                now,
-                onRevoke: devices.onRevoke,
-                onRevokeOthers: devices.onRevokeOthers,
-                record,
-              })
+            "div",
+            { className: "settings-device-groups", id: "paired-devices-list" },
+            ...groupDevicesByBroker(current).map((group) =>
+              h(
+                "div",
+                { key: group.key, className: "settings-device-group", "data-broker-group": group.key },
+                h(BrokerGroupTitle, { group }),
+                h(
+                  "ul",
+                  { className: "settings-list" },
+                  ...group.records.map((record) =>
+                    h(DeviceRow, {
+                      key: record.device_id,
+                      canRevokeOthers: approvedCount > 1,
+                      formatTimestamp,
+                      now,
+                      onRevoke: devices.onRevoke,
+                      onRevokeOthers: devices.onRevokeOthers,
+                      record,
+                    })
+                  )
+                )
+              )
             )
           )
         : h(
@@ -103,6 +115,20 @@ export function DevicesPage({ active, devices, pairing, roots, formatTimestamp, 
     past.length
       ? h(DeviceHistory, { formatTimestamp, onClear: devices.onClearHistory, records: past })
       : null
+  );
+}
+
+function BrokerGroupTitle({ group }) {
+  const [name, note] = group.current
+    ? [group.host, "this relay's broker"]
+    : group.recorded
+      ? [group.host, "can't reach this relay now"]
+      : ["Broker not recorded", "paired before this was tracked"];
+  return h(
+    "p",
+    { className: "settings-device-group-title" },
+    h("span", { className: `settings-device-group-name${group.recorded ? " settings-mono" : ""}` }, name),
+    h("span", { className: "settings-device-group-note" }, ` · ${note}`)
   );
 }
 
@@ -142,6 +168,7 @@ function DeviceRow({ record, canRevokeOthers, formatTimestamp, now, onRevoke, on
             "dl",
             { className: "settings-fields" },
             field("Fingerprint", record.fingerprint || "Unavailable", true),
+            field("Broker", record.pairing_broker_url || "Not recorded", Boolean(record.pairing_broker_url)),
             field("Access", pathScopeLabel(record.path_scope)),
             field(
               "Broker ticket",

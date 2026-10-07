@@ -442,12 +442,44 @@ pub(crate) fn read_credential(
     .optional()
 }
 
-pub(crate) fn count_credentials(conn: &Connection, kind: &str) -> rusqlite::Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM credential WHERE kind = ?1",
-        [kind],
-        |row| row.get(0),
-    )
+/// Every `(id, secret, info)` stored under `kind`.
+pub(crate) fn list_credentials(
+    conn: &Connection,
+    kind: &str,
+) -> rusqlite::Result<Vec<(String, String, Option<String>)>> {
+    let mut statement = conn.prepare("SELECT id, secret, info FROM credential WHERE kind = ?1")?;
+    let rows = statement.query_map([kind], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    rows.collect()
+}
+
+/// Each paired device and the relay key its pairing QR named; `None` when not recorded.
+pub(crate) fn paired_device_relay_keys(
+    conn: &Connection,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    let mut statement = conn
+        .prepare("SELECT key, body FROM paired_device")
+        .map_err(|error| format!("read paired devices: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("read paired devices: {error}"))?;
+    #[derive(serde::Deserialize)]
+    struct Pinned {
+        #[serde(default)]
+        pairing_broker: Option<super::PairingBroker>,
+    }
+    let mut keys = Vec::new();
+    for row in rows {
+        let (device_id, body) = row.map_err(|error| format!("read paired devices: {error}"))?;
+        let pinned: Pinned = serde_json::from_str(&body)
+            .map_err(|error| format!("decode paired_device row {device_id}: {error}"))?;
+        keys.push((
+            device_id,
+            pinned.pairing_broker.map(|broker| broker.relay_verify_key),
+        ));
+    }
+    Ok(keys)
 }
 
 pub(crate) fn delete_credential(

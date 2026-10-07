@@ -50,6 +50,7 @@ async fn device_proof_test_state() -> (
                 last_peer_id: None,
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                pairing_broker: None,
             },
         );
         relay.mark_surface_peer_online("surface-phone");
@@ -2255,6 +2256,7 @@ async fn list_threads_action_carries_the_search_query() {
                 last_peer_id: None,
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                pairing_broker: None,
             },
         );
     }
@@ -2841,6 +2843,7 @@ async fn a_claim_challenge_from_a_closed_connection_does_not_take_the_device_bac
                 last_peer_id: None,
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                pairing_broker: None,
             },
         );
         relay.mark_surface_peer_online("surface-old")

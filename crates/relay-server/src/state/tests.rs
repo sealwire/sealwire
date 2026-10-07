@@ -46,6 +46,7 @@ fn test_persisted_state() -> PersistedRelayState {
             last_peer_id: Some("surface-1".to_string()),
             broker_join_ticket_expires_at: None,
             path_scope: Vec::new(),
+            pairing_broker: None,
         },
     );
     let mut thread_settings = std::collections::HashMap::new();
@@ -211,13 +212,10 @@ fn issue_test_pairing_ticket_with_scope(
     relay
         .install_pairing_ticket(&prepared, unix_now())
         .expect("pairing ticket should install");
-    relay.render_pairing_ticket_view(
+    relay.issue_pairing_ticket_view(
         &prepared,
-        broker.public_base_url(),
-        broker.broker_room_id(),
+        &broker.pairing_broker(),
         "test-pairing-join-ticket",
-        broker.relay_peer_id(),
-        &broker.content_verify_key(),
     )
 }
 
@@ -3265,6 +3263,7 @@ fn paired_device_requires_a_verify_key() {
             last_peer_id: Some("surface-1".to_string()),
             broker_join_ticket_expires_at: None,
             path_scope: Vec::new(),
+            pairing_broker: None,
         },
     );
 
@@ -4539,6 +4538,137 @@ fn approving_pairing_request_updates_device_record_metadata() {
     assert_eq!(record.last_peer_id.as_deref(), Some("surface-approved"));
     assert_eq!(record.broker_join_ticket_expires_at, Some(3600));
     assert!(record.fingerprint.is_some());
+}
+
+fn qr_payload(ticket: &crate::protocol::PairingTicketView) -> serde_json::Value {
+    let encoded = ticket
+        .pairing_url
+        .split("pairing=")
+        .nth(1)
+        .expect("pairing url should carry the payload");
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).expect("payload decodes"))
+        .expect("payload is json")
+}
+
+fn approve_test_phone(
+    relay: &mut RelayState,
+    broker_url: &str,
+    device_id: &str,
+) -> serde_json::Value {
+    let ticket = issue_test_pairing_ticket(relay, broker_url, "room-a", "relay-a", Some(60));
+    relay
+        .register_pairing_request(
+            &ticket.pairing_id,
+            Some(device_id.to_string()),
+            Some(format!("{device_id} label")),
+            &format!("surface-{device_id}"),
+            format!("verify-key-{device_id}"),
+            100,
+        )
+        .expect("pairing request should register");
+    relay
+        .decide_pairing_request(&ticket.pairing_id, true, None, 101)
+        .expect("approval should succeed");
+    qr_payload(&ticket)
+}
+
+#[test]
+fn an_approved_phone_remembers_the_broker_its_qr_named() {
+    let mut relay = test_state();
+    let qr = approve_test_phone(&mut relay, "wss://app.sealwire.dev", "phone-a");
+    let field = |name: &str| qr[name].as_str().expect("qr field").to_string();
+
+    let persisted = PersistedRelayState::from_relay(&relay);
+    assert_eq!(
+        persisted.paired_devices["phone-a"].pairing_broker,
+        Some(PairingBroker {
+            broker_url: field("broker_url"),
+            broker_room_id: field("broker_channel_id"),
+            relay_peer_id: field("relay_peer_id"),
+            relay_verify_key: field("relay_verify_key"),
+        }),
+        "the device must record exactly the broker and relay key its QR told the phone to trust"
+    );
+}
+
+#[test]
+fn the_device_list_says_which_broker_each_phone_was_paired_through() {
+    let mut relay = test_state();
+    approve_test_phone(&mut relay, "wss://app.sealwire.dev", "phone-cloud");
+    let cloud = relay.paired_devices["phone-cloud"]
+        .pairing_broker
+        .clone()
+        .expect("an approved phone records its broker");
+    let mut legacy = relay.paired_devices["phone-cloud"].clone();
+    legacy.device_id = "phone-old".to_string();
+    legacy.pairing_broker = None;
+    relay.device_records.insert(
+        "phone-old".to_string(),
+        DeviceRecord::approved_from(&legacy),
+    );
+    relay.paired_devices.insert("phone-old".to_string(), legacy);
+    let view = |relay: &RelayState, id: &str| {
+        relay
+            .devices_response()
+            .device_records
+            .into_iter()
+            .find(|record| record.device_id == id)
+            .expect("device record is listed")
+    };
+
+    relay.set_broker_target(
+        Some("room-a".to_string()),
+        Some("relay-a".to_string()),
+        Some(cloud.clone()),
+    );
+    let listed = view(&relay, "phone-cloud");
+    assert_eq!(
+        listed.pairing_broker_url.as_deref(),
+        Some("wss://app.sealwire.dev")
+    );
+    assert!(listed.pairing_broker_current, "{listed:?}");
+
+    relay.set_broker_target(
+        Some("room-a".to_string()),
+        Some("relay-a".to_string()),
+        Some(PairingBroker {
+            relay_verify_key: "a-different-relay-key".to_string(),
+            ..cloud
+        }),
+    );
+    assert!(
+        !view(&relay, "phone-cloud").pairing_broker_current,
+        "the same address under another relay key is a pairing the phone cannot use"
+    );
+
+    relay.set_broker_target(None, None, None);
+    let listed = view(&relay, "phone-cloud");
+    assert_eq!(
+        listed.pairing_broker_url.as_deref(),
+        Some("wss://app.sealwire.dev"),
+        "a relay on no broker still says where each phone was paired"
+    );
+    assert!(!listed.pairing_broker_current, "{listed:?}");
+
+    let old = view(&relay, "phone-old");
+    assert_eq!(old.pairing_broker_url, None);
+    assert!(!old.pairing_broker_current);
+}
+
+#[test]
+fn a_paired_device_saved_before_brokers_were_recorded_loads_without_one() {
+    let legacy = r#"{
+        "device_id": "phone-1",
+        "label": "Primary Phone",
+        "payload_secret": "payload-secret",
+        "device_verify_key": "dGVzdC12ZXJpZnkta2V5",
+        "created_at": 7,
+        "last_seen_at": 9,
+        "last_peer_id": "surface-1"
+    }"#;
+    let device: PairedDevice =
+        serde_json::from_str(legacy).expect("an older paired device row still loads");
+    assert_eq!(device.pairing_broker, None);
 }
 
 #[test]
@@ -5842,6 +5972,7 @@ mod watched_threads {
                 last_peer_id: Some(peer_id.to_string()),
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                pairing_broker: None,
             },
         );
         relay.mark_surface_peer_online(peer_id);
@@ -6754,6 +6885,7 @@ mod watched_threads {
                 last_peer_id: Some("peer-2".to_string()),
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                pairing_broker: None,
             },
         );
         for peer in ["peer-1", "peer-2"] {
@@ -6897,6 +7029,7 @@ mod watched_threads {
                 last_peer_id: Some("peer-new".to_string()),
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                pairing_broker: None,
             },
         );
         for peer in ["peer-legacy", "peer-new"] {

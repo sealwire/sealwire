@@ -19,10 +19,8 @@ const userCwd = process.cwd();
 const require = createRequire(import.meta.url);
 
 const DEFAULT_PUBLIC_BROKER_ORIGIN = "";
-// The hosted SealWire Cloud broker `sealwire cloud` dials when the user has not
-// configured a broker origin of their own. `cloud` is an explicit "go online"
-// request (the mirror image of `local`), so it defaults to the hosted broker
-// rather than falling back to a localhost-only relay.
+// The only broker `sealwire cloud` and `sealwire cloud unbind` ever use: a configured
+// origin would let a stray env var enroll with, or release a license from, another broker.
 const HOSTED_PUBLIC_BROKER_ORIGIN = "wss://app.sealwire.dev";
 const defaultPort = "8787";
 const defaultHost = "127.0.0.1";
@@ -52,6 +50,14 @@ if (args.cloud && args.noBroker) {
   // intents; accepting both would silently pick one and surprise the user.
   console.error(
     "sealwire: `cloud` cannot be combined with `local`/`--no-broker`; pick one."
+  );
+  process.exit(2);
+}
+
+if (args.cloud && args.broker) {
+  console.error(
+    `sealwire: \`cloud\` always uses SealWire Cloud (${HOSTED_PUBLIC_BROKER_ORIGIN}) and takes no --broker; ` +
+      "to use another broker, run `npx sealwire --broker <url>`."
   );
   process.exit(2);
 }
@@ -121,13 +127,14 @@ if (!hasCommand("codex")) {
   );
 }
 
-const brokerOrigin =
-  args.broker ||
-  process.env.AGENT_RELAY_PUBLIC_BROKER_URL ||
-  process.env.AGENT_RELAY_PUBLIC_BROKER_ORIGIN ||
-  process.env.npm_package_config_public_broker_origin ||
-  readPackagedBrokerOrigin() ||
-  (args.cloud ? HOSTED_PUBLIC_BROKER_ORIGIN : DEFAULT_PUBLIC_BROKER_ORIGIN);
+const brokerOrigin = args.cloud
+  ? HOSTED_PUBLIC_BROKER_ORIGIN
+  : args.broker ||
+    process.env.AGENT_RELAY_PUBLIC_BROKER_URL ||
+    process.env.AGENT_RELAY_PUBLIC_BROKER_ORIGIN ||
+    process.env.npm_package_config_public_broker_origin ||
+    readPackagedBrokerOrigin() ||
+    DEFAULT_PUBLIC_BROKER_ORIGIN;
 const brokerConfig = args.noBroker || !brokerOrigin ? null : normalizeBrokerOrigin(brokerOrigin);
 const launchId = randomUUID();
 
@@ -497,14 +504,7 @@ function runCloudUnbind() {
   delete process.env[CLOUD_ACCESS_KEY_FILE_ENV];
   delete process.env.RELAY_LICENSE_CODE;
 
-  const brokerOrigin =
-    args.broker ||
-    process.env.AGENT_RELAY_PUBLIC_BROKER_URL ||
-    process.env.AGENT_RELAY_PUBLIC_BROKER_ORIGIN ||
-    process.env.npm_package_config_public_broker_origin ||
-    readPackagedBrokerOrigin() ||
-    HOSTED_PUBLIC_BROKER_ORIGIN;
-  const brokerConfig = normalizeBrokerOrigin(brokerOrigin);
+  const brokerConfig = normalizeBrokerOrigin(HOSTED_PUBLIC_BROKER_ORIGIN);
 
   const relayServerBinary = resolveRelayServerBinary();
   if (!relayServerBinary) {
@@ -899,7 +899,7 @@ Run a local relay-server from the npm package.
 
 Usage:
   sealwire [local|cloud] [--beta] [--broker <url>] [--port <port>] [--host <ip>] [--no-broker] [--no-open]
-  sealwire cloud unbind [--broker <url>]
+  sealwire cloud unbind
   sealwire migrate-storage [--finish]
 
 Commands:
@@ -907,17 +907,17 @@ Commands:
                 --no-broker). Ignores any configured broker origin and strips
                 every RELAY_BROKER_* variable (case-insensitively) so the relay
                 never dials out. The relay always listens on loopback.
-  cloud         Attach to the hosted SealWire Cloud broker so remote devices can pair
-                (the opposite of local). Uses a configured broker origin if one
-                is set (--broker / AGENT_RELAY_PUBLIC_BROKER_URL / packaged
-                default); otherwise falls back to ${HOSTED_PUBLIC_BROKER_ORIGIN}.
+  cloud         Attach to SealWire Cloud (${HOSTED_PUBLIC_BROKER_ORIGIN}) so remote
+                devices can pair (the opposite of local). Always that broker:
+                --broker is refused and AGENT_RELAY_PUBLIC_BROKER_URL is ignored;
+                for another broker run \`sealwire --broker <url>\`.
                 Runs a short-lived cloud-activate preflight first: prompts for a
                 SealWire Cloud access key (echo disabled) unless
                 SEALWIRE_CLOUD_ACCESS_KEY or SEALWIRE_CLOUD_ACCESS_KEY_FILE is
                 set. Non-TTY without a key exits nonzero before the local relay
                 starts. Cannot be combined with local/--no-broker.
-  cloud unbind  Release this machine's SealWire Cloud access for the selected
-                control origin and remove the local registration cache. Does
+  cloud unbind  Release this machine's SealWire Cloud access and remove its
+                SealWire Cloud registration; other brokers' are untouched. Does
                 not start the local relay or open a browser. Preserves the
                 relay identity key for later re-enrollment.
   migrate-storage

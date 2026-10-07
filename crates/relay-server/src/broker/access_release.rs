@@ -162,7 +162,7 @@ pub(crate) async fn release_cloud_access_after_acquire(
     let persisted = match load_registration_for_release(state_db, expected_control_url) {
         Ok(Some(persisted)) => persisted,
         Ok(None) => {
-            let _ = stored_credentials::clear_pending_release(state_db);
+            let _ = stored_credentials::clear_pending_release(state_db, expected_control_url);
             return ReleaseOutcome::NotLinked;
         }
         Err(error) => return ReleaseOutcome::Failed(error),
@@ -170,7 +170,7 @@ pub(crate) async fn release_cloud_access_after_acquire(
 
     let expected_identity = RegistrationIdentity::from_persisted(&persisted, expected_control_url);
     let fingerprint = expected_identity.bearer_fingerprint.clone();
-    let existing_marker = match load_pending_release_marker(state_db) {
+    let existing_marker = match load_pending_release_marker(state_db, expected_control_url) {
         Ok(marker) => marker,
         Err(error) => return ReleaseOutcome::Failed(error),
     };
@@ -343,11 +343,11 @@ async fn finish_confirmed_release(
 ) -> ReleaseOutcome {
     match delete_registration_if_matches(state_db, expected) {
         Ok(true) => {
-            let _ = stored_credentials::clear_pending_release(state_db);
+            let _ = stored_credentials::clear_pending_release(state_db, &expected.control_url);
             success
         }
         Ok(false) => {
-            let _ = stored_credentials::clear_pending_release(state_db);
+            let _ = stored_credentials::clear_pending_release(state_db, &expected.control_url);
             ReleaseOutcome::Failed(
                 "remote release confirmed, but local registration was replaced or removed \
                  before deletion; left the newer cache untouched"
@@ -594,22 +594,13 @@ fn load_registration_for_release(
     path: &Path,
     expected_control_url: &str,
 ) -> Result<Option<PersistedPublicRelayRegistration>, String> {
-    let Some(persisted) = load_public_relay_registration_raw(path)? else {
+    let Some(persisted) = load_public_relay_registration_raw(path, expected_control_url)? else {
         return Ok(None);
     };
     if persisted.schema_version != PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION {
         return Err(format!(
             "unsupported broker registration cache schema {} in {}",
             persisted.schema_version,
-            path.display()
-        ));
-    }
-    let persisted_origin = normalize_control_origin(&persisted.control_url)?;
-    if persisted_origin != expected_control_url {
-        return Err(format!(
-            "registration cache control origin does not match selected cloud origin \
-             (cache is for a different broker). No release request was sent. \
-             Path: {}",
             path.display()
         ));
     }
@@ -626,11 +617,14 @@ async fn save_pending_release_marker(
 ) -> Result<(), String> {
     let payload = serde_json::to_string(marker)
         .map_err(|error| format!("failed to encode pending-release marker: {error}"))?;
-    stored_credentials::write_pending_release(state_db, &payload)
+    stored_credentials::write_pending_release(state_db, &marker.control_url, &payload)
 }
 
-fn load_pending_release_marker(state_db: &Path) -> Result<Option<PendingReleaseMarker>, String> {
-    let Some(contents) = stored_credentials::read_pending_release(state_db)? else {
+fn load_pending_release_marker(
+    state_db: &Path,
+    control_url: &str,
+) -> Result<Option<PendingReleaseMarker>, String> {
+    let Some(contents) = stored_credentials::read_pending_release(state_db, control_url)? else {
         return Ok(None);
     };
     let marker: PendingReleaseMarker = serde_json::from_str(&contents)
@@ -847,7 +841,9 @@ mod tests {
     }
 
     fn reg_exists(db: &Path) -> bool {
-        load_public_relay_registration_raw(db).unwrap().is_some()
+        crate::broker::only_public_relay_registration(db)
+            .unwrap()
+            .is_some()
     }
 
     fn identity_exists(db: &Path) -> bool {
@@ -857,9 +853,15 @@ mod tests {
     }
 
     fn marker_exists(db: &Path) -> bool {
-        stored_credentials::read_pending_release(db)
+        rusqlite::Connection::open(db)
             .unwrap()
-            .is_some()
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key LIKE 'public_pending_release:%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
     }
 
     #[test]
@@ -898,13 +900,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_origin_is_local_error_without_request() {
+    async fn another_brokers_registration_is_not_linked_here_and_sends_nothing() {
         let (origin, state) = spawn_mock("ok").await;
         let dir = tempfile::tempdir().unwrap();
         let reg = dir.path().join("sealwire.db");
         write_reg(&reg, "https://other.example", "refresh-token-abc");
         let outcome = release_cloud_access(&origin, &reg).await;
-        assert!(matches!(outcome, ReleaseOutcome::Failed(_)));
+        assert_eq!(outcome, ReleaseOutcome::NotLinked);
         assert!(reg_exists(&reg));
         assert_eq!(*state.calls.lock().unwrap(), 0);
     }
@@ -932,7 +934,7 @@ mod tests {
         assert!(matches!(first, ReleaseOutcome::Failed(_)));
         assert!(reg_exists(&reg));
         assert!(marker_exists(&reg));
-        let loaded = load_pending_release_marker(&reg).unwrap().unwrap();
+        let loaded = load_pending_release_marker(&reg, &origin).unwrap().unwrap();
         assert_eq!(
             loaded.bearer_fingerprint,
             bearer_fingerprint("refresh-token-abc")
@@ -946,6 +948,28 @@ mod tests {
         assert_eq!(second, ReleaseOutcome::AlreadyReleased);
         assert!(!reg_exists(&reg));
         assert!(!marker_exists(&reg));
+    }
+
+    #[tokio::test]
+    async fn unbinding_another_broker_keeps_this_brokers_pending_release() {
+        let (origin, state) = spawn_mock("cleanup_uncertain").await;
+        let dir = tempfile::tempdir().unwrap();
+        let reg = dir.path().join("sealwire.db");
+        write_reg(&reg, &origin, "refresh-token-abc");
+        let first = release_cloud_access(&origin, &reg).await;
+        assert!(matches!(first, ReleaseOutcome::Failed(_)));
+
+        let elsewhere = release_cloud_access("https://broker.example.net", &reg).await;
+        assert_eq!(elsewhere, ReleaseOutcome::NotLinked);
+
+        *state.mode.lock().unwrap() = "unauthorized";
+        let second = release_cloud_access(&origin, &reg).await;
+        assert_eq!(
+            second,
+            ReleaseOutcome::AlreadyReleased,
+            "this broker's release was confirmed remotely; another broker must not erase that"
+        );
+        assert!(!reg_exists(&reg));
     }
 
     #[tokio::test]
@@ -1074,7 +1098,7 @@ mod tests {
             .unwrap()
             .execute_batch(
                 "CREATE TRIGGER refuse_marker BEFORE INSERT ON meta
-                 WHEN NEW.key = 'public_pending_release'
+                 WHEN NEW.key LIKE 'public_pending_release:%'
                  BEGIN SELECT RAISE(ABORT, 'refused'); END;",
             )
             .unwrap();
@@ -1202,7 +1226,9 @@ mod tests {
             reg_exists(&reg),
             "newer registration must survive stale unbind"
         );
-        let kept = load_public_relay_registration_raw(&reg).unwrap().unwrap();
+        let kept = crate::broker::only_public_relay_registration(&reg)
+            .unwrap()
+            .unwrap();
         assert_eq!(kept.relay_refresh_token, "token-b-new");
     }
 

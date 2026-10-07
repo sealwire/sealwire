@@ -6159,6 +6159,27 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
   font-family: var(--font-mono);
 }
 
+.settings-device-groups {
+  display: grid;
+  gap: 14px;
+}
+.settings-device-group {
+  display: grid;
+  gap: 6px;
+}
+.settings-device-group-title {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.settings-device-group-name {
+  color: var(--text-primary);
+}
+.settings-device-group-note {
+  color: var(--text-tertiary);
+}
+
 /* One bordered list, one line per thing; details open in place. */
 .settings-list {
   list-style: none;

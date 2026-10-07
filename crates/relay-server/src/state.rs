@@ -24,10 +24,13 @@ pub(crate) use self::app::ThreadWorkspaceError;
 pub(crate) use self::app::TranscriptReadError;
 pub(crate) use self::app::REVIEW_LOCKED_THREAD_MSG;
 pub use self::app::{AppState, ApprovalError, AskUserAnswerError};
+#[cfg(test)]
+pub(crate) use self::core_store::DEVICE_PAYLOAD_SECRET;
 pub(crate) use self::core_store::{
-    checked_state_db_path, count_credentials, delete_credential, import_legacy_session,
-    open_state_database, peek_core_origin, put_credential, read_credential, read_meta, write_meta,
-    CommittedCore, DEVICE_PAYLOAD_SECRET, ENTITY_TABLES as CORE_ENTITY_TABLES, META_CORE_ORIGIN,
+    checked_state_db_path, delete_credential, import_legacy_session, list_credentials,
+    open_state_database, paired_device_relay_keys, peek_core_origin, put_credential,
+    read_credential, read_meta, write_meta, CommittedCore, ENTITY_TABLES as CORE_ENTITY_TABLES,
+    META_CORE_ORIGIN,
 };
 #[cfg(test)]
 pub(crate) use self::relay::relay_boot_id;
@@ -42,9 +45,9 @@ pub(crate) use self::relay::{
 pub(crate) use self::relay::{
     import_legacy_vapid_file, load_or_generate_vapid, next_relay_ingress, parse_ask_user_questions,
     thread_status_is_working, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult,
-    ClaimChallenge, DeviceRecord, IssuedClaimChallenge, PairedDevice, PendingApproval,
-    PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta, ProviderEventSession,
-    PushDispatcher, PushSubscription, PushSubscriptionInput, RelayState,
+    ClaimChallenge, DeviceRecord, IssuedClaimChallenge, PairedDevice, PairingBroker,
+    PendingApproval, PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta,
+    ProviderEventSession, PushDispatcher, PushSubscription, PushSubscriptionInput, RelayState,
     RemoteActionReplayDecision, RemoteActionWait, RemoteActionWaitSource, RequestAdmission,
     RequestClass, RequestSessionGrant, ReservationToken, ReviewerThread, SessionBinding,
     SignedRequestFacts, ThreadSessionSettings, TranscriptDeltaKind, TurnFailureKind, TurnOutcome,
