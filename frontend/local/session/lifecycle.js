@@ -590,6 +590,27 @@ export function createLifecycleController(ctx) {
    *   the user cannot see or correct — and across providers it is fatal, since
    *   the relay forwards an explicitly named model without validating it.
    */
+  // A thread that is not live has its own effort; the live session's would override it.
+  // Unknown while its settings load, so send none and let the relay use the remembered one.
+  function outgoingEffort(threadId) {
+    const live = state.session;
+    if (threadId === live?.active_thread_id) {
+      return resolveOutgoingEffort({
+        override: messageEffort?.value || "",
+        sessionEffort: live?.reasoning_effort || "",
+        lastUsedEffort: loadLastEffort(live?.provider || ""),
+        models: live?.available_models || [],
+        model: messageModel?.value || live?.model || "",
+      });
+    }
+    const pin = state.viewOnlyThread?.threadId === threadId ? state.viewOnlyThread : null;
+    return resolveOutgoingEffort({
+      sessionEffort: pin?.settings?.reasoning_effort || "",
+      models: pin?.availableModels || [],
+      model: messageModel?.value || pin?.settings?.model || "",
+    });
+  }
+
   async function sendMessage(textOverride, threadId, images = [], options = {}) {
     const { inheritComposerSettings = true, skill = null } = options || {};
     // Accept an explicit, already-captured message (the composer captures the draft
@@ -638,13 +659,7 @@ export function createLifecycleController(ctx) {
                 // supported set — so a stale/foreign value (e.g. a "max"
                 // mis-bucketed under codex) can never be forwarded and rejected
                 // with a 400.
-                effort: resolveOutgoingEffort({
-                  override: messageEffort?.value || "",
-                  sessionEffort: state.session?.reasoning_effort || "",
-                  lastUsedEffort: loadLastEffort(state.session?.provider || ""),
-                  models: state.session?.available_models || [],
-                  model: messageModel?.value || state.session?.model || "",
-                }),
+                effort: outgoingEffort(threadId),
               }
             : {}),
           device_id: state.deviceId,

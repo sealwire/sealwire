@@ -3561,6 +3561,7 @@ async function refreshProviderCatalogs(session) {
 
 let composerModelRoot = null;
 let composerModelCatalog = { models: [], provider: "" };
+let composerModelThreadId = null;
 
 // The hidden select stays the composer's model of record (the send path reads it);
 // the picker is drawn from it and writes a choice back through its change event.
@@ -3592,7 +3593,14 @@ function syncComposerModelForRenderedSession(session, selectedModel = "") {
   const models = session.available_models || [];
   const fallbackModels = state.providerModels[session.provider] || [];
   const displayModels = models.length ? models : fallbackModels;
-  const requestedModel = selectedModel || messageModel.value;
+  // A pick belongs to the thread it was made on. Carried over, a Codex model sat
+  // in a Claude thread's menu, and was sent, until that thread's settings loaded.
+  const threadId = session.active_thread_id || "";
+  const switchedThread = composerModelThreadId !== null && composerModelThreadId !== threadId;
+  composerModelThreadId = threadId;
+  // Cleared too: syncModelSuggestions falls back to the select's own value.
+  if (switchedThread) messageModel.value = "";
+  const requestedModel = switchedThread ? "" : selectedModel || messageModel.value;
   const currentModel = displayModels.some((model) => model.model === requestedModel)
     ? requestedModel
     : session.model || requestedModel;

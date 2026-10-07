@@ -110,6 +110,7 @@
     "test:browser:dialog-menus": "npm run build && node scripts/browser-mobile-dialog-menus-e2e.mjs",
     "test:browser:local-view-only-models": "npm run build && npm run build:relay && E2E_USE_BUILT_BINARIES=1 node scripts/browser-local-view-only-models-e2e.mjs",
     "test:browser:model-label-stability": "node scripts/browser-model-label-stability-e2e.mjs",
+    "test:browser:model-carryover": "npm run build && node scripts/browser-local-model-carryover-e2e.mjs",
     "test:browser:model-picker-selected": "node scripts/browser-model-picker-selected-visible-e2e.mjs",
     "test:browser:local-permission-modes": "npm run build && AGENT_PROVIDERS=fake FAKE_PROVIDER_ENFORCE_APPROVALS=1 node scripts/browser-local-permission-modes-e2e.mjs",
     "test:browser:local-session-tab-scroll": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-session-tab-scroll-e2e.mjs",
