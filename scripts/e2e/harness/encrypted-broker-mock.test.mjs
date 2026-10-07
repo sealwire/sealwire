@@ -135,3 +135,52 @@ for (const [name, secret, consumer] of [
     await assert.rejects(async () => result(JSON.stringify(bearer)), /only protocol fields/);
   });
 }
+
+// Every page signs its actions under a claim, so a fixture that only knows its own
+// actions would leave the page waiting at the claim and never send them.
+test("browser mock answers both claim steps for a fixture that does not", { timeout: 2000 }, async () => {
+  const context = vm.createContext({
+    window: {}, crypto: webcrypto, nacl, Uint8Array, TextEncoder, TextDecoder, btoa, atob,
+    MessageEvent, EventTarget,
+    localStorage: {
+      getItem: () => JSON.stringify({
+        activeRelayId: "relay-1",
+        remoteProfiles: { "relay-1": { deviceId: "phone-1", relayPeerId: "relay-peer", brokerChannelId: "room-1" } },
+      }),
+      setItem() {},
+    },
+  });
+  vm.runInContext(`(${installEncryptedMock.toString()})();`, context);
+  const fixtureSaw = [];
+  class Socket extends EventTarget {
+    send(raw) { fixtureSaw.push(JSON.parse(raw).payload.request?.type); }
+  }
+  const socket = new (context.window.__sealwireEncryptedMock(Socket))();
+  const key = sha256(new TextEncoder().encode("payload-secret-e2e"));
+  const answer = (type) => new Promise((resolve) => {
+    socket.addEventListener("message", function onMessage(event) {
+      const { payload } = JSON.parse(event.data);
+      if (payload.action_id !== `${type}-1`) return;
+      socket.removeEventListener("message", onMessage);
+      const opened = nacl.secretbox.open(
+        Buffer.from(payload.envelope.ciphertext, "base64"),
+        Buffer.from(payload.envelope.nonce, "base64"),
+        key,
+      );
+      resolve({ outer: payload, inner: JSON.parse(new TextDecoder().decode(opened)) });
+    });
+    const frame = encryptedFrame("payload-secret-e2e", { action_id: `${type}-1`, request: { type } });
+    frame.payload.action_id = `${type}-1`;
+    socket.send(JSON.stringify(frame));
+  });
+
+  const challenge = await answer("claim_challenge");
+  assert.equal(challenge.outer.kind, "encrypted_remote_action_result");
+  assert.equal(challenge.inner.ok, true);
+  assert.ok(challenge.inner.claim_challenge, "a challenge for the page to sign");
+  const claim = await answer("claim_device");
+  assert.equal(claim.inner.ok, true);
+  assert.ok(claim.inner.session_claim, "a session claim the page signs under");
+  assert.ok(claim.inner.session_claim_boot, "the relay boot the claim belongs to");
+  assert.deepEqual(fixtureSaw, [], "the claim never reaches the fixture");
+});

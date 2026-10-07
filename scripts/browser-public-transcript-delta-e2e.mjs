@@ -31,11 +31,6 @@ const EXPECTED_REPLY = process.env.BROWSER_E2E_DELTA_EXPECTED_REPLY
     : PROMPT.replace(/^Reply with exactly:\s*/u, ""));
 const PUBLIC_ISSUER_SECRET =
   process.env.BROWSER_E2E_PUBLIC_ISSUER_SECRET || "browser-e2e-public-issuer-a3f76b4c2089d15e6b0fa873c4e9521d";
-const RELAY_REFRESH_TOKEN =
-  process.env.BROWSER_E2E_PUBLIC_RELAY_REFRESH_TOKEN || "browser-e2e-relay-refresh";
-const RELAY_ID = process.env.BROWSER_E2E_PUBLIC_RELAY_ID || "browser-e2e-relay-1";
-const BROKER_ROOM_ID =
-  process.env.BROWSER_E2E_PUBLIC_ROOM_ID || "browser-public-delta-e2e-room";
 const USE_FAKE_PROVIDER = process.env.AGENT_PROVIDERS === "fake";
 
 async function main() {
@@ -57,9 +52,6 @@ async function main() {
   const broker = startPublicBroker({
     brokerPort,
     brokerStatePath,
-    relayId: RELAY_ID,
-    brokerRoomId: BROKER_ROOM_ID,
-    relayRefreshToken: RELAY_REFRESH_TOKEN,
     issuerSecret: PUBLIC_ISSUER_SECRET,
   });
   await waitForHealth(`http://127.0.0.1:${brokerPort}/api/health`);
@@ -69,9 +61,6 @@ async function main() {
     relayStateDb,
     brokerPort,
     lanIp,
-    brokerRoomId: BROKER_ROOM_ID,
-    relayId: RELAY_ID,
-    relayRefreshToken: RELAY_REFRESH_TOKEN,
     codexHomeDir,
     extraEnv: USE_FAKE_PROVIDER ? { AGENT_PROVIDERS: "fake" } : {},
   });

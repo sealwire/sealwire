@@ -31,6 +31,7 @@ import { launchBrowser } from "./e2e/harness/browser.mjs";
 import { startLocalRelay } from "./e2e/harness/local-relay.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import { dumpProcessLogs, stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
+import { importLegacySession } from "./e2e/harness/state-db.mjs";
 
 const ROOT = process.cwd();
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 45000);
@@ -258,8 +259,9 @@ async function readParts(page) {
 
 async function writeSeedState(statePath, workspaceDir) {
   await fs.mkdir(path.dirname(statePath), { recursive: true });
+  const sessionPath = path.join(path.dirname(statePath), "seed-session.json");
   await fs.writeFile(
-    statePath,
+    sessionPath,
     JSON.stringify(
       {
         schema_version: 2,
@@ -282,6 +284,7 @@ async function writeSeedState(statePath, workspaceDir) {
     ),
     "utf8"
   );
+  importLegacySession({ sessionPath, relayStateDb: statePath });
 }
 
 async function writeSeedTranscript(seedPath, absolutePath, diff) {

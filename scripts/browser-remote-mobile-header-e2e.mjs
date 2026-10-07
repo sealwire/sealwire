@@ -250,27 +250,6 @@ async function main() {
             const frame = JSON.parse(raw);
             const payload = frame.payload;
             const request = payload?.request || {};
-            if (request.type === "claim_challenge") {
-              this.#respond(payload.action_id, {
-                action: "claim_challenge",
-                ok: true,
-                claim_challenge_id: "challenge-e2e",
-                claim_challenge: "challenge-bytes-e2e",
-                claim_challenge_expires_at: Math.floor(Date.now() / 1000) + 60,
-              });
-              return;
-            }
-            if (request.type === "claim_device") {
-              this.#respond(payload.action_id, {
-                action: "claim_device",
-                ok: true,
-                session_claim: "session-claim-e2e",
-                session_claim_expires_at: Math.floor(Date.now() / 1000) + 3600,
-                session_claim_boot: "boot-e2e",
-                session_claim_relay_ms: 2_000_000_000,
-              });
-              return;
-            }
             if (request.type === "heartbeat") {
               this.#respond(payload.action_id, { action: "heartbeat", ok: true, snapshot: truncatedSnapshot });
               return;

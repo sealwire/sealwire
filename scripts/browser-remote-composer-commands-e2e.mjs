@@ -317,28 +317,6 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
         });
         return;
       }
-      if (request.type === "claim_challenge") {
-        this.#respond(payload.action_id, {
-          action: "claim_challenge",
-          ok: true,
-          claim_challenge_id: "challenge-e2e",
-          claim_challenge: "challenge-bytes-e2e",
-          claim_challenge_expires_at: Math.floor(Date.now() / 1000) + 60,
-        });
-        return;
-      }
-      if (request.type === "claim_device") {
-        window.__claimedAt = Date.now();
-        this.#respond(payload.action_id, {
-          action: "claim_device",
-          ok: true,
-          session_claim: "session-claim-e2e",
-          session_claim_expires_at: Math.floor(Date.now() / 1000) + 3600,
-          session_claim_boot: "boot-e2e",
-          session_claim_relay_ms: 2_000_000_000,
-        });
-        return;
-      }
       if (request.type === "send_message") {
         window.__sentMessages = [...(window.__sentMessages || []), request];
         this.#respond(payload.action_id, { action: "send_message", ok: true, snapshot: liveSnapshot });
@@ -349,7 +327,7 @@ export function installFakeRelay({ relayId, threadId, projectId, projectName, fu
         return;
       }
       if (request.type === "list_threads") {
-        if (window.__claimedAt) window.__listsAfterClaim = (window.__listsAfterClaim || 0) + 1;
+        if (window.__sealwireClaimedAt) window.__listsAfterClaim = (window.__listsAfterClaim || 0) + 1;
         this.#respond(payload.action_id, {
           action: "list_threads",
           ok: true,

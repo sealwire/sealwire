@@ -42,11 +42,6 @@ import { startPublicRelay, waitForBrokerConnection } from "./e2e/harness/relay.m
 const TIMEOUT_MS = Number(process.env.BROWSER_E2E_TIMEOUT_MS || 60000);
 const PUBLIC_ISSUER_SECRET =
   process.env.BROWSER_E2E_PUBLIC_ISSUER_SECRET || "browser-e2e-public-issuer-a3f76b4c2089d15e6b0fa873c4e9521d";
-const RELAY_REFRESH_TOKEN =
-  process.env.BROWSER_E2E_PUBLIC_RELAY_REFRESH_TOKEN || "browser-e2e-relay-refresh";
-const RELAY_ID = process.env.BROWSER_E2E_PUBLIC_RELAY_ID || "browser-e2e-relay-settings-load";
-const BROKER_ROOM_ID =
-  process.env.BROWSER_E2E_PUBLIC_SETTINGS_LOAD_ROOM_ID || "browser-public-settings-load-room";
 
 // What the LOCAL client configures; the REMOTE client must display all of it.
 const MODEL = "fake-echo";
@@ -134,9 +129,6 @@ async function main() {
   const broker = startPublicBroker({
     brokerPort,
     brokerStatePath: path.join(stateDir, "public-control.json"),
-    relayId: RELAY_ID,
-    brokerRoomId: BROKER_ROOM_ID,
-    relayRefreshToken: RELAY_REFRESH_TOKEN,
     issuerSecret: PUBLIC_ISSUER_SECRET,
   });
   await waitForHealth(`http://127.0.0.1:${brokerPort}/api/health`);
@@ -146,9 +138,6 @@ async function main() {
     relayStateDb: path.join(stateDir, "sealwire.db"),
     brokerPort,
     lanIp,
-    brokerRoomId: BROKER_ROOM_ID,
-    relayId: RELAY_ID,
-    relayRefreshToken: RELAY_REFRESH_TOKEN,
     peerId: "browser-public-settings-load-relay",
     extraEnv: { AGENT_PROVIDERS: "fake" },
   });

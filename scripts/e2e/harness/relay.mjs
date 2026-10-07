@@ -16,14 +16,13 @@ export function isRetiredStateEnv(name) {
   ].includes(name);
 }
 
+// The relay enrolls with the broker under a key it makes itself, as a Cloud relay does.
+// A preregistered relay would need its key already in the database and at the broker.
 export function startPublicRelay({
   relayPort,
   relayStateDb,
   brokerPort,
   lanIp,
-  brokerRoomId,
-  relayId,
-  relayRefreshToken,
   codexHomeDir,
   peerId = "browser-public-relay",
   extraEnv = {},
@@ -38,14 +37,6 @@ export function startPublicRelay({
     RELAY_BROKER_PEER_ID: peerId,
     ...extraEnv,
   };
-  if (brokerRoomId || relayId || relayRefreshToken) {
-    if (!brokerRoomId || !relayId || !relayRefreshToken) {
-      throw new Error("brokerRoomId, relayId, and relayRefreshToken must be provided together");
-    }
-    env.RELAY_BROKER_CHANNEL_ID = brokerRoomId;
-    env.RELAY_BROKER_RELAY_ID = relayId;
-    env.RELAY_BROKER_RELAY_REFRESH_TOKEN = relayRefreshToken;
-  }
   if (codexHomeDir) {
     env.CODEX_HOME = codexHomeDir;
   }

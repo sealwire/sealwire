@@ -4,9 +4,6 @@ import { spawnManagedProcess } from "./process.mjs";
 export function startPublicBroker({
   brokerPort,
   brokerStatePath,
-  relayId,
-  brokerRoomId,
-  relayRefreshToken,
   issuerSecret,
   deviceWsTtlSecs,
 }) {
@@ -17,19 +14,6 @@ export function startPublicBroker({
     RELAY_BROKER_PUBLIC_ISSUER_SECRET: issuerSecret,
     RELAY_BROKER_PUBLIC_STATE_PATH: brokerStatePath,
   };
-
-  if (relayId || brokerRoomId || relayRefreshToken) {
-    if (!relayId || !brokerRoomId || !relayRefreshToken) {
-      throw new Error("relayId, brokerRoomId, and relayRefreshToken must be provided together");
-    }
-    env.RELAY_BROKER_PUBLIC_RELAYS_JSON = JSON.stringify([
-      {
-        relay_id: relayId,
-        broker_room_id: brokerRoomId,
-        refresh_token: relayRefreshToken,
-      },
-    ]);
-  }
 
   if (deviceWsTtlSecs != null) {
     env.RELAY_BROKER_PUBLIC_DEVICE_WS_TTL_SECS = String(deviceWsTtlSecs);

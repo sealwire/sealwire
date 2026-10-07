@@ -42,9 +42,6 @@ const DIRECT_QUESTION = "[direct-question-visibility-probe]";
 const DIRECT_BARRIER = "direct-question-stream";
 const PROBE_MESSAGE_VISIBILITY = process.env.PROBE_MESSAGE_VISIBILITY === "1";
 const ISSUER_SECRET = "browser-public-interleaving-issuer";
-const RELAY_REFRESH_TOKEN = "browser-public-interleaving-refresh";
-const RELAY_ID = "browser-public-interleaving-relay";
-const BROKER_ROOM_ID = "browser-public-interleaving-room";
 
 async function main() {
   const lanIp = resolvePrivateIpv4();
@@ -94,9 +91,6 @@ async function main() {
   const broker = startPublicBroker({
     brokerPort,
     brokerStatePath,
-    relayId: RELAY_ID,
-    brokerRoomId: BROKER_ROOM_ID,
-    relayRefreshToken: RELAY_REFRESH_TOKEN,
     issuerSecret: ISSUER_SECRET,
   });
   await waitForHealth(`http://127.0.0.1:${brokerPort}/api/health`);
@@ -106,9 +100,6 @@ async function main() {
     relayStateDb,
     brokerPort,
     lanIp,
-    brokerRoomId: BROKER_ROOM_ID,
-    relayId: RELAY_ID,
-    relayRefreshToken: RELAY_REFRESH_TOKEN,
     peerId: "browser-public-interleaving-relay-peer",
     extraEnv: {
       AGENT_PROVIDERS: "fake",

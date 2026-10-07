@@ -126,9 +126,41 @@ export function installEncryptedMock() {
         if (claimStep ? carried.length !== 0 : carried.length !== signedFields.length) {
           throw new Error("mock relay requires every action but a claim step to be signed");
         }
+        if (claimStep) {
+          this.#answerClaim(frame.payload.action_id, payload.request.type);
+          return;
+        }
         frame.payload.request = payload.request;
         super.send(JSON.stringify(frame));
       });
+    }
+
+    // Played here so no fixture has to: every page claims before it may send anything.
+    #answerClaim(actionId, type) {
+      const now = Math.floor(Date.now() / 1000);
+      const result = type === "claim_challenge"
+        ? {
+          claim_challenge_id: "challenge-e2e",
+          claim_challenge: "challenge-bytes-e2e",
+          claim_challenge_expires_at: now + 60,
+        }
+        : {
+          session_claim: "session-claim-e2e",
+          session_claim_expires_at: now + 3600,
+          session_claim_boot: "boot-e2e",
+          session_claim_relay_ms: 2_000_000_000,
+        };
+      if (type === "claim_device") window.__sealwireClaimedAt = Date.now();
+      const stored = JSON.parse(localStorage.getItem("agent-relay.remote-state") || "{}");
+      const profile = stored.remoteProfiles?.[stored.activeRelayId] || {};
+      this.dispatchEvent(new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "message",
+          from_role: "relay",
+          from_peer_id: profile.relayPeerId || "relay-peer-e2e",
+          payload: { protocol_version: 5, kind: "remote_action_result", action_id: actionId, action: type, ok: true, ...result },
+        }),
+      }));
     }
 
     #answerHello(frame) {
