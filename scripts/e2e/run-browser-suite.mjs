@@ -1,8 +1,8 @@
-import { spawn } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
 
 import { loadE2eManifest, suiteScripts } from "./manifest.mjs";
+import { runScenarioProcess } from "./scenario-process.mjs";
 import { summarize } from "./suite-report.mjs";
 
 const suiteName = readOption("--suite") || process.argv[2];
@@ -29,6 +29,8 @@ const noBuild = process.argv.includes("--no-build");
 // to learn a single name. `--fail-fast` restores the old behaviour for local runs
 // where the first failure is the one being worked on.
 const failFast = process.argv.includes("--fail-fast");
+// The slowest fake-provider scenario takes under three minutes.
+const SCENARIO_TIMEOUT_MS = Number(process.env.BROWSER_E2E_SCENARIO_TIMEOUT_MS || 5 * 60 * 1000);
 const env = {
   ...process.env,
   ...(useFakeProvider ? { AGENT_PROVIDERS: "fake" } : {}),
@@ -94,27 +96,15 @@ async function runChecked(command, args, { env, label }) {
 async function runScenario(command, args, { env, label }) {
   const startedAt = Date.now();
   console.log(`[browser-suite] running ${label}`);
-  const result = await runCommand(command, args, env);
+  const result = await runScenarioProcess(command, args, { env, timeoutMs: SCENARIO_TIMEOUT_MS });
   const took = formatDuration(Date.now() - startedAt);
   if (result.code !== 0) {
-    const failure = result.signal || `exit code ${result.code}`;
+    const failure = result.timedOut ? "a timeout" : result.signal || `exit code ${result.code}`;
     console.error(`[browser-suite] FAILED ${label} with ${failure} after ${took}`);
     return failure;
   }
   console.log(`[browser-suite] passed ${label} in ${took}`);
   return null;
-}
-
-function runCommand(command, args, env) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: process.cwd(),
-      env,
-      stdio: "inherit",
-    });
-    child.on("error", reject);
-    child.on("exit", (code, signal) => resolve({ code, signal }));
-  });
 }
 
 function formatDuration(ms) {

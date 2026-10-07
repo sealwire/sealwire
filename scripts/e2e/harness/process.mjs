@@ -11,6 +11,9 @@ process.on("exit", () => {
     }
   }
 });
+// A signal skips "exit" handlers, and SIGTERM is how the suite runner stops a hung
+// scenario; without this its relay and broker keep running.
+process.on("SIGTERM", () => process.exit(143));
 
 // `stripInherited(name)` drops a variable inherited from this process; `extraEnv`
 // is applied afterwards, so a value the caller passes explicitly always survives.
