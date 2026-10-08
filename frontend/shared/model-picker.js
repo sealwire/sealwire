@@ -5,7 +5,7 @@ import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState
 
 import { MenuGlyph, highlightMatch, moveMenuFocus } from "./context-menu-react.js";
 import { placeFlyout } from "./context-menu-position.js";
-import { modelSections, searchModelOptions } from "./model-picker-model.js";
+import { labelUnderHeading, modelSections, searchModelOptions } from "./model-picker-model.js";
 import { providerMarkSlot } from "./provider-mark.js";
 import { MenuPortal, placementBounds, useAnchoredMenu } from "./use-anchored-menu.js";
 import { useDismissableMenu } from "./use-dismissable-menu.js";
@@ -62,11 +62,15 @@ function typedCharacter(event) {
   );
 }
 
-function ModelRow({ onChoose, option, query = "", lead = null }) {
+function ModelRow({ onChoose, option, query = "", lead = null, shownLabel = option.label }) {
+  const shortened = shownLabel !== option.label;
   return h(
     "button",
     {
       "aria-checked": option.selected ? "true" : "false",
+      // The heading is aria-hidden, so the full name has to ride on the row.
+      "aria-label": shortened ? option.label : undefined,
+      title: shortened ? option.label : undefined,
       className: "context-menu-button model-picker-option" + (option.selected ? " is-selected" : ""),
       "data-provider": option.provider || undefined,
       "data-value": option.value,
@@ -75,7 +79,7 @@ function ModelRow({ onChoose, option, query = "", lead = null }) {
       type: "button",
     },
     lead || h(MenuGlyph, { className: "context-menu-lead", svg: option.selected ? CHECK_SVG : "" }),
-    h("span", { className: "context-menu-label" }, query ? highlightMatch(option.label, query) : option.label),
+    h("span", { className: "context-menu-label" }, query ? highlightMatch(option.label, query) : shownLabel),
     option.tag ? h("span", { className: "context-menu-hint" }, option.tag) : null
   );
 }
@@ -98,7 +102,14 @@ function ModelList({ group, otherOpen, onChoose, onToggleOther }) {
       );
     }
     for (const option of section.options) {
-      rows.push(h(ModelRow, { key: `option:${option.value}`, onChoose, option }));
+      rows.push(
+        h(ModelRow, {
+          key: `option:${option.value}`,
+          onChoose,
+          option,
+          shownLabel: labelUnderHeading(option.label, section.heading),
+        })
+      );
     }
   });
   if (other.length) {
@@ -144,6 +155,7 @@ export function ModelPicker({
   provider = "",
   tag = null,
   value,
+  valueTitle = undefined,
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState("");
@@ -605,6 +617,7 @@ export function ModelPicker({
         className: "setting-pill-trigger model-picker-trigger",
         disabled: disabled || undefined,
         id: id || undefined,
+        title: valueTitle,
         onClick: () => (open ? close() : openMenu()),
         onKeyDown: (event) => {
           if (!open && (event.key === "ArrowDown" || event.key === "ArrowUp")) {

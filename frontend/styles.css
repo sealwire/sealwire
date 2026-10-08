@@ -10663,6 +10663,23 @@ button.team-role-name.is-link {
   font-weight: var(--weight-strong);
 }
 
+/* A touch screen has no hover to read a clipped name, so a long one takes a second line. */
+@media (hover: none) {
+  .model-picker-option {
+    height: auto;
+    min-height: 28px;
+    padding-block: 5px;
+    white-space: normal;
+  }
+
+  .model-picker-option .context-menu-label {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow-wrap: anywhere;
+  }
+}
+
 /* Lines up with the row labels, past the check column. */
 .model-picker-heading {
   padding: 6px 10px 4px 30px;

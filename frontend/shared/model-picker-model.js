@@ -89,10 +89,12 @@ export function modelPickerProps({
   selectedModel = "",
   selectedProvider = "",
 } = {}) {
+  const chip = selectedModelChip({ providerModels, selectedModel, selectedProvider });
   return {
     groups: buildModelPickerGroups({ offerProviderDefault, providerModels, providers, selectedModel, selectedProvider }),
     provider: selectedProvider,
-    value: selectedModelChip({ providerModels, selectedModel, selectedProvider }).value,
+    value: chip.value,
+    valueTitle: chip.title,
   };
 }
 
@@ -103,10 +105,15 @@ export function selectedModelChip({
   selectedProvider = "",
 } = {}) {
   const entry = modelEntry(catalogFor(providerModels, selectedProvider), selectedModel);
+  const name = selectedModel ? entry?.display_name || selectedModel : DEFAULT_MODEL_LABEL;
+  // "OpenCode Zen/" filled the whole chip and left the model itself behind the ellipsis.
+  const slash = name.indexOf("/");
+  const value = slash > 0 ? name.slice(slash + 1) : name;
   return {
     provider: selectedProvider,
     tag: null,
-    value: selectedModel ? entry?.display_name || selectedModel : DEFAULT_MODEL_LABEL,
+    ...(value === name ? {} : { title: name }),
+    value,
   };
 }
 
@@ -296,6 +303,16 @@ function layOut(options) {
     }
   }
   return { other, sections };
+}
+
+/** A row's name with the vendor dropped when the heading above it already says it. */
+export function labelUnderHeading(label, heading) {
+  const text = String(label || "");
+  const slash = text.indexOf("/");
+  if (!heading || slash <= 0) return text;
+  const vendor = text.slice(0, slash);
+  // OpenRouter's heading is "OpenRouter/anthropic" over rows labelled "OpenRouter/…".
+  return heading === vendor || heading.startsWith(`${vendor}/`) ? text.slice(slash + 1) : text;
 }
 
 /**

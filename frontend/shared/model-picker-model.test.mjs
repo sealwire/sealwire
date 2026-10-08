@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildModelPickerGroups,
+  modelPickerProps,
   modelSections,
   searchModelOptions,
   selectedModelChip,
@@ -668,6 +669,35 @@ test("the chip names the model alone; the provider is the logo beside it", () =>
     selectedModelChip({ providerModels: CATALOGS, selectedModel: "", selectedProvider: "codex" }).value,
     "Default"
   );
+});
+
+test("the chip drops the vendor in front of a model's name and keeps it for hover", () => {
+  const providerModels = {
+    opencode: [
+      { model: "opencode/nemotron-3.5-lightning-free", display_name: "OpenCode Zen/Nemotron 3.5 Lightning Free" },
+    ],
+  };
+  assert.deepEqual(
+    selectedModelChip({
+      providerModels,
+      selectedModel: "opencode/nemotron-3.5-lightning-free",
+      selectedProvider: "opencode",
+    }),
+    {
+      provider: "opencode",
+      tag: null,
+      title: "OpenCode Zen/Nemotron 3.5 Lightning Free",
+      value: "Nemotron 3.5 Lightning Free",
+    }
+  );
+  const props = modelPickerProps({
+    providerModels,
+    providers: ["opencode"],
+    selectedModel: "opencode/nemotron-3.5-lightning-free",
+    selectedProvider: "opencode",
+  });
+  assert.equal(props.value, "Nemotron 3.5 Lightning Free");
+  assert.equal(props.valueTitle, "OpenCode Zen/Nemotron 3.5 Lightning Free");
 });
 
 test("every search word has to match, and a provider's own name counts", () => {

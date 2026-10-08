@@ -217,7 +217,7 @@ test("an older release and a model with no version to rank share the one Other f
 });
 
 // A thread's composer can only change model within its own provider.
-function mountSingle({ model = "gpt-6-sol" } = {}) {
+function mountSingle({ model = "gpt-6-sol", provider = "codex", catalog = CODEX } = {}) {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -226,14 +226,14 @@ function mountSingle({ model = "gpt-6-sol" } = {}) {
     root.render(
       React.createElement(ModelPicker, {
         groups: buildModelPickerGroups({
-          providerModels: { codex: CODEX },
-          providers: ["codex"],
+          providerModels: { [provider]: catalog },
+          providers: [provider],
           selectedModel: model,
-          selectedProvider: "codex",
+          selectedProvider: provider,
         }),
         id: "picker",
         onSelect: (value, option) => selections.push([option.provider, value]),
-        provider: "codex",
+        provider,
         value: model,
       })
     );
@@ -270,6 +270,37 @@ test("one provider's picker lists its models straight away, under a search box",
   assert.equal(rows[0].querySelector(".model-picker-mark"), null, "one provider needs no logo per row");
   key(focused(), "Enter");
   assert.deepEqual(view.selections, [["codex", "gpt-6-luna"]]);
+});
+
+test("a row under its own vendor heading drops the vendor from its name, and keeps it for search", () => {
+  const view = mountSingle({
+    model: "opencode/big-pickle",
+    provider: "opencode",
+    catalog: [
+      { display_name: "OpenAI/GPT-6.1 Sol", model: "openai/gpt-6.1-sol" },
+      { display_name: "OpenAI/GPT-6 Astra", model: "openai/gpt-6-astra" },
+      { display_name: "OpenCode Zen/Big Pickle", model: "opencode/big-pickle" },
+      { display_name: "OpenCode Zen/Nemotron 3.5 Lightning Free", model: "opencode/nemotron-3.5-lightning-free" },
+    ],
+  });
+  key(trigger(view.host), "ArrowDown");
+  const menu = view.host.querySelector(".model-picker-menu");
+  assert.deepEqual(
+    [...menu.querySelectorAll(".model-picker-heading")].map((node) => node.textContent),
+    ["OpenAI", "OpenCode Zen"]
+  );
+  const rows = [...menu.querySelectorAll(".model-picker-option")];
+  assert.deepEqual(rows.map(label), ["GPT-6.1 Sol", "GPT-6 Astra", "Big Pickle", "Nemotron 3.5 Lightning Free"]);
+  // The heading is aria-hidden, so the row itself must still name the vendor.
+  assert.equal(rows[2].getAttribute("aria-label"), "OpenCode Zen/Big Pickle");
+  assert.equal(rows[3].title, "OpenCode Zen/Nemotron 3.5 Lightning Free");
+
+  key(focused(), "k");
+  assert.deepEqual(
+    [...menu.querySelectorAll(".model-picker-option")].map(label),
+    ["OpenCode Zen/Big Pickle"],
+    "search results have no heading above them"
+  );
 });
 
 test("hovering a provider switches the models only after a short rest", (t) => {
