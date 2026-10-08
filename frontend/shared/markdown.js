@@ -1,6 +1,7 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { copyTextToClipboard } from "./clipboard.js";
 
 const h = React.createElement;
 
@@ -32,12 +33,16 @@ const h = React.createElement;
 
 const SAFE_URL_SCHEMES = new Set(["http:", "https:", "mailto:", "tel:"]);
 const BLOCKED_HREF = "#blocked";
+const FILE_LOCATION_RE = /^(?:[a-z]:[\\/]|[^:/\\?#]+\.[^:/\\?#]+:\d+(?::\d+)?$)/i;
 
 function safeUrl(url) {
   if (typeof url !== "string" || url === "") {
     return url || "";
   }
   const trimmed = url.trim();
+  if (FILE_LOCATION_RE.test(trimmed)) {
+    return trimmed;
+  }
   // Relative URLs and protocol-relative URLs are fine (no scheme to hijack).
   if (trimmed.startsWith("#") || trimmed.startsWith("/") || trimmed.startsWith("?")) {
     return trimmed;
@@ -69,7 +74,31 @@ function AltOnlyImage({ alt }) {
   return alt ? h(React.Fragment, null, alt) : null;
 }
 
-function SafeLink({ href, children, ...rest }) {
+function SafeLink({ href, children, node, ...rest }) {
+  if (href && !/^(?:[#?]|\/\/)/.test(href)
+    && (FILE_LOCATION_RE.test(href) || !/^[a-z][a-z\d+.-]*:/i.test(href))) {
+    let path = href;
+    try {
+      path = decodeURIComponent(href);
+    } catch {
+      // A literal percent sign in a filename need not be a URL escape.
+    }
+    return h(
+      "button",
+      {
+        ...rest,
+        type: "button",
+        className: "markdown-file-link",
+        title: `Copy path: ${path}`,
+        "aria-label": `Copy path: ${path}`,
+        onClick: (event) => {
+          event.stopPropagation();
+          void copyTextToClipboard(path, event.currentTarget);
+        },
+      },
+      children
+    );
+  }
   return h(
     "a",
     {

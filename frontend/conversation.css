@@ -1505,6 +1505,28 @@ button.tool-run-row:focus-visible {
 .message-body a:hover {
   color: var(--accent-hover-color);
 }
+.markdown-file-link {
+  display: inline;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--accent);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+.markdown-file-link:hover {
+  background: none;
+  box-shadow: none;
+  color: var(--accent-hover-color);
+}
+.markdown-file-link[data-copied="true"] {
+  color: var(--ok-fg);
+}
 .message-body h1, .message-body h2, .message-body h3,
 .message-body h4, .message-body h5, .message-body h6 {
   margin: 14px 0 4px;

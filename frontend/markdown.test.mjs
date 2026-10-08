@@ -118,6 +118,29 @@ test("http(s)/mailto links go through untouched", () => {
   assert.match(html, /href="mailto:a@b\.c"/);
 });
 
+test("file references render as copy buttons instead of relative website links", () => {
+  for (const path of [
+    "/Users/luchi/project/README.md:12",
+    "frontend/shared/markdown.js#L75",
+    "../README.md",
+    "README.md:12:3",
+    "C:/project/README.md:12",
+  ]) {
+    const html = render(`[file](${path})`);
+    assert.match(html, /<button[^>]*class="markdown-file-link"/);
+    assert.ok(html.includes(`aria-label="Copy path: ${path}"`));
+    assert.doesNotMatch(html, /href=|target=|node=/);
+  }
+});
+
+test("protocol-relative websites and fragment/query links remain anchors", () => {
+  const html = render("[web](//example.com/docs) [frag](#section) [query](?query=1)");
+  assert.match(html, /href="\/\/example\.com\/docs"/);
+  assert.match(html, /href="#section"/);
+  assert.match(html, /href="\?query=1"/);
+  assert.doesNotMatch(html, /<button/);
+});
+
 test("anchors get rel=noopener noreferrer nofollow and target=_blank", () => {
   const html = render("[home](https://example.com)");
   assert.match(html, /target="_blank"/);
