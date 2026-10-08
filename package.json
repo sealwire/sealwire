@@ -33,7 +33,7 @@
     "web/**"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "config": {
     "public_broker_origin": ""

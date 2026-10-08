@@ -6,7 +6,7 @@ remote access.
 
 ## Run locally
 
-Install Node.js 18+ and sign in to the coding agent you want to use. See the
+Install Node.js 20+ and sign in to the coding agent you want to use. See the
 [README](README.md) for supported agents and setup.
 
 From your project directory, run:

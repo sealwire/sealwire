@@ -52,7 +52,7 @@ sees it.
 
 ## Get started
 
-You need at least one of these installed and logged in:
+You need Node.js 20 or later and at least one of these installed and logged in:
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — a Claude
   login or an `ANTHROPIC_API_KEY`. Everything else it needs comes bundled.

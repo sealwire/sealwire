@@ -37,7 +37,7 @@ Sealwire 把 Claude Code、Codex、Cursor、OpenCode 和 Pi 收进同一个简�
 
 ## 开始使用
 
-至少装好并登录下面之一：
+需要 Node.js 20 或更高版本，并装好、登录以下至少一个智能体：
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — Claude 登录，或设置 `ANTHROPIC_API_KEY`。其余依赖都已打进包里。
 - **[Codex](https://github.com/openai/codex)** — 命令行工具 `codex`。
