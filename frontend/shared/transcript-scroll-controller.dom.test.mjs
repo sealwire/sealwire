@@ -184,6 +184,19 @@ test("clicking a disclosure at the bottom cannot re-arm paused following", () =>
   } finally { view.close(); }
 });
 
+test("Space on an inline file control does not attribute layout movement to the reader", () => {
+  const view = fixture();
+  try {
+    const control = view.window.document.createElement("span");
+    control.setAttribute("role", "button");
+    control.innerHTML = "<code>README.md</code>";
+    view.second.append(control);
+    control.firstElementChild.dispatchEvent(new view.window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    view.readerScroll(2600, true, false);
+    assert.equal(view.controller.readPosition().followBottom, false);
+  } finally { view.close(); }
+});
+
 test("navigation from a disclosure rejoins even when resize precedes the native scroll event", () => {
   const view = fixture();
   try {

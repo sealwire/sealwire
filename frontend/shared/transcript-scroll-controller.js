@@ -143,7 +143,7 @@ function createTranscriptScrollController(scroller) {
   };
   const onKeyDown = event => {
     if (event.target?.closest?.("input, textarea, [contenteditable]")) return;
-    if ([" ", "Enter"].includes(event.key) && event.target?.closest?.("button, summary, [aria-expanded]")) return;
+    if ([" ", "Enter"].includes(event.key) && event.target?.closest?.("button, [role='button'], summary, [aria-expanded]")) return;
     if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stampReader();
   };
   const onScroll = () => {
