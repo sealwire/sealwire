@@ -57,7 +57,22 @@ function logStep(message, details) {
   console.log(`[mobile-dialog-menus-e2e] ${message}${suffix}`);
 }
 
-function measureInPage({ menuSel, triggerSel }) {
+async function measureInPage({ menuSel, triggerSel }) {
+  // A menu whose size changes (a provider's catalog landing after the tap) is re-placed
+  // in the next frame, so a read in between sees it detached. Measure once two agree.
+  const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+  const rects = () =>
+    [menuSel, triggerSel]
+      .map((sel) => JSON.stringify(document.querySelector(sel)?.getBoundingClientRect()))
+      .join("|");
+  for (let i = 0, last = null; i < 60; i += 1) {
+    const now = rects();
+    if (now === last) break;
+    last = now;
+    await frame();
+    await frame();
+  }
+
   const trigger = document.querySelector(triggerSel);
   const menu = document.querySelector(menuSel);
   if (!trigger) {
