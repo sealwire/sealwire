@@ -14,8 +14,7 @@ import { addEncryptedBrokerInitScript } from "./e2e/harness/encrypted-broker-moc
 // E2E_BROWSER=webkit runs the phone tap checks in WebKit (playwright install webkit).
 // Chromium additionally exercises finger drift and native scrolling through CDP.
 // ANDROID_E2E=1 attaches those tap checks to a booted Android Chrome over adb.
-// To cover a keyboard that leaves less than one row visible, temporarily set the
-// emulator to 1080x1450, run with ANDROID_EXPECT_KEYBOARD_DISMISS=1, then reset it.
+// Also checks that a cramped keyboard viewport keeps input focus and the first delegate.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -510,11 +509,7 @@ async function main() {
     await addEncryptedBrokerInitScript(page, installFakeRelay, FIXTURE);
     await openComposer(page, origin);
     if (ANDROID) {
-      await assertAndroidImeTap(page, { expectAutoHide: process.env.ANDROID_EXPECT_KEYBOARD_DISMISS === "1" });
-      if (process.env.ANDROID_EXPECT_KEYBOARD_DISMISS === "1") {
-        console.log("remote-composer-commands-e2e OK — cramped Android IME retracts for first command");
-        return;
-      }
+      await assertAndroidImeTap(page);
       await assertPhoneTaps(page, { systemTouch: true });
       if (process.env.SKILLS_SCREENSHOT) await page.screenshot({ path: process.env.SKILLS_SCREENSHOT });
       console.log("remote-composer-commands-e2e OK — Android Chrome phone touch picks");
@@ -527,6 +522,7 @@ async function main() {
       if (!WEBKIT) await assertPhoneTaps(page, { jitter: true });
     }
     await page.setViewportSize(MOBILE_VIEWPORT);
+    await assertDelegateViewport(page);
     if (WEBKIT) {
       console.log("remote-composer-commands-e2e OK — WebKit phone touch picks");
       return;
@@ -704,6 +700,92 @@ ordinary message sends THAT instead of what the user types — ${JSON.stringify(
       } catch {}
     }
     await server.close();
+  }
+}
+
+async function assertDelegateViewport(page) {
+  const input = "#remote-message-input";
+  const asks = Array.from({ length: 8 }, (_, index) => ({
+    id: `viewport-ask-${index}`,
+    asker_thread_id: THREAD_ID,
+    peer_thread_id: `viewport-delegate-${index}`,
+    peer_title: `受托者 ${index} 检查手机输入与候选排序`,
+    peer_provider: "codex",
+    asker_available: true,
+    peer_available: true,
+    status: "done",
+    updated_at: 8 - index,
+    delivered: true,
+  }));
+  await page.evaluate((asks) => window.__fakeRelay.updateReviews({ asks }), asks);
+  await page.setViewportSize({ width: MOBILE_VIEWPORT.width, height: 320 });
+  await page.focus(input);
+  await page.evaluate((screenHeight) => {
+    Object.defineProperty(screen, "height", { configurable: true, value: screenHeight });
+    window.__delegateInputBlurs = [];
+    document.querySelector("#remote-message-input").addEventListener("blur", (event) => {
+      window.__delegateInputBlurs.push(event.target.value);
+    });
+  }, MOBILE_VIEWPORT.height);
+  await page.keyboard.type("/delegate ");
+  await page.waitForFunction((name) => document.querySelector(".composer-command-name")?.textContent === name,
+    asks[0].peer_title, { timeout: TIMEOUT_MS });
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.deepEqual(await page.evaluate(() => window.__delegateInputBlurs), [],
+    "typing /delegate must never close the keyboard by blurring");
+  await assertFirstDelegateVisible("while typing /delegate above the keyboard");
+  await page.keyboard.type("@受托者");
+  assert.equal(await page.inputValue(input), "@受托者", "typing continues without refocusing");
+  await page.fill(input, "");
+  await page.press(input, "Backspace");
+  await page.setViewportSize(MOBILE_VIEWPORT);
+  await page.fill(input, "/");
+  await page.waitForSelector(".composer-command-row", { timeout: TIMEOUT_MS });
+  await page.evaluate(() => {
+    document.querySelector(".composer-command-menu").scrollTop = 120;
+  });
+  await page.locator(".composer-command-row").filter({ hasText: "/delegate" }).tap();
+  await page.waitForFunction(
+    (name) => document.querySelector(".composer-command-name")?.textContent === name,
+    asks[0].peer_title,
+    { timeout: TIMEOUT_MS }
+  );
+  await assertFirstDelegateVisible("after selecting /delegate from a scrolled menu");
+
+  for (const height of [480, 320]) {
+    await page.setViewportSize({ width: MOBILE_VIEWPORT.width, height });
+    await page.evaluate((screenHeight) => {
+      // A software keyboard shrinks the viewport while the physical screen stays tall.
+      Object.defineProperty(screen, "height", { configurable: true, value: screenHeight });
+      visualViewport.dispatchEvent(new Event("resize"));
+    }, MOBILE_VIEWPORT.height);
+    await assertFirstDelegateVisible(`with ${height}px left above the keyboard`);
+    assert.equal(await page.$eval(input, (node) => document.activeElement === node), true,
+      "viewport changes must keep the input focused");
+    if (process.env.SKILLS_SCREENSHOT) {
+      await page.screenshot({ path: process.env.SKILLS_SCREENSHOT.replace(/\.png$/, `-delegate-${height}.png`) });
+    }
+  }
+  await page.keyboard.type("@受托者");
+  assert.equal(await page.inputValue(input), "@受托者", "typing continues without focusing again");
+  await page.fill(input, "");
+  await page.press(input, "Backspace");
+  await page.evaluate(() => window.__fakeRelay.updateReviews({ asks: [] }));
+  await page.setViewportSize(MOBILE_VIEWPORT);
+
+  async function assertFirstDelegateVisible(label) {
+    await page.waitForFunction(() => {
+      const menu = document.querySelector(".composer-command-menu");
+      const row = menu?.querySelector(".composer-command-row");
+      if (!row) return false;
+      const box = row.getBoundingClientRect();
+      const frame = menu.getBoundingClientRect();
+      return box.top >= Math.max(frame.top, visualViewport.offsetTop)
+        && box.bottom <= Math.min(frame.bottom, visualViewport.offsetTop + visualViewport.height)
+        && row.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
+    }, null, { timeout: TIMEOUT_MS });
+    assert.equal(await page.locator(".composer-command-name").first().textContent(), asks[0].peer_title, label);
+    assert.equal(await page.locator(".composer-command-kind").first().textContent(), "Delegatee", label);
   }
 }
 
@@ -910,7 +992,7 @@ async function centreInCommandMenu(locator) {
 
 // Programmatic fill never opens Android's IME. Focus with a real touch first,
 // then check menu placement while that keyboard is up.
-async function assertAndroidImeTap(page, { expectAutoHide = false } = {}) {
+async function assertAndroidImeTap(page) {
   await page.fill("#remote-message-input", "");
   const fullHeight = await page.evaluate(() => innerHeight);
   await dispatchAndroidSystemTap(page, page.locator("#remote-message-input"));
@@ -919,8 +1001,7 @@ async function assertAndroidImeTap(page, { expectAutoHide = false } = {}) {
     fullHeight,
     { timeout: TIMEOUT_MS }
   );
-  // Enter the filter without adb text timing; on a normal phone the keyboard stays
-  // open, while a cramped screen must dismiss it to expose the first row.
+  // Enter the filter without adb text timing, keeping the native keyboard open.
   await page.fill("#remote-message-input", "/rev");
   await page.waitForSelector(".composer-command-row.is-provider", { timeout: TIMEOUT_MS });
   const firstRow = page.locator(".composer-command-row:not(.is-provider)");
@@ -936,19 +1017,14 @@ async function assertAndroidImeTap(page, { expectAutoHide = false } = {}) {
       && row.contains(hit);
   }, null, { timeout: TIMEOUT_MS });
   const heightAtChoice = await page.evaluate(() => visualViewport.height);
-  if (expectAutoHide) {
-    assert.ok(heightAtChoice > fullHeight * 0.8, "the keyboard retracts when it clips the first row");
-    assert.equal(await page.$eval("#remote-message-input", (input) => input.value), "/rev");
-  } else {
-    assert.ok(heightAtChoice < fullHeight * 0.8, "an accessible first row leaves the keyboard up for filtering");
-  }
+  assert.ok(heightAtChoice < fullHeight * 0.8, "the keyboard stays up for filtering");
+  assert.equal(await page.$eval("#remote-message-input", (input) => document.activeElement === input), true);
   await dispatchAndroidSystemTap(page, firstRow);
   await page.waitForFunction(
     () => [...document.querySelectorAll(".composer-command-pill-label")].some((n) => n.textContent === "/review"),
     null,
     { timeout: TIMEOUT_MS }
   );
-  if (expectAutoHide) return;
   await page.keyboard.press("Backspace");
   await page.waitForFunction(() => !document.querySelector(".composer-command-pill"), null, { timeout: TIMEOUT_MS });
   await page.fill("#remote-message-input", "/rev");
