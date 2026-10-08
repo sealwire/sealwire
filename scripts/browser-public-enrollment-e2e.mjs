@@ -73,8 +73,10 @@ async function main() {
   await waitForHealth(`http://127.0.0.1:${relayPort}/api/health`);
   await waitForBrokerConnection(`http://127.0.0.1:${relayPort}/api/session`);
 
-  const registration = await waitForRegistration(relayStateDb);
-  const identity = await waitForIdentity(relayStateDb);
+  // The relay keeps one registration and identity per broker, under its control origin.
+  const controlOrigin = `http://127.0.0.1:${brokerPort}`;
+  const registration = await waitForRegistration(relayStateDb, controlOrigin);
+  const identity = await waitForIdentity(relayStateDb, controlOrigin);
   assert.ok(registration.relay_id?.startsWith("relay-"));
   assert.ok(registration.broker_room_id?.startsWith("room-"));
   assert.ok(registration.relay_refresh_token?.startsWith("rref-"));
@@ -172,11 +174,11 @@ async function main() {
   }
 }
 
-async function waitForRegistration(relayStateDb, timeoutMs = TIMEOUT_MS) {
+async function waitForRegistration(relayStateDb, controlOrigin, timeoutMs = TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const stored = readCredential(relayStateDb, "public_registration");
+      const stored = readCredential(relayStateDb, "public_registration", controlOrigin);
       if (stored?.info?.relay_id && stored.info.broker_room_id && stored.secret) {
         return { ...stored.info, relay_refresh_token: stored.secret };
       }
@@ -186,11 +188,11 @@ async function waitForRegistration(relayStateDb, timeoutMs = TIMEOUT_MS) {
   throw new Error(`timed out waiting for the relay registration in ${relayStateDb}`);
 }
 
-async function waitForIdentity(relayStateDb, timeoutMs = TIMEOUT_MS) {
+async function waitForIdentity(relayStateDb, controlOrigin, timeoutMs = TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const stored = readCredential(relayStateDb, "public_relay_identity");
+      const stored = readCredential(relayStateDb, "public_relay_identity", controlOrigin);
       if (stored?.secret) {
         return { ...stored.info, relay_signing_seed: stored.secret };
       }
