@@ -513,7 +513,7 @@ test("[streaming] http(s)/mailto links go through untouched", () => {
 test("[streaming] file paths copy while fragment and query URLs stay links", () => {
   const html = renderStreaming("[frag](#section) [rel](/local/path) [q](?query=1)");
   assert.match(html, /href="#section"/);
-  assert.match(html, /<button[^>]*aria-label="Copy path: \/local\/path"[^>]*>rel<\/button>/);
+  assert.match(html, /<span[^>]*role="button"[^>]*aria-label="Copy path: \/local\/path"[^>]*>rel<\/span>/);
   assert.doesNotMatch(html, /href="\/local\/path"/);
   assert.match(html, /href="\?query=1"/);
 });

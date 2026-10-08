@@ -1506,23 +1506,18 @@ button.tool-run-row:focus-visible {
   color: var(--accent-hover-color);
 }
 .markdown-file-link {
-  display: inline;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: none;
-  box-shadow: none;
   color: var(--accent);
-  font: inherit;
-  text-align: left;
+  cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
   overflow-wrap: anywhere;
 }
 .markdown-file-link:hover {
-  background: none;
-  box-shadow: none;
   color: var(--accent-hover-color);
+}
+.markdown-file-link:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .markdown-file-link[data-copied="true"] {
   color: var(--ok-fg);

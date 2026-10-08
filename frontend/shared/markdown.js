@@ -33,7 +33,8 @@ const h = React.createElement;
 
 const SAFE_URL_SCHEMES = new Set(["http:", "https:", "mailto:", "tel:"]);
 const BLOCKED_HREF = "#blocked";
-const FILE_LOCATION_RE = /^(?:[a-z]:[\\/]|[^:/\\?#]+\.[^:/\\?#]+:\d+(?::\d+)?$)/i;
+const FILE_LOCATION_RE = /^(?:[a-z]:(?:[\\/]|%5c)|[^:/\\?#]+\.[^:/\\?#]+:\d+(?::\d+)?$)/i;
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
 
 function safeUrl(url) {
   if (typeof url !== "string" || url === "") {
@@ -83,17 +84,29 @@ function SafeLink({ href, children, node, ...rest }) {
     } catch {
       // A literal percent sign in a filename need not be a URL escape.
     }
+    // Copied paths may be pasted into a shell; hidden controls must not reach it.
+    if (CONTROL_CHAR_RE.test(path)) {
+      return h(React.Fragment, null, children);
+    }
     return h(
-      "button",
+      "span",
       {
         ...rest,
-        type: "button",
+        role: "button",
+        tabIndex: 0,
         className: "markdown-file-link",
         title: `Copy path: ${path}`,
         "aria-label": `Copy path: ${path}`,
         onClick: (event) => {
           event.stopPropagation();
           void copyTextToClipboard(path, event.currentTarget);
+        },
+        onKeyDown: (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            event.stopPropagation();
+            event.currentTarget.click();
+          }
         },
       },
       children

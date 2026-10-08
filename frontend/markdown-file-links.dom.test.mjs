@@ -26,21 +26,36 @@ for (const render of [renderMarkdown, renderStreamingMarkdown]) {
     document.body.append(container);
     const root = createRoot(container);
     let parentClicks = 0;
+    let parentKeyDowns = 0;
     try {
       await act(async () => root.render(React.createElement(
         "div",
-        { onClick: () => parentClicks++ },
-        render("Done.\n\n[readme](</tmp/项目/My File.md:12>) [literal](/tmp/100%done.txt) [web](https://example.com) `src/index.js`"),
+        { onClick: () => parentClicks++, onKeyDown: () => parentKeyDowns++ },
+        render("Done.\n\n[readme](</tmp/项目/My File.md:12>) [literal](/tmp/100%done.txt) "
+          + String.raw`[windows](C:\repo\README.md:12)`
+          + " [unsafe](/tmp/x%0Arm%20-rf%20~%0A) [web](https://example.com) `src/index.js`"),
       )));
       const buttons = container.querySelectorAll(".markdown-file-link");
-      assert.equal(buttons.length, 2);
+      assert.equal(buttons.length, 3);
       for (const button of buttons) {
+        assert.equal(button.getAttribute("role"), "button");
+        assert.equal(button.tabIndex, 0);
         assert.equal(button.hasAttribute("href"), false);
         await act(async () => button.click());
         assert.equal(button.dataset.copied, "true");
       }
-      assert.deepEqual(copied, ["/tmp/项目/My File.md:12", "/tmp/100%done.txt"]);
+      for (const key of ["Enter", " "]) {
+        const event = new window.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        await act(async () => buttons[0].dispatchEvent(event));
+        assert.equal(event.defaultPrevented, true);
+      }
+      assert.deepEqual(copied, [
+        "/tmp/项目/My File.md:12", "/tmp/100%done.txt", String.raw`C:\repo\README.md:12`,
+        "/tmp/项目/My File.md:12", "/tmp/项目/My File.md:12",
+      ]);
       assert.equal(parentClicks, 0);
+      assert.equal(parentKeyDowns, 0);
+      assert.ok(container.textContent.includes("unsafe"));
       assert.equal(window.location.href, "http://127.0.0.1:8787/app");
       assert.equal(container.querySelector("a").href, "https://example.com/");
       assert.equal(container.querySelector("code").textContent, "src/index.js");

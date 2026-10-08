@@ -125,11 +125,19 @@ test("file references render as copy buttons instead of relative website links",
     "../README.md",
     "README.md:12:3",
     "C:/project/README.md:12",
+    String.raw`C:\repo\README.md:12`,
   ]) {
     const html = render(`[file](${path})`);
-    assert.match(html, /<button[^>]*class="markdown-file-link"/);
+    assert.match(html, /<span[^>]*role="button"[^>]*tabindex="0"[^>]*class="markdown-file-link"/);
     assert.ok(html.includes(`aria-label="Copy path: ${path}"`));
     assert.doesNotMatch(html, /href=|target=|node=/);
+  }
+});
+
+test("file references containing decoded control characters stay noninteractive", () => {
+  for (const escape of ["%00", "%09", "%0A", "%0D", "%1B", "%1F", "%7F"]) {
+    const html = render(`[README.md](/tmp/x${escape}rm%20-rf%20~)`);
+    assert.equal(html, "<p>README.md</p>");
   }
 });
 
@@ -138,7 +146,7 @@ test("protocol-relative websites and fragment/query links remain anchors", () =>
   assert.match(html, /href="\/\/example\.com\/docs"/);
   assert.match(html, /href="#section"/);
   assert.match(html, /href="\?query=1"/);
-  assert.doesNotMatch(html, /<button/);
+  assert.doesNotMatch(html, /markdown-file-link/);
 });
 
 test("anchors get rel=noopener noreferrer nofollow and target=_blank", () => {
