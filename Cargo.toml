@@ -43,6 +43,12 @@ url = "2"
 # Maintained successor to xsalsa20poly1305; move to stable 0.2 once published.
 crypto_secretbox = "0.2.0-pre.0"
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 # Hardened profile for npm-release prebuilt relay-server binaries only.
 # Ordinary `cargo build --release` (dev / self-host) is unchanged. Do not set
 # panic=abort here — that changes unwind behaviour and is not required for
