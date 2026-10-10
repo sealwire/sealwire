@@ -21,7 +21,8 @@ impl PublicControlPlane {
             let store = self.inner.state.lock().await;
             refresh_cache_records(&store, challenge)
         };
-        let result = gate.run(async {
+        let commit_started = AtomicBool::new(false);
+        let result = gate.run_refresh(async {
             let mut tx = pool.begin().await.map_err(postgres_refresh_error)?;
             let mut store = PublicControlStateStore::default();
             // Match the persistence writer's lock order: relay, client, device, client grant.
@@ -53,9 +54,8 @@ impl PublicControlPlane {
             }
             let previous = store.clone();
             let response = self.rotate_signed_credentials(&mut store, challenge, verify_key, now)?;
-            delete_removed_public_control_rows(&mut tx, &previous, &store).await?;
-            upsert_client_identities(&mut tx, &previous, &store).await?;
-            upsert_device_grants(&mut tx, &previous, &store).await?;
+            update_refreshed_credentials(&mut tx, &previous, &store).await?;
+            commit_started.store(true, Ordering::SeqCst);
             tx.commit().await.map_err(postgres_refresh_error)?;
             Ok((response, store))
         }).await;
@@ -63,8 +63,10 @@ impl PublicControlPlane {
             if matches!(error, PublicControlDbGateError::Busy) {
                 return error.into_message();
             }
-            // A timed-out COMMIT may have landed; never persist a stale cache afterward.
-            needs_reload.store(true, Ordering::SeqCst);
+            // Only a COMMIT failure is ambiguous; rejected or rolled-back requests change no rows.
+            if commit_started.load(Ordering::SeqCst) {
+                needs_reload.store(true, Ordering::SeqCst);
+            }
             let message = error.into_message();
             if message == invalid_refresh() {
                 return message;
@@ -83,6 +85,40 @@ impl PublicControlPlane {
         }
         Ok(response)
     }
+}
+
+async fn update_refreshed_credentials(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    previous: &PublicControlStateStore,
+    refreshed: &PublicControlStateStore,
+) -> Result<(), String> {
+    // A waiting SELECT FOR UPDATE follows an updated row; DELETE + INSERT looks like revocation.
+    let old = previous
+        .client_registrations_by_hash
+        .values()
+        .next()
+        .unwrap();
+    let client = refreshed
+        .client_registrations_by_hash
+        .values()
+        .next()
+        .unwrap();
+    let updated = sqlx::query("UPDATE public_client_identities SET refresh_token_hash = $1, created_at = $2, superseded_tokens = $3 WHERE client_id = $4 AND refresh_token_hash = $5")
+        .bind(&client.refresh_token_hash).bind(u64_to_i64(client.created_at, "created_at")?)
+        .bind(encode_superseded(&client.superseded)?).bind(&client.client_id)
+        .bind(&old.refresh_token_hash).execute(&mut **tx).await.map_err(postgres_refresh_error)?;
+    require_changed_credential(updated.rows_affected())?;
+    if let Some(device) = refreshed.grants_by_hash.values().next() {
+        let old = previous.grants_by_hash.values().next().unwrap();
+        let updated = sqlx::query("UPDATE public_device_grants SET refresh_token_hash = $1, created_at = $2, last_seen = $3, superseded_tokens = $4 WHERE relay_id = $5 AND broker_room_id = $6 AND device_id = $7 AND refresh_token_hash = $8")
+            .bind(&device.refresh_token_hash).bind(u64_to_i64(device.created_at, "created_at")?)
+            .bind(device.last_seen.and_then(|value| i64::try_from(value).ok()))
+            .bind(encode_superseded(&device.superseded)?).bind(&device.relay_id)
+            .bind(&device.broker_room_id).bind(&device.device_id).bind(&old.refresh_token_hash)
+            .execute(&mut **tx).await.map_err(postgres_refresh_error)?;
+        require_changed_credential(updated.rows_affected())?;
+    }
+    Ok(())
 }
 
 fn invalid_refresh() -> String {

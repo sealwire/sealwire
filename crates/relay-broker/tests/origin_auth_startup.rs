@@ -124,3 +124,21 @@ fn a_valid_origin_auth_config_starts_enforcing_without_logging_the_secret() {
         "startup logs must not echo the secret\n{output}"
     );
 }
+
+#[test]
+fn bad_http_settings_stop_the_broker_before_it_listens() {
+    for (name, value) in [
+        ("RELAY_BROKER_HEADER_READ_TIMEOUT_SECS", "0"),
+        ("RELAY_BROKER_MAX_HTTP_CONNECTIONS", "65537"),
+        ("RELAY_BROKER_HTTP_CONNECTION_TIMEOUT_SECS", "301"),
+        ("RELAY_BROKER_MAX_HTTP_CONNECTIONS_PER_IP", "0"),
+    ] {
+        let (code, output) = run_broker_expecting_exit(&[(name, value)]);
+        assert_eq!(code, Some(1), "{output}");
+        assert!(
+            output.contains(name) && output.contains("invalid HTTP server config"),
+            "{output}"
+        );
+        assert!(!output.contains("listening on"), "{output}");
+    }
+}

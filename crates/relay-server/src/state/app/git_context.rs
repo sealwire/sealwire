@@ -545,17 +545,37 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_nested_git_symlink_cannot_borrow_parent_trust_to_run_filters() {
-        assert_nested_git_boundary_cannot_run_filters(false).await;
+        assert_nested_git_boundary_cannot_run_filters(NestedGitLayout::Symlink).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn a_nested_git_directory_cannot_borrow_parent_trust_to_run_filters() {
-        assert_nested_git_boundary_cannot_run_filters(true).await;
+        assert_nested_git_boundary_cannot_run_filters(NestedGitLayout::MetadataDirectory).await;
     }
 
     #[cfg(unix)]
-    async fn assert_nested_git_boundary_cannot_run_filters(metadata_directory: bool) {
+    #[tokio::test]
+    async fn a_nested_git_directory_with_unborn_head_cannot_borrow_parent_trust() {
+        assert_nested_git_boundary_cannot_run_filters(NestedGitLayout::UnbornHead).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_nested_git_directory_with_executable_objects_cannot_borrow_parent_trust() {
+        assert_nested_git_boundary_cannot_run_filters(NestedGitLayout::ExecutableObjects).await;
+    }
+
+    #[cfg(unix)]
+    enum NestedGitLayout {
+        Symlink,
+        MetadataDirectory,
+        UnbornHead,
+        ExecutableObjects,
+    }
+
+    #[cfg(unix)]
+    async fn assert_nested_git_boundary_cannot_run_filters(layout: NestedGitLayout) {
         use std::path::Path;
 
         let dir = TempDir::new().expect("tmp");
@@ -573,7 +593,7 @@ mod tests {
 
         let metadata = Path::new(&parent).join("nested-metadata");
         std::fs::rename(source.join(".git"), &metadata).unwrap();
-        let cwd = if metadata_directory {
+        let cwd = if !matches!(layout, NestedGitLayout::Symlink) {
             std::fs::copy(source.join("seed.txt"), metadata.join("seed.txt")).unwrap();
             std::fs::copy(
                 source.join(".gitattributes"),
@@ -604,6 +624,25 @@ mod tests {
             ],
         )
         .await;
+        match layout {
+            NestedGitLayout::UnbornHead => {
+                std::fs::remove_file(cwd.join("HEAD")).unwrap();
+                std::fs::remove_file(cwd.join("refs/heads/main")).unwrap();
+                std::os::unix::fs::symlink("refs/heads/main", cwd.join("HEAD")).unwrap();
+            }
+            NestedGitLayout::ExecutableObjects => {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::write(cwd.join("HEAD"), "ref: refs/heads/unborn\n").unwrap();
+                std::fs::remove_dir_all(cwd.join("objects")).unwrap();
+                std::fs::write(cwd.join("objects"), "").unwrap();
+                std::fs::set_permissions(
+                    cwd.join("objects"),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
+            _ => {}
+        }
         std::fs::write(cwd.join("seed.txt"), "line2\n").unwrap();
         let marker = cwd.join("filter-executed");
         let app = build_app(&parent, vec![parent.clone()]).await;

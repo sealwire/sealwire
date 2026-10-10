@@ -918,6 +918,10 @@ async fn postgres_signed_refresh_probes_client_id_and_persists_credentials() {
         .await
         .unwrap_err();
     assert_eq!(error, "credential refresh is invalid");
+    assert!(
+        !peer.inner.persistence.reload_forced(),
+        "a rejected transaction must not force a full reload"
+    );
     assert!(load_public_control_postgres(&pool)
         .await
         .unwrap()
@@ -962,6 +966,123 @@ async fn postgres_signed_refresh_probes_client_id_and_persists_credentials() {
         .unwrap()
         .client_registrations_by_hash
         .is_empty());
+    truncate_all(&pool).await;
+}
+
+#[tokio::test]
+async fn postgres_refresh_bursts_leave_database_capacity_for_writes() {
+    use ed25519_dalek::Signer;
+    let Some((url, _serial)) = test_url().await else {
+        return;
+    };
+    let pool = connect_and_init(&url).await;
+    truncate_all(&pool).await;
+    let plane = postgres_plane(pool.clone(), false);
+    let mut seed = PublicControlStateStore::default();
+    let mut clients = Vec::new();
+    for byte in [71, 72] {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[byte; 32]);
+        let mut client = client_ident(&format!("burst-{byte}"));
+        client.client_verify_key = STANDARD.encode(key.verifying_key().to_bytes());
+        client.client_id = plane
+            .inner
+            .credential_key
+            .client_id(&client.client_verify_key);
+        client.refresh_token_hash = sha256_hex(
+            &plane
+                .inner
+                .credential_key
+                .mint(CredentialKind::Client, &client.client_id),
+        );
+        seed.client_registrations_by_hash
+            .insert(client.refresh_token_hash.clone(), client.clone());
+        clients.push((client, key));
+    }
+    save_public_control_postgres(&pool, &PublicControlStateStore::default(), &seed)
+        .await
+        .unwrap();
+    *plane.inner.state.lock().await = seed.clone();
+    let PublicControlPersistence::Postgres {
+        gate, last_saved, ..
+    } = &plane.inner.persistence
+    else {
+        unreachable!()
+    };
+    *last_saved.lock().await = seed;
+    let origin = "https://broker.test";
+    let mut challenges = Vec::new();
+    for (client, key) in &clients {
+        for number in 0..4 {
+            let mut request = CredentialRefreshChallengeRequest {
+                client_id: client.client_id.clone(),
+                broker_room_id: None,
+                device_id: None,
+                nonce: format!("burst-{number}"),
+                signature: String::new(),
+            };
+            request.signature = STANDARD.encode(
+                key.sign(credential_refresh_init_message(&request, origin).as_bytes())
+                    .to_bytes(),
+            );
+            let challenge = plane
+                .create_credential_refresh_challenge(request, origin)
+                .await
+                .unwrap();
+            challenges.push((key.clone(), challenge));
+        }
+    }
+    let mut locked = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM public_client_identities FOR UPDATE")
+        .fetch_all(&mut *locked)
+        .await
+        .unwrap();
+    let refreshes: Vec<_> = challenges
+        .into_iter()
+        .map(|(key, challenge)| {
+            let plane = plane.clone();
+            tokio::spawn(async move {
+                plane
+                    .refresh_credentials(
+                        CredentialRefreshRequest {
+                            challenge_id: challenge.challenge_id.clone(),
+                            signature: STANDARD.encode(
+                                key.sign(credential_refresh_message(&challenge).as_bytes())
+                                    .to_bytes(),
+                            ),
+                        },
+                        origin,
+                    )
+                    .await
+            })
+        })
+        .collect();
+    for _ in 0..100 {
+        if gate.spare_permits.available_permits() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(gate.spare_permits.available_permits(), 0);
+    assert_eq!(
+        gate.permits.available_permits(),
+        6,
+        "refresh must consume at most a quarter of the database gate"
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        plane.issue_relay_registration_for_verify_key("unrelated-burst-relay", None),
+    )
+    .await
+    .expect("blocked refreshes must not refuse an unrelated write")
+    .unwrap();
+    locked.rollback().await.unwrap();
+    for refresh in refreshes {
+        refresh
+            .await
+            .unwrap()
+            .expect("a reconnect burst should wait for its refresh slot");
+    }
+    assert_eq!(plane.inner.full_load_count.load(Ordering::SeqCst), 0);
     truncate_all(&pool).await;
 }
 

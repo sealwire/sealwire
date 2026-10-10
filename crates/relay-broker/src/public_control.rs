@@ -238,6 +238,20 @@ impl PublicControlDbGate {
         self.run(operation).await
     }
 
+    async fn run_refresh<T, F>(&self, operation: F) -> Result<T, PublicControlDbGateError>
+    where
+        F: Future<Output = Result<T, String>>,
+    {
+        let _spare = tokio::time::timeout(
+            self.query_timeout,
+            self.spare_permits.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| PublicControlDbGateError::Timeout)?
+        .map_err(|_| PublicControlDbGateError::Busy)?;
+        self.run(operation).await
+    }
+
     async fn run<T, F>(&self, operation: F) -> Result<T, PublicControlDbGateError>
     where
         F: Future<Output = Result<T, String>>,
@@ -3810,7 +3824,7 @@ async fn delete_removed_public_control_rows(
                     .map_err(|error| {
                         format!("failed to delete public_relay_registrations: {error}")
                     })?;
-            require_deleted_credential(deleted.rows_affected())?;
+            require_changed_credential(deleted.rows_affected())?;
         }
     }
     for hash in prev.client_registrations_by_hash.keys() {
@@ -3823,7 +3837,7 @@ async fn delete_removed_public_control_rows(
                     .map_err(|error| {
                         format!("failed to delete public_client_identities: {error}")
                     })?;
-            require_deleted_credential(deleted.rows_affected())?;
+            require_changed_credential(deleted.rows_affected())?;
         }
     }
     for hash in prev.grants_by_hash.keys() {
@@ -3834,7 +3848,7 @@ async fn delete_removed_public_control_rows(
                     .execute(&mut **tx)
                     .await
                     .map_err(|error| format!("failed to delete public_device_grants: {error}"))?;
-            require_deleted_credential(deleted.rows_affected())?;
+            require_changed_credential(deleted.rows_affected())?;
         }
     }
     for (key, grant) in &prev.client_relay_grants_by_key {
@@ -3997,7 +4011,7 @@ async fn upsert_client_relay_grants(
     Ok(())
 }
 
-fn require_deleted_credential(rows: u64) -> Result<(), String> {
+fn require_changed_credential(rows: u64) -> Result<(), String> {
     if rows == 1 {
         Ok(())
     } else {

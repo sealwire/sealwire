@@ -5780,8 +5780,6 @@ async fn websocket_connection_limit_is_enforced_per_ip() {
     }
 }
 
-/// Per-address limits cannot bound the total, so past the cap new joins from any address
-/// are refused, and a closed socket frees its slot.
 #[tokio::test]
 async fn tenant_connections_are_capped_across_ips_and_relay_capacity_is_reserved() {
     let guard = BanGuard {
@@ -5910,6 +5908,8 @@ fn tenant_permits_bound_relay_overlap_and_remove_idle_tenants() {
     assert!(tracker.counts.lock().unwrap().is_empty());
 }
 
+/// Per-address limits cannot bound the total, so past the cap new joins from any address
+/// are refused, and a closed socket frees its slot.
 #[tokio::test]
 async fn open_sockets_are_capped_across_addresses() {
     let guard = BanGuard {
@@ -9973,7 +9973,9 @@ async fn serve_router(app: Router) -> SocketAddr {
         .expect("listener should bind");
     let address = listener.local_addr().expect("listener should have address");
     tokio::spawn(async move {
-        serve(listener, app).await.expect("broker should serve");
+        serve(listener, app, server::ServerConfig::from_env().unwrap())
+            .await
+            .expect("broker should serve");
     });
     address
 }

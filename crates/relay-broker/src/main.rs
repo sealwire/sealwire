@@ -19,6 +19,14 @@ async fn main() {
         std::process::exit(1);
     }
 
+    let server_config = match relay_broker::server::ServerConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            error!(%error, "relay-broker refusing to start: invalid HTTP server config");
+            std::process::exit(1);
+        }
+    };
+
     let port = std::env::var("PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
@@ -37,7 +45,7 @@ async fn main() {
         host, port, host, port
     );
     let app = relay_broker::app(relay_broker::BrokerState::from_env().await).await;
-    relay_broker::serve(listener, app)
+    relay_broker::serve(listener, app, server_config)
         .await
         .expect("relay-broker exited unexpectedly");
 }

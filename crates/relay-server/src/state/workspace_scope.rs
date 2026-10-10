@@ -175,10 +175,13 @@ pub(crate) fn repository_root(start: &Path) -> Option<PathBuf> {
         let metadata = match std::fs::symlink_metadata(&dot_git) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // Git also discovers repositories whose metadata lives in this directory.
-                if dir.join("HEAD").is_file()
-                    && ((dir.join("objects").is_dir() && dir.join("refs").is_dir())
-                        || dir.join("commondir").is_file())
+                // Git accepts dangling HEAD links and executable files as metadata paths.
+                let present = |name| match std::fs::symlink_metadata(dir.join(name)) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    _ => true,
+                };
+                if present("HEAD")
+                    && ((present("objects") && present("refs")) || present("commondir"))
                 {
                     return None;
                 }
