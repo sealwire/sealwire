@@ -475,3 +475,126 @@ test("sending a pairing request records the fingerprint the computer will show",
   assert.equal(state.pairingPhase, "requesting");
   assert.equal(state.pairingFingerprint, "ae:21:6c:2e:f5:24:7a:37");
 });
+
+function relayKey(fill) {
+  return Buffer.from(new Uint8Array(32).fill(fill)).toString("base64");
+}
+
+async function finishPairing(state, { pairingId, ticket, result }) {
+  const { handleEncryptedPairingResult } = await import("./pairing.js");
+  const { encryptJson } = await import("./crypto.js");
+  const secret = `${pairingId}-secret`;
+  const peerId = `surface-${pairingId}`;
+  seedSocketState(state, { socketPeerId: peerId });
+  seedPairingState(state, {
+    pairingPhase: "requesting",
+    pairingTicket: {
+      pairing_id: pairingId,
+      pairing_secret: secret,
+      broker_url: "wss://broker.example.test",
+      relay_peer_id: `${pairingId}-relay`,
+      security_mode: "private",
+      expires_at: Math.floor(Date.now() / 1000) + 120,
+      ...ticket,
+    },
+  });
+  // The success path ends by awaiting a socket claim this stub never answers.
+  void handleEncryptedPairingResult({
+    pairing_id: pairingId,
+    target_peer_id: peerId,
+    envelope: await encryptJson(secret, {
+      ok: true,
+      device: { device_id: `${pairingId}-device`, label: "Phone" },
+      device_join_ticket: `${pairingId}-join`,
+      ...result,
+    }),
+  }).catch(() => {});
+  const deadline = Date.now() + 2000;
+  while (state.pairingTicket && !state.pairingRetired && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function profilesPinning(state, key) {
+  return Object.values(state.remoteProfiles).filter((profile) => profile.relayVerifyKey === key);
+}
+
+test("a computer cannot take over another saved computer's entry by naming its id", async () => {
+  installBrowserStubs();
+  globalThis.fetch = async () => ({ ok: true, async json() { return {}; } });
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const homeKey = relayKey(3);
+  saveRemoteAuth({
+    relayId: "relay-home",
+    relayLabel: "Home Mac",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-home",
+    relayPeerId: "home-peer",
+    relayVerifyKey: homeKey,
+    securityMode: "private",
+    deviceId: "home-device",
+    deviceLabel: "Phone",
+    payloadSecret: "home-payload-secret",
+    deviceJoinTicket: "home-join-ticket",
+  });
+
+  await finishPairing(state, {
+    pairingId: "pair-takeover",
+    ticket: { broker_channel_id: "room-other", relay_verify_key: relayKey(4) },
+    result: { relay_id: "relay-home", relay_label: "Home Mac", payload_secret: "other-payload-secret" },
+  });
+
+  const home = state.remoteProfiles["relay-home"];
+  assert.equal(home.relayVerifyKey, homeKey, "the saved computer's key was replaced");
+  assert.equal(home.brokerChannelId, "room-home");
+  assert.equal(home.payloadSecret, "home-payload-secret");
+  assert.equal(state.pairingPhase, "error", "the refused pairing must say so instead of hanging");
+  assert.equal(profilesPinning(state, relayKey(4)).length, 0, "a refused pairing must save nothing");
+});
+
+test("two self-hosted computers with the same room name are both kept, named by the room", async () => {
+  installBrowserStubs();
+  globalThis.fetch = async () => ({ ok: true, async json() { return {}; } });
+  const { state } = await import("./state.js");
+  const firstKey = relayKey(5);
+  const secondKey = relayKey(6);
+
+  await finishPairing(state, {
+    pairingId: "pair-first-room",
+    ticket: { broker_channel_id: "shared-room", relay_verify_key: firstKey },
+    result: { payload_secret: "first-payload-secret" },
+  });
+  await finishPairing(state, {
+    pairingId: "pair-second-room",
+    ticket: { broker_channel_id: "shared-room", relay_verify_key: secondKey },
+    result: { payload_secret: "second-payload-secret" },
+  });
+
+  const [first] = profilesPinning(state, firstKey);
+  const [second] = profilesPinning(state, secondKey);
+  assert.ok(first, "pairing a second computer with the same room name wiped the first");
+  assert.ok(second);
+  assert.notEqual(first.relayId, second.relayId);
+  assert.equal(first.payloadSecret, "first-payload-secret");
+  assert.equal(first.relayLabel, "shared-room");
+  assert.equal(second.relayLabel, "shared-room");
+});
+
+test("re-pairing the same self-hosted computer replaces its own entry", async () => {
+  installBrowserStubs();
+  globalThis.fetch = async () => ({ ok: true, async json() { return {}; } });
+  const { state } = await import("./state.js");
+  const key = relayKey(8);
+
+  for (const [pairingId, payloadSecret] of [["pair-again-1", "old-secret"], ["pair-again-2", "new-secret"]]) {
+    await finishPairing(state, {
+      pairingId,
+      ticket: { broker_channel_id: "again-room", relay_verify_key: key },
+      result: { payload_secret: payloadSecret },
+    });
+  }
+
+  const saved = profilesPinning(state, key);
+  assert.equal(saved.length, 1, "the same computer must not end up listed twice");
+  assert.equal(saved[0].payloadSecret, "new-secret");
+});

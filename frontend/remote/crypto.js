@@ -145,6 +145,13 @@ export function deviceKeyFingerprint(verifyKey) {
   return Array.from(digest.slice(0, 8), (byte) => byte.toString(16).padStart(2, "0")).join(":");
 }
 
+// For brokers that assign no relay id: room names are typed by hand, often copied from
+// the docs, so two different computers can share one and the second would replace the first.
+export function relayIdFromVerifyKey(verifyKey) {
+  const digest = sha256(base64ToBytes(verifyKey));
+  return `relay-key-${Array.from(digest.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
 export function pairingProofMessage(pairingId, deviceId) {
   return `agent-relay:pairing:${pairingId}:${deviceId || ""}`;
 }

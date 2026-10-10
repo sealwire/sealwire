@@ -6,6 +6,7 @@ import {
   deviceKeyFingerprint,
   encryptJson,
   parsePairingPayload,
+  relayIdFromVerifyKey,
   signClientClaim,
   signPairingProof,
 } from "./crypto.js";
@@ -279,9 +280,17 @@ export async function handleEncryptedPairingResult(payload) {
     renderLog("Pairing failed: relay returned an incomplete device credential bundle.");
     return;
   }
+  const relayId = result.relay_id || relayIdFromVerifyKey(ticket.relay_verify_key);
+  const savedProfile = state.remoteProfiles?.[relayId];
+  if (savedProfile?.relayVerifyKey && savedProfile.relayVerifyKey !== ticket.relay_verify_key) {
+    // The id comes from the relay's own reply; a different computer naming a saved one's
+    // id would otherwise inherit its entry, drafts and cached transcripts.
+    retirePairing("this computer reported the id of a different computer already saved here; pairing was refused");
+    return;
+  }
   const remoteAuth = {
-    relayId: result.relay_id || ticket.broker_channel_id,
-    relayLabel: result.relay_label || null,
+    relayId,
+    relayLabel: result.relay_label || (result.relay_id ? null : ticket.broker_channel_id) || null,
     brokerUrl: ticket.broker_url,
     brokerChannelId: ticket.broker_channel_id,
     relayPeerId: ticket.relay_peer_id,
