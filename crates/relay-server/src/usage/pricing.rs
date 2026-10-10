@@ -239,17 +239,13 @@ mod tests {
         assert!(cached < fresh);
     }
 
-    /// The gap the old four-field rate card could not express at all.
     #[test]
-    fn a_prompt_over_200k_is_priced_at_the_long_context_tier() {
+    fn sonnet_4_5_has_no_long_context_surcharge() {
         let model = Some("claude-sonnet-4-5-20250929");
-        // Same token count either side of the line, so only the tier differs.
         let under = estimate_cost("claude_code", model, 200_000, 0, 0, 0).unwrap();
         let over = estimate_cost("claude_code", model, 200_001, 0, 0, 0).unwrap();
-        assert!(
-            over > under * 1.9,
-            "crossing 200k should roughly double the rate: {under} -> {over}"
-        );
+        assert!((under - 0.6).abs() < 1e-9, "got {under}");
+        assert!((over - 0.600003).abs() < 1e-9, "got {over}");
     }
 
     /// The threshold is the PROMPT, not the whole turn: a short prompt with a

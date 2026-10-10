@@ -1651,6 +1651,12 @@ document
   .getElementById("open-settings-header")
   ?.addEventListener("click", () => settings.open());
 
+// The shell is visible before this module loads; only accept clicks once handlers exist.
+for (const id of ["sidebar-settings", "icon-rail-settings", "open-settings-header"]) {
+  const button = document.getElementById(id);
+  if (button) button.disabled = false;
+}
+
 // Keeps the sidebar's pinned selection in step with the routed context. There is no
 // grouping mode to sync any more — the context IS the selection.
 function syncThreadListViewFromContext(context) {

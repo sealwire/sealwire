@@ -154,6 +154,11 @@ async function main() {
 
     localPage = await context.newPage();
     attachPageDebugLogging(localPage, "local", { prefix: "public-settings-load-e2e" });
+    // The shell appears before the Settings handlers load; exercise a click in that gap.
+    await localPage.route("**/static/assets/app-*.js", async (route) => {
+      await delay(1000);
+      await route.continue();
+    });
     await localPage.goto(`http://127.0.0.1:${relayPort}`, { waitUntil: "domcontentloaded" });
 
     const pairingUrl = await startPairingFromLocalPage(localPage, {
