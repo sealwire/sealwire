@@ -98,3 +98,45 @@ async fn pending_client_claims_keep_labels_short_and_refuse_oversized_ids() {
     assert!(oversized.is_err(), "a 10k-byte device id must be refused");
     assert_eq!(claims.len(), 1);
 }
+
+#[tokio::test]
+async fn a_relay_that_keeps_asking_for_client_claims_does_not_stop_another_relay_pairing() {
+    let plane = in_memory_plane().await;
+    let busy = plane
+        .issue_relay_registration_for_verify_key(&verify_key(10), None)
+        .await
+        .expect("enroll the busy relay");
+    let other = plane
+        .issue_relay_registration_for_verify_key(&verify_key(11), None)
+        .await
+        .expect("enroll the other relay");
+    let request =
+        |relay: &RelayEnrollmentResponse, device_id: String, key: String| ClientGrantRequest {
+            relay_id: relay.relay_id.clone(),
+            broker_room_id: relay.broker_room_id.clone(),
+            device_id,
+            client_verify_key: key,
+            client_label: None,
+            device_label: None,
+        };
+
+    for n in 0..1_000 {
+        let _ = plane
+            .issue_client_grant(
+                &busy.relay_refresh_token,
+                request(&busy, format!("phone-{n}"), verify_key(1_000 + n)),
+            )
+            .await;
+    }
+    let paired = plane
+        .issue_client_grant(
+            &other.relay_refresh_token,
+            request(&other, "phone".to_string(), verify_key(12)),
+        )
+        .await;
+
+    assert!(
+        paired.is_ok(),
+        "another relay's requests blocked this relay's pairing: {paired:?}"
+    );
+}

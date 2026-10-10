@@ -82,10 +82,6 @@ const DEFAULT_PUBLIC_DB_MAX_CONNECTIONS: u32 = 5;
 const DEFAULT_PUBLIC_DB_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_PUBLIC_DB_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_PUBLIC_DB_CONCURRENCY: usize = 8;
-/// Ceiling on unclaimed attestations. Unlike the enrollment challenge map this
-/// one is writable by any authenticated relay, so it needs a bound: without it
-/// a hostile relay can grow it without limit inside the TTL window.
-const MAX_PENDING_CLIENT_CLAIMS: usize = 512;
 // Keep recovery capacity above the default API budget over a challenge's lifetime.
 const MAX_PENDING_CREDENTIAL_REFRESHES: usize = 4096;
 const MAX_PENDING_REFRESHES_PER_CLIENT: usize = 4;
@@ -1589,11 +1585,24 @@ impl PublicControlPlane {
         let nonce = format!("cn-{}", random_token(40).to_ascii_lowercase());
         let expires_at = unix_now().saturating_add(DEFAULT_CLIENT_CLAIM_TTL_SECS);
         {
+            // One unredeemed claim per relay bounds the map by relay count, and a
+            // relay asking again can only cancel its own pairing, never another's.
             let mut pending = self.inner.pending_client_claims.lock().await;
             let now = unix_now();
-            pending.retain(|_, claim| claim.expires_at > now);
-            if pending.len() >= MAX_PENDING_CLIENT_CLAIMS {
-                return Err("too many pending client claims; retry shortly".to_string());
+            let mut cancelled = false;
+            pending.retain(|_, claim| {
+                let live = claim.expires_at > now;
+                if claim.relay_id == registration.relay_id {
+                    cancelled |= live;
+                    return false;
+                }
+                live
+            });
+            if cancelled {
+                warn!(
+                    relay_id = %registration.relay_id,
+                    "new client claim cancelled this relay's unredeemed one"
+                );
             }
             pending.insert(
                 claim_id.clone(),

@@ -49,6 +49,21 @@ fn the_client_claim_message_matches_the_frontend_contract() {
     );
 }
 
+async fn attest(
+    plane: &PublicControlPlane,
+    enrolled: &RelayEnrollmentResponse,
+    device_id: &str,
+    seed: u8,
+) -> ClientGrantResponse {
+    plane
+        .issue_client_grant(
+            &enrolled.relay_refresh_token,
+            client_grant_request(enrolled, device_id, &test_client_verify_key(seed)),
+        )
+        .await
+        .expect("relay attests the client key")
+}
+
 /// A full pairing: the relay attests, then the key holder redeems. Most
 /// tests only care about the resulting credential, not the two-step shape.
 async fn attest_and_claim(
@@ -57,13 +72,7 @@ async fn attest_and_claim(
     device_id: &str,
     seed: u8,
 ) -> ClientClaimResponse {
-    let claim = plane
-        .issue_client_grant(
-            &enrolled.relay_refresh_token,
-            client_grant_request(enrolled, device_id, &test_client_verify_key(seed)),
-        )
-        .await
-        .expect("relay attests the client key");
+    let claim = attest(plane, enrolled, device_id, seed).await;
     plane
         .claim_client_identity(ClientClaimRequest {
             claim_id: claim.claim_id.clone(),
@@ -221,6 +230,35 @@ async fn a_client_claim_reference_cannot_be_redeemed_twice() {
         })
         .await;
     assert!(replay.is_err(), "a claim reference must be single-use");
+}
+
+#[tokio::test]
+async fn a_new_client_claim_cancels_only_the_same_relays_older_one() {
+    let plane = in_memory_plane().await;
+    let relay = enroll(&plane, "newest-claim").await;
+    let other_relay = enroll(&plane, "newest-claim-other").await;
+    let older = attest(&plane, &relay, "phone-1", 41).await;
+    let other = attest(&plane, &other_relay, "phone", 43).await;
+    let newer = attest(&plane, &relay, "phone-2", 42).await;
+    let redeem = |seed: u8, claim: &ClientGrantResponse| {
+        plane.claim_client_identity(ClientClaimRequest {
+            claim_id: claim.claim_id.clone(),
+            claim_signature: sign_client_claim(seed, claim),
+        })
+    };
+
+    let cancelled = redeem(41, &older).await;
+    assert_eq!(
+        cancelled.err().as_deref(),
+        Some("client claim is invalid"),
+        "the same relay's older claim must be cancelled"
+    );
+    redeem(43, &other)
+        .await
+        .expect("another relay's claim is untouched");
+    redeem(42, &newer)
+        .await
+        .expect("the newest claim is redeemable");
 }
 
 /// The signature must be over the broker's nonce, not merely *a* valid
