@@ -19,6 +19,9 @@
 //!     pruning the ones a push service reports `404`/`410 Gone`.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -460,7 +463,8 @@ fn endpoint_origin(endpoint: &str) -> Result<String, String> {
 /// Reject endpoints that aren't public https URLs. A paired device could
 /// otherwise point the relay at an internal address (SSRF); real push services
 /// (FCM / Mozilla autopush / Apple) are always public https, so this is not
-/// restrictive in practice.
+/// restrictive in practice. A host name is checked again by [`PushResolver`] on
+/// every connection, since its DNS answer is the attacker's to choose.
 pub(crate) fn is_acceptable_push_endpoint(endpoint: &str) -> bool {
     let Ok(url) = url::Url::parse(endpoint) else {
         return false;
@@ -473,23 +477,38 @@ pub(crate) fn is_acceptable_push_endpoint(endpoint: &str) -> bool {
             let host = host.to_ascii_lowercase();
             host != "localhost" && !host.ends_with(".localhost") && !host.ends_with(".local")
         }
-        Some(url::Host::Ipv4(ip)) => {
-            !(ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified())
-        }
-        Some(url::Host::Ipv6(ip)) => {
-            if let Some(v4) = ip.to_ipv4_mapped() {
-                // IPv4-mapped (::ffff:a.b.c.d) — classify by the embedded v4 address.
-                !(v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified())
-            } else {
-                let seg0 = ip.segments()[0];
-                // Reject loopback, unspecified, fc00::/7 (unique-local), fe80::/10 (link-local).
-                !(ip.is_loopback()
-                    || ip.is_unspecified()
-                    || (seg0 & 0xfe00) == 0xfc00
-                    || (seg0 & 0xffc0) == 0xfe80)
-            }
-        }
+        Some(url::Host::Ipv4(ip)) => is_public_address(ip.into()),
+        Some(url::Host::Ipv6(ip)) => is_public_address(ip.into()),
         None => false,
+    }
+}
+
+/// Whether a push may be sent to `ip`: globally routed unicast only. Anything the
+/// relay's own computer could reach privately (LAN, VPN, carrier NAT, cloud metadata) is out.
+fn is_public_address(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_documentation()
+                || a == 0
+                || a >= 224
+                // 100.64.0.0/10: carrier-grade NAT, and Tailscale's tailnet addresses.
+                || (a == 100 && (b & 0xc0) == 64)
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 198 && (b & 0xfe) == 18))
+        }
+        IpAddr::V6(ip) => {
+            let [s0, s1, ..] = ip.segments();
+            // Only 2000::/3 is internet unicast, which also refuses the IPv4-compatible and NAT64
+            // forms; inside it, 6to4 embeds an IPv4 address and the rest is reserved.
+            (s0 & 0xe000) == 0x2000
+                && !(s0 == 0x2001 && (s1 < 0x0200 || s1 == 0x0db8))
+                && s0 != 0x2002
+                && !(s0 == 0x3fff && s1 < 0x1000)
+        }
     }
 }
 
@@ -606,15 +625,15 @@ impl PushDispatcher {
     pub fn spawn(
         relay: Arc<RwLock<RelayState>>,
         vapid: VapidKeys,
-    ) -> mpsc::UnboundedSender<PushJob> {
+    ) -> Result<mpsc::UnboundedSender<PushJob>, String> {
         let (tx, rx) = mpsc::unbounded_channel();
         let dispatcher = Self {
             relay,
-            http: build_push_client(),
+            http: build_push_client(system_lookup())?,
             vapid,
         };
         tokio::spawn(dispatcher.run(rx));
-        tx
+        Ok(tx)
     }
 
     async fn run(self, mut rx: mpsc::UnboundedReceiver<PushJob>) {
@@ -661,6 +680,11 @@ impl PushDispatcher {
     }
 
     async fn send_one(&self, subscription: &PushSubscription, payload: &[u8]) -> SendOutcome {
+        // An IP-literal host skips the resolver, and a stored row may predate today's rules.
+        if !is_acceptable_push_endpoint(&subscription.endpoint) {
+            warn!(endpoint = %subscription.endpoint, "push endpoint is not a public https URL; pruning");
+            return SendOutcome::Gone;
+        }
         let ua_public = match b64url_decode(&subscription.p256dh) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -720,23 +744,61 @@ impl PushDispatcher {
                 }
             }
             Err(error) => {
-                warn!(endpoint = %subscription.endpoint, %error, "push request failed");
+                warn!(endpoint = %subscription.endpoint, ?error, "push request failed");
                 SendOutcome::Failed
             }
         }
     }
 }
 
+type LookupFuture = Pin<Box<dyn Future<Output = std::io::Result<Vec<IpAddr>>> + Send>>;
+/// Injectable so tests can answer DNS without touching the network.
+type Lookup = Arc<dyn Fn(String) -> LookupFuture + Send + Sync>;
+
+fn system_lookup() -> Lookup {
+    Arc::new(|host: String| {
+        Box::pin(async move {
+            Ok(tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .map(|addr| addr.ip())
+                .collect())
+        })
+    })
+}
+
+/// The push client's only DNS. The connector dials exactly the addresses returned here,
+/// so checking them leaves no second lookup for a rebinding name to win.
+struct PushResolver {
+    lookup: Lookup,
+}
+
+impl reqwest::dns::Resolve for PushResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let lookup = (self.lookup)(host.clone());
+        Box::pin(async move {
+            let addrs = lookup.await?;
+            // One inward answer refuses the whole name: a real push service never has one,
+            // and the connector would otherwise fall back to it when a public address fails.
+            if let Some(ip) = addrs.iter().find(|ip| !is_public_address(**ip)) {
+                return Err(format!("refusing push host {host}: it resolves to {ip}").into());
+            }
+            Ok(Box::new(addrs.into_iter().map(|ip| SocketAddr::new(ip, 0))) as reqwest::dns::Addrs)
+        })
+    }
+}
+
 /// HTTP client for sending pushes. A per-request timeout stops a hung push
-/// endpoint wedging the serial dispatch queue; redirects are disabled so a
-/// registered public-https endpoint can't 3xx-redirect the relay to an internal
-/// address (SSRF) after the register-time host check.
-fn build_push_client() -> reqwest::Client {
+/// endpoint wedging the serial dispatch queue. Redirects and proxies are off
+/// because either would reach a host [`PushResolver`] never checked.
+fn build_push_client(lookup: Lookup) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .dns_resolver(Arc::new(PushResolver { lookup }))
         .build()
-        .unwrap_or_default()
+        .map_err(|error| format!("failed to build the push client: {error}"))
 }
 
 fn now() -> u64 {
@@ -784,6 +846,135 @@ mod tests {
             &dir.path().join("sealwire.db"),
         ))
         .expect("vapid")
+    }
+
+    fn push_client(lookup: Lookup) -> reqwest::Client {
+        build_push_client(lookup).expect("push client")
+    }
+
+    fn fixed_lookup(answer: &[&str]) -> Lookup {
+        let answer: Vec<IpAddr> = answer.iter().map(|ip| ip.parse().unwrap()).collect();
+        Arc::new(move |_host: String| {
+            let answer = answer.clone();
+            Box::pin(async move { Ok(answer) })
+        })
+    }
+
+    fn no_dns() -> Lookup {
+        Arc::new(|host: String| {
+            Box::pin(async move { Err(std::io::Error::other(format!("no DNS in tests: {host}"))) })
+        })
+    }
+
+    fn recording_lookup(seen: Arc<std::sync::Mutex<Vec<String>>>) -> Lookup {
+        Arc::new(move |host: String| {
+            seen.lock().unwrap().push(host.clone());
+            Box::pin(async move { Err(std::io::Error::other(format!("no DNS in tests: {host}"))) })
+        })
+    }
+
+    async fn resolve_with(lookup: Lookup) -> Result<Vec<SocketAddr>, String> {
+        use reqwest::dns::Resolve as _;
+        let name: reqwest::dns::Name = "push.example.test".parse().ok().unwrap();
+        PushResolver { lookup }
+            .resolve(name)
+            .await
+            .map(|addrs| addrs.collect())
+            .map_err(|error| error.to_string())
+    }
+
+    fn test_relay() -> Arc<RwLock<RelayState>> {
+        let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
+        Arc::new(RwLock::new(RelayState::new(
+            "/tmp/push-test".to_string(),
+            change_tx,
+            crate::state::SecurityProfile::private(),
+        )))
+    }
+
+    fn pair(relay: &mut RelayState, device_id: &str, path_scope: Vec<String>) {
+        relay.paired_devices.insert(
+            device_id.to_string(),
+            crate::state::relay::device::PairedDevice {
+                device_id: device_id.to_string(),
+                label: device_id.to_string(),
+                payload_secret: "secret".to_string(),
+                device_verify_key: "verify-key".to_string(),
+                created_at: 0,
+                last_seen_at: None,
+                last_peer_id: None,
+                broker_join_ticket_expires_at: None,
+                path_scope,
+                pairing_broker: None,
+            },
+        );
+    }
+
+    /// A real P-256 receiver key, so `send_one` gets as far as the network.
+    fn receiver_keys() -> PushSubscriptionKeys {
+        let recv = SecretKey::random(&mut OsRng);
+        let mut auth = [0u8; 16];
+        OsRng.fill_bytes(&mut auth);
+        PushSubscriptionKeys {
+            p256dh: URL_SAFE_NO_PAD.encode(recv.public_key().to_encoded_point(false).as_bytes()),
+            auth: URL_SAFE_NO_PAD.encode(auth),
+        }
+    }
+
+    fn stored_subscription(device_id: &str, endpoint: String) -> PushSubscription {
+        let keys = receiver_keys();
+        PushSubscription {
+            endpoint,
+            p256dh: keys.p256dh,
+            auth: keys.auth,
+            device_id: device_id.to_string(),
+            created_at: 0,
+        }
+    }
+
+    /// Any connection counted here means the relay dialed a destination the policy forbids.
+    async fn counting_listener(bind: &str) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dialed = Arc::new(AtomicUsize::new(0));
+        let counter = dialed.clone();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(sock);
+            }
+        });
+        (port, dialed)
+    }
+
+    async fn registered_attacker_endpoint(
+        bind: &str,
+    ) -> (Arc<RwLock<RelayState>>, Arc<std::sync::atomic::AtomicUsize>) {
+        let (port, dialed) = counting_listener(bind).await;
+        let relay = test_relay();
+        {
+            let mut guard = relay.write().await;
+            pair(&mut guard, "phone", Vec::new());
+            guard
+                .register_push_subscription(PushSubscriptionInput {
+                    endpoint: format!("https://notify.attacker.test:{port}/push"),
+                    keys: receiver_keys(),
+                    device_id: Some("phone".to_string()),
+                })
+                .expect("a public-looking https name is accepted at registration");
+        }
+        (relay, dialed)
+    }
+
+    async fn deliver(relay: &Arc<RwLock<RelayState>>, lookup: Lookup) {
+        PushDispatcher {
+            relay: relay.clone(),
+            http: push_client(lookup),
+            vapid: test_vapid(),
+        }
+        .handle(PushJob::new(PushKind::NeedsInput, "t1"))
+        .await;
     }
 
     #[test]
@@ -956,7 +1147,7 @@ mod tests {
             }
         });
 
-        let response = build_push_client()
+        let response = push_client(no_dns())
             .get(format!("http://{addr}/redirect"))
             .send()
             .await
@@ -970,128 +1161,44 @@ mod tests {
 
     #[tokio::test]
     async fn dispatcher_skips_subscription_when_device_revoked_mid_batch() {
-        use std::collections::HashSet;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Mutex;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        // One paired device with TWO subscriptions. Vec order within a device is
-        // deterministic (unlike two devices in a HashMap), so "/s1" is always sent
-        // before "/s2". A local push server revokes the device the instant it
-        // receives the first push — i.e. after the dispatcher has already cloned
-        // both subscriptions, but before the second send — and the same phone
-        // re-pairs at once, which does not bring its subscriptions back. Without the
-        // per-send re-check the dispatcher would still deliver "/s2".
-        let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
-        let relay = Arc::new(RwLock::new(RelayState::new(
-            "/tmp/push-race".to_string(),
-            change_tx,
-            crate::state::SecurityProfile::private(),
-        )));
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let seen: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let revoked = Arc::new(AtomicBool::new(false));
-        {
-            let seen = seen.clone();
-            let revoked = revoked.clone();
+        // One device, two subscriptions, sent in order. When the first send looks up its host
+        // the phone is revoked and re-paired at once, which does not bring its subscriptions
+        // back — after the batch was cloned, before the second send.
+        let relay = test_relay();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let lookup: Lookup = {
             let relay = relay.clone();
-            tokio::spawn(async move {
-                while let Ok((mut sock, _)) = listener.accept().await {
-                    let seen = seen.clone();
-                    let revoked = revoked.clone();
-                    let relay = relay.clone();
-                    tokio::spawn(async move {
-                        let mut buf = [0u8; 4096];
-                        while let Ok(n) = sock.read(&mut buf).await {
-                            if n == 0 {
-                                break;
-                            }
-                            let chunk = &buf[..n];
-                            let mut got = false;
-                            if chunk.windows(3).any(|w| w == b"/s1") {
-                                seen.lock().unwrap().insert("s1".to_string());
-                                got = true;
-                            }
-                            if chunk.windows(3).any(|w| w == b"/s2") {
-                                seen.lock().unwrap().insert("s2".to_string());
-                                got = true;
-                            }
-                            if !got {
-                                continue;
-                            }
-                            // First push received: revoke and re-pair the device mid-batch.
-                            if !revoked.swap(true, Ordering::SeqCst) {
-                                let mut relay = relay.write().await;
-                                let device = relay.paired_devices["phone"].clone();
-                                relay.revoke_paired_device("phone", 1);
-                                relay.paired_devices.insert("phone".to_string(), device);
-                            }
-                            let _ = sock
-                                .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
-                                .await;
-                            let _ = sock.flush().await;
-                        }
-                    });
-                }
-            });
-        }
-
-        // A real P-256 receiver key so send_one encrypts and actually POSTs.
-        let recv = SecretKey::random(&mut OsRng);
-        let p256dh = URL_SAFE_NO_PAD.encode(recv.public_key().to_encoded_point(false).as_bytes());
-        let mut auth = [0u8; 16];
-        OsRng.fill_bytes(&mut auth);
-        let auth = URL_SAFE_NO_PAD.encode(auth);
-        let sub = |path: &str| PushSubscription {
-            endpoint: format!("http://{addr}/{path}"),
-            p256dh: p256dh.clone(),
-            auth: auth.clone(),
-            device_id: "phone".to_string(),
-            created_at: 0,
+            let seen = seen.clone();
+            Arc::new(move |host: String| {
+                let relay = relay.clone();
+                seen.lock().unwrap().push(host);
+                Box::pin(async move {
+                    let mut relay = relay.write().await;
+                    let device = relay.paired_devices["phone"].clone();
+                    relay.revoke_paired_device("phone", 1);
+                    relay.paired_devices.insert("phone".to_string(), device);
+                    Err(std::io::Error::other("no DNS in tests"))
+                })
+            })
         };
-
         {
             let mut guard = relay.write().await;
-            guard.paired_devices.insert(
+            pair(&mut guard, "phone", Vec::new());
+            guard.push_subscriptions.insert(
                 "phone".to_string(),
-                crate::state::relay::device::PairedDevice {
-                    device_id: "phone".to_string(),
-                    label: "Phone".to_string(),
-                    payload_secret: "secret".to_string(),
-                    device_verify_key: "verify-key".to_string(),
-                    created_at: 0,
-                    last_seen_at: None,
-                    last_peer_id: None,
-                    broker_join_ticket_expires_at: None,
-                    path_scope: Vec::new(),
-                    pairing_broker: None,
-                },
+                vec![
+                    stored_subscription("phone", "https://s1.push.test/".to_string()),
+                    stored_subscription("phone", "https://s2.push.test/".to_string()),
+                ],
             );
-            guard
-                .push_subscriptions
-                .insert("phone".to_string(), vec![sub("s1"), sub("s2")]);
         }
 
-        let vapid = test_vapid();
-        let dispatcher = PushDispatcher {
-            relay: relay.clone(),
-            http: build_push_client(),
-            vapid,
-        };
-        dispatcher
-            .handle(PushJob::new(PushKind::NeedsInput, "t1"))
-            .await;
+        deliver(&relay, lookup).await;
 
-        let seen = seen.lock().unwrap().clone();
-        assert!(
-            seen.contains("s1"),
-            "the first subscription should have been delivered"
-        );
-        assert!(
-            !seen.contains("s2"),
-            "the second subscription must be skipped once the device is revoked mid-batch (saw {seen:?})"
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["s1.push.test".to_string()],
+            "the second subscription must be skipped once the device is revoked mid-batch"
         );
     }
 
@@ -1099,10 +1206,6 @@ mod tests {
     // get one for it.
     #[tokio::test]
     async fn a_folder_limited_device_is_not_notified_about_a_session_outside_its_folder() {
-        use std::collections::HashSet;
-        use std::sync::Mutex;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let canonical = |dir: &tempfile::TempDir| {
             std::fs::canonicalize(dir.path())
                 .expect("tempdir canonicalizes")
@@ -1111,56 +1214,7 @@ mod tests {
         };
         let phone_dir = tempfile::TempDir::new().expect("phone tempdir");
         let session_dir = tempfile::TempDir::new().expect("session tempdir");
-        let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
-        let relay = Arc::new(RwLock::new(RelayState::new(
-            canonical(&session_dir),
-            change_tx,
-            crate::state::SecurityProfile::private(),
-        )));
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let seen: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        {
-            let seen = seen.clone();
-            tokio::spawn(async move {
-                while let Ok((mut sock, _)) = listener.accept().await {
-                    let seen = seen.clone();
-                    tokio::spawn(async move {
-                        // The client reuses one connection, so keep reading it until it closes.
-                        let mut buf = [0u8; 4096];
-                        while let Ok(n) = sock.read(&mut buf).await {
-                            if n == 0 {
-                                break;
-                            }
-                            let mut got = false;
-                            for path in ["limited", "inside", "open"] {
-                                let needle = format!("/{path} ");
-                                if buf[..n]
-                                    .windows(needle.len())
-                                    .any(|w| w == needle.as_bytes())
-                                {
-                                    seen.lock().unwrap().insert(path.to_string());
-                                    got = true;
-                                }
-                            }
-                            if !got {
-                                continue;
-                            }
-                            let _ = sock
-                                .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
-                                .await;
-                        }
-                    });
-                }
-            });
-        }
-
-        let recv = SecretKey::random(&mut OsRng);
-        let p256dh = URL_SAFE_NO_PAD.encode(recv.public_key().to_encoded_point(false).as_bytes());
-        let mut auth = [0u8; 16];
-        OsRng.fill_bytes(&mut auth);
-        let auth = URL_SAFE_NO_PAD.encode(auth);
+        let relay = test_relay();
         {
             let mut guard = relay.write().await;
             for (device, path_scope) in [
@@ -1168,55 +1222,276 @@ mod tests {
                 ("inside", vec![canonical(&session_dir)]),
                 ("open", Vec::new()),
             ] {
-                guard.paired_devices.insert(
-                    device.to_string(),
-                    crate::state::relay::device::PairedDevice {
-                        device_id: device.to_string(),
-                        label: device.to_string(),
-                        payload_secret: "secret".to_string(),
-                        device_verify_key: "verify-key".to_string(),
-                        created_at: 0,
-                        last_seen_at: None,
-                        last_peer_id: None,
-                        broker_join_ticket_expires_at: None,
-                        path_scope,
-                        pairing_broker: None,
-                    },
-                );
+                pair(&mut guard, device, path_scope);
                 guard.push_subscriptions.insert(
                     device.to_string(),
-                    vec![PushSubscription {
-                        endpoint: format!("http://{addr}/{device}"),
-                        p256dh: p256dh.clone(),
-                        auth: auth.clone(),
-                        device_id: device.to_string(),
-                        created_at: 0,
-                    }],
+                    vec![stored_subscription(
+                        device,
+                        format!("https://{device}.push.test/"),
+                    )],
                 );
             }
             guard.ensure_runtime_for_thread("t1").current_cwd = canonical(&session_dir);
         }
 
-        let vapid = test_vapid();
-        let dispatcher = PushDispatcher {
-            relay: relay.clone(),
-            http: build_push_client(),
-            vapid,
-        };
-        dispatcher
-            .handle(PushJob::new(PushKind::NeedsInput, "t1"))
-            .await;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        deliver(&relay, recording_lookup(seen.clone())).await;
 
         let seen = seen.lock().unwrap().clone();
-        assert!(seen.contains("open"), "an unlimited device is notified");
         assert!(
-            seen.contains("inside"),
+            seen.contains(&"open.push.test".to_string()),
+            "an unlimited device is notified"
+        );
+        assert!(
+            seen.contains(&"inside.push.test".to_string()),
             "a device limited to this folder is notified"
         );
         assert!(
-            !seen.contains("limited"),
+            !seen.contains(&"limited.push.test".to_string()),
             "the folder-limited device was notified (saw {seen:?})"
         );
+    }
+
+    // The bypass: a name that passes registration and then resolves to the relay's own
+    // network. Loopback stands in for every non-public range; the address table covers each.
+    #[tokio::test]
+    async fn a_registered_name_that_resolves_inward_is_never_dialed() {
+        for (bind, answer) in [
+            ("127.0.0.1:0", &["127.0.0.1"][..]),
+            ("[::1]:0", &["::1"][..]),
+            ("127.0.0.1:0", &["::ffff:127.0.0.1"][..]),
+            // Mixed answer: the inward address is first, so a connector falling back
+            // through the list would reach it before the public one.
+            ("127.0.0.1:0", &["127.0.0.1", "2606:4700:4700::1111"][..]),
+        ] {
+            let (relay, dialed) = registered_attacker_endpoint(bind).await;
+            deliver(&relay, fixed_lookup(answer)).await;
+            assert_eq!(
+                dialed.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "a push to a name answering {answer:?} connected to {bind}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_that_changes_after_registration_is_checked_again_at_delivery() {
+        let (relay, dialed) = registered_attacker_endpoint("127.0.0.1:0").await;
+        let answer = Arc::new(std::sync::Mutex::new(vec![IpAddr::from([
+            216, 239, 36, 55,
+        ])]));
+        let lookup: Lookup = {
+            let answer = answer.clone();
+            Arc::new(move |_host: String| {
+                let answer = answer.lock().unwrap().clone();
+                Box::pin(async move { Ok(answer) })
+            })
+        };
+        assert!(
+            resolve_with(lookup.clone()).await.is_ok(),
+            "the name starts out public"
+        );
+
+        *answer.lock().unwrap() = vec![IpAddr::from([127, 0, 0, 1])];
+        deliver(&relay, lookup).await;
+
+        assert_eq!(
+            dialed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a name that was public earlier must not be dialed once it resolves inward"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_push_resolver_refuses_a_name_if_any_answer_is_not_public() {
+        let public = resolve_with(fixed_lookup(&[
+            "216.239.36.55",
+            "2001:4860:4860::8888",
+            "::ffff:17.188.172.31",
+        ]))
+        .await
+        .expect("all-public answers pass");
+        assert_eq!(
+            public,
+            vec![
+                "216.239.36.55:0".parse::<SocketAddr>().unwrap(),
+                "[2001:4860:4860::8888]:0".parse().unwrap(),
+                "[::ffff:17.188.172.31]:0".parse().unwrap(),
+            ],
+            "port 0 leaves the port to the endpoint URL"
+        );
+
+        for answer in [
+            &["216.239.36.55", "192.168.1.20"][..],
+            &["10.0.0.5", "216.239.36.55"][..],
+            &["2001:4860:4860::8888", "fd00::1"][..],
+            &["216.239.36.55", "::ffff:169.254.169.254"][..],
+        ] {
+            assert!(
+                resolve_with(fixed_lookup(answer)).await.is_err(),
+                "an answer of {answer:?} must refuse the whole name"
+            );
+        }
+        assert!(resolve_with(no_dns()).await.is_err());
+    }
+
+    // One policy for addresses in the URL and addresses DNS returns at send time.
+    #[tokio::test]
+    async fn push_destinations_must_be_public_addresses() {
+        let cases: &[(&str, bool)] = &[
+            ("216.239.36.55", true),
+            ("17.188.172.31", true),
+            ("151.101.205.91", true),
+            ("1.1.1.1", true),
+            ("11.0.0.1", true),
+            ("100.63.255.255", true),
+            ("100.128.0.1", true),
+            ("172.15.255.255", true),
+            ("172.32.0.1", true),
+            ("198.17.255.255", true),
+            ("198.20.0.1", true),
+            ("223.255.255.254", true),
+            ("0.0.0.0", false),
+            ("0.1.2.3", false),
+            ("10.0.0.5", false),
+            ("100.64.0.1", false),
+            ("100.100.100.100", false),
+            ("127.0.0.1", false),
+            ("127.8.8.8", false),
+            ("169.254.169.254", false),
+            ("172.16.0.1", false),
+            ("172.31.255.255", false),
+            ("192.0.0.170", false),
+            ("192.0.2.1", false),
+            ("192.168.1.20", false),
+            ("198.18.0.1", false),
+            ("198.19.255.255", false),
+            ("198.51.100.1", false),
+            ("203.0.113.1", false),
+            ("224.0.0.251", false),
+            ("239.255.255.250", false),
+            ("240.0.0.1", false),
+            ("255.255.255.255", false),
+            ("2606:4700:4700::1111", true),
+            ("2001:4860:4860::8888", true),
+            ("2a00:1450:4001::200e", true),
+            ("::ffff:216.239.36.55", true),
+            ("::", false),
+            ("::1", false),
+            ("::ffff:127.0.0.1", false),
+            ("::ffff:192.168.1.20", false),
+            ("::ffff:169.254.169.254", false),
+            ("::ffff:100.64.0.1", false),
+            ("::127.0.0.1", false),
+            ("64:ff9b::c0a8:114", false),
+            ("100::1", false),
+            ("fc00::1", false),
+            ("fd12:3456::1", false),
+            ("fe80::1", false),
+            ("fec0::1", false),
+            ("ff02::1", false),
+            ("2001::1", false),
+            ("2001:2::1", false),
+            ("2001:db8::1", false),
+            ("2002:c0a8:114::1", false),
+            ("3fff::1", false),
+        ];
+        for &(ip, public) in cases {
+            assert_eq!(
+                resolve_with(fixed_lookup(&[ip])).await.is_ok(),
+                public,
+                "a name resolving to {ip}"
+            );
+            let literal = match ip.parse::<IpAddr>().unwrap() {
+                IpAddr::V4(_) => format!("https://{ip}/push"),
+                IpAddr::V6(_) => format!("https://[{ip}]/push"),
+            };
+            assert_eq!(is_acceptable_push_endpoint(&literal), public, "{literal}");
+        }
+    }
+
+    // A stored row may predate the current rules, so registration is not the last check.
+    #[tokio::test]
+    async fn stored_endpoints_are_rechecked_before_every_send() {
+        let (port, dialed) = counting_listener("127.0.0.1:0").await;
+        let relay = test_relay();
+        {
+            let mut guard = relay.write().await;
+            pair(&mut guard, "phone", Vec::new());
+            guard.push_subscriptions.insert(
+                "phone".to_string(),
+                vec![
+                    stored_subscription("phone", format!("https://127.0.0.1:{port}/old")),
+                    stored_subscription("phone", "http://plain.push.test/old".to_string()),
+                ],
+            );
+        }
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        deliver(&relay, recording_lookup(seen.clone())).await;
+
+        assert_eq!(
+            dialed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a stored loopback literal was dialed"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "a stored plain-http endpoint was sent to"
+        );
+        assert!(
+            relay.read().await.push_subscriptions.is_empty(),
+            "endpoints that can never pass are pruned"
+        );
+    }
+
+    const PROXY_PROBE_ENV: &str = "SEALWIRE_PUSH_PROXY_PROBE";
+
+    // A proxy resolves the push host itself, where the resolver check never sees it.
+    #[tokio::test]
+    async fn push_requests_ignore_proxy_settings_in_the_environment() {
+        let (port, dialed) = counting_listener("127.0.0.1:0").await;
+        let proxy = format!("http://127.0.0.1:{port}");
+        let probe = format!(
+            "{}::push_proxy_probe",
+            module_path!().split_once("::").unwrap().1
+        );
+        // Proxy settings are read from the process environment, so the probe runs in a child.
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([probe.as_str(), "--exact", "--ignored"])
+            .env(PROXY_PROBE_ENV, "1")
+            .env("HTTPS_PROXY", &proxy)
+            .env("ALL_PROXY", &proxy)
+            .env_remove("https_proxy")
+            .env_remove("all_proxy")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .output()
+            .await
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "the probe did not run: {stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            dialed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the push client sent its request through HTTPS_PROXY"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "run by push_requests_ignore_proxy_settings_in_the_environment"]
+    async fn push_proxy_probe() {
+        if std::env::var_os(PROXY_PROBE_ENV).is_none() {
+            return;
+        }
+        let _ = push_client(no_dns())
+            .post("https://notify.attacker.test/push")
+            .send()
+            .await;
     }
 
     #[test]

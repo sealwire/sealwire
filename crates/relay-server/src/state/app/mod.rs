@@ -589,10 +589,12 @@ impl AppState {
             let relay = relay.read().await;
             load_or_generate_vapid(&relay.usage_store)
         };
-        match vapid {
-            Ok(vapid) => {
-                let public_key = vapid.public_b64url().to_string();
-                let push_tx = PushDispatcher::spawn(relay.clone(), vapid);
+        let push = vapid.and_then(|vapid| {
+            let public_key = vapid.public_b64url().to_string();
+            PushDispatcher::spawn(relay.clone(), vapid).map(|push_tx| (push_tx, public_key))
+        });
+        match push {
+            Ok((push_tx, public_key)) => {
                 {
                     let mut relay = relay.write().await;
                     relay.set_push_runtime(push_tx, public_key);
