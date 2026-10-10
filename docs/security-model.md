@@ -9,7 +9,7 @@ summary. See [`DEPLOYMENT.md`](../DEPLOYMENT.md) for setup and pairing, and
 - Remote clients connect through SealWire Cloud or a self-hosted broker.
 - Remote session content and actions are always end-to-end encrypted. The
   broker routes ciphertext; it does not receive plaintext session content.
-- `private` is the only security mode. `RELAY_SECURITY_MODE=managed` is rejected.
+- `private` is the only security mode.
 
 ## Local access
 
