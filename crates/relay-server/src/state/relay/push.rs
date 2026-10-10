@@ -38,7 +38,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::{thread_status_is_working, RelayState};
 use crate::protocol::SessionSnapshot;
@@ -485,6 +485,7 @@ pub(crate) fn is_acceptable_push_endpoint(endpoint: &str) -> bool {
 
 /// Whether a push may be sent to `ip`: globally routed unicast only. Anything the
 /// relay's own computer could reach privately (LAN, VPN, carrier NAT, cloud metadata) is out.
+/// 198.18.0.0/15 stays allowed: Clash/Surge "fake-ip" mode answers every name from it.
 fn is_public_address(ip: IpAddr) -> bool {
     match ip.to_canonical() {
         IpAddr::V4(ip) => {
@@ -497,8 +498,7 @@ fn is_public_address(ip: IpAddr) -> bool {
                 || a >= 224
                 // 100.64.0.0/10: carrier-grade NAT, and Tailscale's tailnet addresses.
                 || (a == 100 && (b & 0xc0) == 64)
-                || (a == 192 && b == 0 && c == 0)
-                || (a == 198 && (b & 0xfe) == 18))
+                || (a == 192 && b == 0 && c == 0))
         }
         IpAddr::V6(ip) => {
             let [s0, s1, ..] = ip.segments();
@@ -626,10 +626,14 @@ impl PushDispatcher {
         relay: Arc<RwLock<RelayState>>,
         vapid: VapidKeys,
     ) -> Result<mpsc::UnboundedSender<PushJob>, String> {
+        let through_proxy = proxy_configured();
+        if through_proxy {
+            info!("web push goes through the proxy in the environment; push addresses are not checked");
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         let dispatcher = Self {
             relay,
-            http: build_push_client(system_lookup())?,
+            http: build_push_client(system_lookup(), through_proxy)?,
             vapid,
         };
         tokio::spawn(dispatcher.run(rx));
@@ -788,17 +792,36 @@ impl reqwest::dns::Resolve for PushResolver {
     }
 }
 
-/// HTTP client for sending pushes. A per-request timeout stops a hung push
-/// endpoint wedging the serial dispatch queue. Redirects and proxies are off
-/// because either would reach a host [`PushResolver`] never checked.
-fn build_push_client(lookup: Lookup) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+/// HTTP client for sending pushes. The timeout stops a hung endpoint wedging the serial
+/// queue; redirects are off because they would reach a host [`PushResolver`] never checked.
+/// A proxy resolves the host itself, so proxy users keep the old unchecked path, and their
+/// proxy's own host (often loopback or LAN) must not go through [`PushResolver`] either.
+fn build_push_client(lookup: Lookup, through_proxy: bool) -> Result<reqwest::Client, String> {
+    let builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .dns_resolver(Arc::new(PushResolver { lookup }))
+        .redirect(reqwest::redirect::Policy::none());
+    let builder = if through_proxy {
+        builder
+    } else {
+        builder
+            .no_proxy()
+            .dns_resolver(Arc::new(PushResolver { lookup }))
+    };
+    builder
         .build()
         .map_err(|error| format!("failed to build the push client: {error}"))
+}
+
+/// Mirrors how reqwest picks a proxy for an https URL: the first of each pair that is set.
+fn proxy_configured() -> bool {
+    [["HTTPS_PROXY", "https_proxy"], ["ALL_PROXY", "all_proxy"]]
+        .iter()
+        .any(|names| {
+            names
+                .iter()
+                .find_map(|name| std::env::var(name).ok())
+                .is_some_and(|value| !value.is_empty())
+        })
 }
 
 fn now() -> u64 {
@@ -849,7 +872,7 @@ mod tests {
     }
 
     fn push_client(lookup: Lookup) -> reqwest::Client {
-        build_push_client(lookup).expect("push client")
+        build_push_client(lookup, false).expect("push client")
     }
 
     fn fixed_lookup(answer: &[&str]) -> Lookup {
@@ -932,7 +955,6 @@ mod tests {
         }
     }
 
-    /// Any connection counted here means the relay dialed a destination the policy forbids.
     async fn counting_listener(bind: &str) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
@@ -1364,8 +1386,8 @@ mod tests {
             ("192.0.0.170", false),
             ("192.0.2.1", false),
             ("192.168.1.20", false),
-            ("198.18.0.1", false),
-            ("198.19.255.255", false),
+            ("198.18.0.1", true),
+            ("198.19.255.255", true),
             ("198.51.100.1", false),
             ("203.0.113.1", false),
             ("224.0.0.251", false),
@@ -1447,11 +1469,12 @@ mod tests {
 
     const PROXY_PROBE_ENV: &str = "SEALWIRE_PUSH_PROXY_PROBE";
 
-    // A proxy resolves the push host itself, where the resolver check never sees it.
+    // Users who need a proxy to reach the push services keep working, including a proxy
+    // named by a host that resolves to a loopback or LAN address.
     #[tokio::test]
-    async fn push_requests_ignore_proxy_settings_in_the_environment() {
+    async fn push_requests_go_through_a_proxy_set_in_the_environment() {
         let (port, dialed) = counting_listener("127.0.0.1:0").await;
-        let proxy = format!("http://127.0.0.1:{port}");
+        let proxy = format!("http://localhost:{port}");
         let probe = format!(
             "{}::push_proxy_probe",
             module_path!().split_once("::").unwrap().1
@@ -1461,8 +1484,8 @@ mod tests {
             .args([probe.as_str(), "--exact", "--ignored"])
             .env(PROXY_PROBE_ENV, "1")
             .env("HTTPS_PROXY", &proxy)
-            .env("ALL_PROXY", &proxy)
             .env_remove("https_proxy")
+            .env_remove("ALL_PROXY")
             .env_remove("all_proxy")
             .env_remove("NO_PROXY")
             .env_remove("no_proxy")
@@ -1475,20 +1498,20 @@ mod tests {
             "the probe did not run: {stdout}{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(
-            dialed.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "the push client sent its request through HTTPS_PROXY"
+        assert!(
+            dialed.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the push did not go through the proxy in HTTPS_PROXY"
         );
     }
 
     #[tokio::test]
-    #[ignore = "run by push_requests_ignore_proxy_settings_in_the_environment"]
+    #[ignore = "run by push_requests_go_through_a_proxy_set_in_the_environment"]
     async fn push_proxy_probe() {
         if std::env::var_os(PROXY_PROBE_ENV).is_none() {
             return;
         }
-        let _ = push_client(no_dns())
+        let _ = build_push_client(no_dns(), proxy_configured())
+            .expect("push client")
             .post("https://notify.attacker.test/push")
             .send()
             .await;
