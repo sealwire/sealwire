@@ -2747,9 +2747,12 @@ async fn publish_snapshot(writer: &BrokerWriter, state: &AppState) -> Result<(),
     );
     let mut messages = Vec::new();
     for target in targets {
-        let scoped = state
-            .snapshot_for_device(&compacted, &target.device_id)
-            .await;
+        let Some(scoped) = state
+            .snapshot_for_secret(&compacted, &target.device_id, &target.payload_secret)
+            .await
+        else {
+            continue;
+        };
         let envelope = encrypt_json(
             &target.payload_secret,
             scoped.as_ref().unwrap_or(&compacted),

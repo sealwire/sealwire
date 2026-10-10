@@ -170,6 +170,21 @@ impl AppState {
             .await
     }
 
+    /// Undoes a failed approval's broker credential. A same-key re-pair resolves to a device
+    /// that is still paired, and revoking by its id would also cut off the credential it uses.
+    async fn roll_back_pairing_credential(&self, broker: &BrokerConfig, device_id: &str) {
+        if self
+            .relay
+            .read()
+            .await
+            .paired_devices
+            .contains_key(device_id)
+        {
+            return;
+        }
+        let _ = broker.revoke_device_credential(device_id).await;
+    }
+
     pub(crate) async fn decide_pairing_request_with(
         &self,
         broker: &BrokerConfig,
@@ -226,11 +241,8 @@ impl AppState {
             {
                 Ok(grant) => grant,
                 Err(error) => {
-                    // Roll back THIS attempt's device credential (exclusive by
-                    // claim, so it cannot be anyone else's) and release the claim.
-                    if let Some(request) = claimed_request.as_ref() {
-                        let _ = broker.revoke_device_credential(&request.device_id).await;
-                    }
+                    self.roll_back_pairing_credential(broker, &request.device_id)
+                        .await;
                     restore_claim(claimed_request).await;
                     return Err(error);
                 }
@@ -256,11 +268,8 @@ impl AppState {
             Ok(result) => result,
             Err(error) => {
                 drop(relay);
-                // The pairing itself failed (e.g. ticket expired); revoke THIS
-                // attempt's freshly-issued credential — the claim guarantees it
-                // is not some other approval's live grant.
                 if let Some(device_id) = claimed_device_id.as_ref() {
-                    let _ = broker.revoke_device_credential(device_id).await;
+                    self.roll_back_pairing_credential(broker, device_id).await;
                 }
                 return Err(error);
             }

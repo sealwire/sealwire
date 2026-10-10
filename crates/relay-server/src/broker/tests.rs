@@ -751,6 +751,17 @@ async fn broker_config_public_mode_uses_control_plane_tokens() {
 const REAL_BROKER_ISSUER: &str = "public-broker-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d";
 
 async fn spawn_real_public_broker(registrations_json: &str) -> std::net::SocketAddr {
+    spawn_real_public_broker_and_plane(registrations_json)
+        .await
+        .0
+}
+
+async fn spawn_real_public_broker_and_plane(
+    registrations_json: &str,
+) -> (
+    std::net::SocketAddr,
+    relay_broker::public_control::PublicControlPlane,
+) {
     let state_path = temp_registration_path("agent-relay-real-broker-state");
     let plane = relay_broker::public_control::PublicControlPlane::from_parts(
         Some(REAL_BROKER_ISSUER.to_string()),
@@ -770,7 +781,7 @@ async fn spawn_real_public_broker(registrations_json: &str) -> std::net::SocketA
     let app = relay_broker::app_with_access_strategy_public_control_and_origin_guard(
         relay_broker::BrokerState::default(),
         relay_broker::standard_public_access_strategy(),
-        plane,
+        plane.clone(),
         relay_broker::OriginGuard::from_config(None, None, false).expect("origin guard"),
     )
     .await;
@@ -782,7 +793,121 @@ async fn spawn_real_public_broker(registrations_json: &str) -> std::net::SocketA
         .await
         .expect("real broker should serve");
     });
-    address
+    (address, plane)
+}
+
+#[tokio::test]
+async fn a_failed_re_pair_keeps_the_still_paired_phones_broker_credential() {
+    let seed = [21_u8; 32];
+    let verify_key = STANDARD.encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+    let (relay_id, refresh_token, room, peer) = (
+        "relay-re-pair",
+        "relay-refresh-re-pair",
+        "room-re-pair",
+        "relay-peer-re-pair",
+    );
+    let registrations = serde_json::json!([{
+        "relay_id": relay_id,
+        "broker_room_id": room,
+        "refresh_token": refresh_token,
+        "relay_verify_key": verify_key,
+    }]);
+    let (address, plane) = spawn_real_public_broker_and_plane(&registrations.to_string()).await;
+    let control_url = format!("http://{address}");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registration_path = dir.path().join("sealwire.db");
+    let config = ready_public_broker_config(
+        &format!("ws://{address}"),
+        &control_url,
+        registration_path.to_str().expect("state database path"),
+        seed,
+        relay_id,
+        refresh_token,
+        room,
+        peer,
+    )
+    .await;
+    save_public_relay_registration(
+        &registration_path,
+        &control_url,
+        &PublicRelayRegistration {
+            relay_id: relay_id.to_string(),
+            broker_room_id: room.to_string(),
+            relay_refresh_token: refresh_token.to_string(),
+        },
+    )
+    .await
+    .expect("registration should save");
+    let state = broker_test_state();
+    let phone_key = STANDARD.encode(
+        SigningKey::from_bytes(&[23_u8; 32])
+            .verifying_key()
+            .to_bytes(),
+    );
+    let pair = |peer_id: &'static str| {
+        let (state, config, phone_key) = (state.clone(), config.clone(), phone_key.clone());
+        async move {
+            let ticket = state
+                .start_pairing_with(
+                    &config,
+                    crate::protocol::PairingStartInput {
+                        expires_in_seconds: Some(600),
+                        path_scope: None,
+                    },
+                )
+                .await
+                .expect("QR");
+            state
+                .complete_pairing(
+                    &ticket.pairing_id,
+                    Some("phone".to_string()),
+                    Some("Phone".to_string()),
+                    phone_key.clone(),
+                    peer_id,
+                )
+                .await
+                .expect("request registers");
+            let decided = state
+                .decide_pairing_request_with(
+                    &config,
+                    &ticket.pairing_id,
+                    crate::protocol::PairingDecisionInput {
+                        decision: crate::protocol::PairingDecision::Approve,
+                    },
+                )
+                .await;
+            (ticket.pairing_id, decided)
+        }
+    };
+    let (first_pairing, first) = pair("surface-first").await;
+    first.expect("first approval");
+    let first_result = state
+        .completed_pairing_result(&first_pairing, &phone_key, "surface-first")
+        .await
+        .expect("result")
+        .expect("completed");
+    let phone = first_result.device.expect("approved device").device_id;
+    let phone_refresh_token = first_result
+        .device_refresh_token
+        .expect("public mode hands the phone a refresh token");
+    plane
+        .issue_device_ws_token(&phone_refresh_token)
+        .await
+        .expect("the paired phone can reach the broker");
+    super::auth::TEST_FAIL_CLIENT_GRANTS.with(|fail| fail.set(true));
+    let (_, second) = pair("surface-second").await;
+    super::auth::TEST_FAIL_CLIENT_GRANTS.with(|fail| fail.set(false));
+
+    assert!(
+        second.is_err(),
+        "the re-pair should fail at the client grant"
+    );
+    assert!(state.paired_device_payload_secret(&phone).await.is_ok());
+    let still_reachable = plane.issue_device_ws_token(&phone_refresh_token).await;
+    assert!(
+        still_reachable.is_ok(),
+        "the phone is still paired but lost its broker credential: {still_reachable:?}"
+    );
 }
 
 async fn ready_public_broker_config(
@@ -7726,6 +7851,12 @@ async fn published_snapshot_payloads(state: &AppState) -> Vec<serde_json::Value>
     publish_snapshot(&writer, state)
         .await
         .expect("snapshot publish should succeed");
+    drain_published_payloads(&mut now_rx)
+}
+
+fn drain_published_payloads(
+    now_rx: &mut tokio::sync::mpsc::Receiver<Message>,
+) -> Vec<serde_json::Value> {
     let mut payloads = Vec::new();
     while let Ok(message) = now_rx.try_recv() {
         let Message::Text(text) = message else {
@@ -7776,7 +7907,7 @@ async fn private_snapshot_is_sealed_for_the_live_paired_surface_only() {
     assert_eq!(snapshot["broker_can_read_content"], false);
 }
 
-fn canonical(dir: &tempfile::TempDir) -> String {
+pub(super) fn canonical(dir: &tempfile::TempDir) -> String {
     std::fs::canonicalize(dir.path())
         .expect("tempdir canonicalizes")
         .to_string_lossy()
@@ -7786,6 +7917,15 @@ fn canonical(dir: &tempfile::TempDir) -> String {
 /// An online phone limited to `phone_dir`, while the active session runs in
 /// `session_dir` with a reply on screen and a command waiting for approval.
 pub(super) async fn folder_limited_phone_state(phone_dir: &str, session_dir: &str) -> AppState {
+    folder_limited_phone_state_and_relay(phone_dir, session_dir)
+        .await
+        .0
+}
+
+pub(super) async fn folder_limited_phone_state_and_relay(
+    phone_dir: &str,
+    session_dir: &str,
+) -> (AppState, Arc<RwLock<RelayState>>) {
     let (change_tx, _) = watch::channel(0_u64);
     let relay = Arc::new(RwLock::new(RelayState::new(
         "/tmp/broker-folder-limit".to_string(),
@@ -7849,7 +7989,7 @@ pub(super) async fn folder_limited_phone_state(phone_dir: &str, session_dir: &st
             supports_session_scope: false,
         });
     }
-    let state = AppState::from_parts(relay, HashMap::new(), change_tx);
+    let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
     state
         .replace_online_surface_peers(["surface-a".to_string()])
         .await;
@@ -7857,7 +7997,7 @@ pub(super) async fn folder_limited_phone_state(phone_dir: &str, session_dir: &st
         .mark_remote_device_seen("phone-1", "surface-a", None)
         .await
         .expect("paired phone should bind to its peer");
-    state
+    (state, relay)
 }
 
 async fn published_snapshot_for_phone(state: &AppState) -> serde_json::Value {
@@ -7901,22 +8041,71 @@ async fn a_folder_limited_phone_still_sees_a_session_inside_its_folder() {
 }
 
 // Targets are read before the snapshot is scoped, so a phone revoked in between is no
-// longer on record. It must get what a limited phone gets, not everything.
+// longer on record. It must get nothing, not everything.
 #[tokio::test]
-async fn a_phone_no_longer_on_record_gets_nothing_outside_its_folder() {
+async fn a_phone_no_longer_on_record_gets_no_snapshot() {
     let phone_dir = tempfile::TempDir::new().expect("phone tempdir");
     let session_dir = tempfile::TempDir::new().expect("session tempdir");
-    let state = folder_limited_phone_state(&canonical(&phone_dir), &canonical(&session_dir)).await;
+    let (state, relay) =
+        folder_limited_phone_state_and_relay(&canonical(&phone_dir), &canonical(&session_dir))
+            .await;
     let snapshot = state.snapshot().await;
 
-    let scoped = state
-        .snapshot_for_device(&snapshot, "revoked-phone")
+    let sent = relay
+        .read()
         .await
-        .expect("an unknown device is scoped, not waved through");
+        .snapshot_for_secret(&snapshot, "revoked-phone", "secret");
 
-    let text = serde_json::to_string(&scoped).expect("snapshot serializes");
-    assert!(!text.contains("the secret reply"), "transcript leaked");
-    assert!(scoped.pending_approvals.is_empty(), "approval leaked");
+    assert!(sent.is_none(), "an unknown device was sent a snapshot");
+}
+
+/// What a re-pair does to phone-1: a new secret, and here a limit that reaches `session-1`.
+pub(super) fn re_pair_phone_1(relay: &mut RelayState, path_scope: &str) {
+    let phone = relay
+        .paired_devices
+        .get_mut("phone-1")
+        .expect("phone-1 is paired");
+    phone.payload_secret = "re-paired-secret".to_string();
+    phone.path_scope = vec![path_scope.to_string()];
+    assert!(relay.device_reaches_thread("session-1", "phone-1"));
+}
+
+// A target read before a re-pair holds the old secret, so it must not be sent a snapshot
+// scoped by the re-paired device's wider limit.
+#[tokio::test]
+async fn a_snapshot_target_read_before_a_re_pair_gets_nothing_scoped_by_the_re_pair() {
+    let phone_dir = tempfile::TempDir::new().expect("phone tempdir");
+    let session_dir = tempfile::TempDir::new().expect("session tempdir");
+    let session_cwd = canonical(&session_dir);
+    let (state, relay) =
+        folder_limited_phone_state_and_relay(&canonical(&phone_dir), &session_cwd).await;
+    let (writer, mut now_rx, _train_rx) = super::writer::test_writer();
+
+    // Holding the lock parks the publish on its target read, so the re-pair queued behind
+    // it lands after the targets are read and before the snapshot is scoped.
+    let blocker = relay.write().await;
+    let mut publish = Box::pin(publish_snapshot(&writer, &state));
+    assert!(futures_util::poll!(&mut publish).is_pending());
+    let mut re_pair = Box::pin(relay.write());
+    assert!(futures_util::poll!(&mut re_pair).is_pending());
+    drop(blocker);
+    assert!(futures_util::poll!(&mut publish).is_pending());
+    re_pair_phone_1(&mut *re_pair.await, &session_cwd);
+    publish.await.expect("snapshot publish should succeed");
+
+    for payload in drain_published_payloads(&mut now_rx) {
+        for message in payload["messages"].as_array().expect("messages") {
+            let envelope: EncryptedEnvelope =
+                serde_json::from_value(message["payload"]["envelope"].clone())
+                    .expect("envelope deserializes");
+            if let Ok(snapshot) = decrypt_json::<serde_json::Value>("secret", &envelope) {
+                assert!(
+                    !snapshot.to_string().contains("the secret reply"),
+                    "the old secret opened content only the re-paired limit allows"
+                );
+            }
+        }
+    }
 }
 
 #[test]

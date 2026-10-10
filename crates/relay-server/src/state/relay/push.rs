@@ -634,11 +634,15 @@ impl PushDispatcher {
         let payload = build_payload_bytes(&job);
         let mut gone = Vec::new();
         for subscription in subscriptions {
-            // Re-checked right before sending: a device revoked or narrowed between the
-            // clone above and this send must not receive one last notification.
+            // Re-checked right before sending: a revoke since the clone dropped this
+            // subscription (a re-pair does not restore it), and a narrowed scope may exclude it.
             {
                 let relay = self.relay.read().await;
-                if !relay.is_device_paired(&subscription.device_id)
+                let still_stored = relay
+                    .push_subscriptions
+                    .get(&subscription.device_id)
+                    .is_some_and(|stored| stored.contains(&subscription));
+                if !still_stored
                     || !relay.device_reaches_thread(&job.thread_id, &subscription.device_id)
                 {
                     continue;
@@ -975,9 +979,9 @@ mod tests {
         // deterministic (unlike two devices in a HashMap), so "/s1" is always sent
         // before "/s2". A local push server revokes the device the instant it
         // receives the first push — i.e. after the dispatcher has already cloned
-        // both subscriptions, but before the second send. Without the per-send
-        // pairing re-check the dispatcher would still deliver "/s2"; with it, the
-        // second send is skipped and the server only ever sees "/s1".
+        // both subscriptions, but before the second send — and the same phone
+        // re-pairs at once, which does not bring its subscriptions back. Without the
+        // per-send re-check the dispatcher would still deliver "/s2".
         let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
         let relay = Arc::new(RwLock::new(RelayState::new(
             "/tmp/push-race".to_string(),
@@ -1017,9 +1021,12 @@ mod tests {
                             if !got {
                                 continue;
                             }
-                            // First push received: revoke the device mid-batch.
+                            // First push received: revoke and re-pair the device mid-batch.
                             if !revoked.swap(true, Ordering::SeqCst) {
-                                relay.write().await.revoke_paired_device("phone", 1);
+                                let mut relay = relay.write().await;
+                                let device = relay.paired_devices["phone"].clone();
+                                relay.revoke_paired_device("phone", 1);
+                                relay.paired_devices.insert("phone".to_string(), device);
                             }
                             let _ = sock
                                 .write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")

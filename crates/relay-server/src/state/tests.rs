@@ -2881,7 +2881,7 @@ fn pairing_ticket_registers_remote_device_and_persists_payload_secret() {
         .consume_pairing_ticket(
             &ticket.pairing_id,
             &ticket.pairing_secret,
-            Some("My Phone".to_string()),
+            "my-phone",
             Some("Primary Phone".to_string()),
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -2928,7 +2928,7 @@ fn claim_challenge_keeps_payload_secret_stable_and_invalidates_old_challenge() {
         .consume_pairing_ticket(
             &ticket.pairing_id,
             &ticket.pairing_secret,
-            Some("My Phone".to_string()),
+            "my-phone",
             Some("Primary Phone".to_string()),
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -2970,7 +2970,7 @@ fn broker_targets_require_online_surface_presence() {
         .consume_pairing_ticket(
             &ticket.pairing_id,
             &ticket.pairing_secret,
-            Some("My Phone".to_string()),
+            "my-phone",
             Some("Primary Phone".to_string()),
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -3051,7 +3051,7 @@ fn broker_disconnect_clears_online_surface_targets() {
         .consume_pairing_ticket(
             &ticket.pairing_id,
             &ticket.pairing_secret,
-            Some("My Phone".to_string()),
+            "my-phone",
             Some("Primary Phone".to_string()),
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -3090,7 +3090,7 @@ fn reconnected_broker_sessions_require_device_authentication_before_delivery() {
         .consume_pairing_ticket(
             &ticket.pairing_id,
             &ticket.pairing_secret,
-            Some("My Phone".to_string()),
+            "my-phone",
             Some("Primary Phone".to_string()),
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -3149,7 +3149,7 @@ fn claim_challenge_enforces_peer_binding_and_replaces_older_challenges() {
         .consume_pairing_ticket(
             &ticket.pairing_id,
             &ticket.pairing_secret,
-            Some("My Phone".to_string()),
+            "my-phone",
             Some("Primary Phone".to_string()),
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -3306,7 +3306,7 @@ fn pairing_rejects_invalid_secret_and_mints_a_fresh_payload_secret() {
         .consume_pairing_ticket(
             &ticket.pairing_id,
             "wrong-secret",
-            Some("phone-2".to_string()),
+            "phone-2",
             None,
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -3327,7 +3327,7 @@ fn pairing_rejects_invalid_secret_and_mints_a_fresh_payload_secret() {
         .consume_pairing_ticket(
             &replacement.pairing_id,
             &replacement.pairing_secret,
-            Some("phone-2".to_string()),
+            "phone-2",
             None,
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -3401,7 +3401,7 @@ fn revoking_paired_device_prunes_its_push_subscriptions() {
         .consume_pairing_ticket(
             &ticket.pairing_id,
             &ticket.pairing_secret,
-            Some("tablet".to_string()),
+            "tablet",
             Some("Tablet".to_string()),
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -3439,9 +3439,9 @@ fn clearing_device_history_drops_only_revoked_and_rejected_records() {
             .consume_pairing_ticket(
                 &ticket.pairing_id,
                 &ticket.pairing_secret,
+                id,
                 Some(id.to_string()),
-                Some(id.to_string()),
-                TEST_VERIFY_KEY_B64.to_string(),
+                format!("verify-key-{id}"),
                 None,
                 &format!("surface-{id}"),
                 100,
@@ -3517,7 +3517,7 @@ fn revoking_paired_device_removes_it() {
         .consume_pairing_ticket(
             &ticket.pairing_id,
             &ticket.pairing_secret,
-            Some("tablet".to_string()),
+            "tablet",
             Some("Tablet".to_string()),
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -4366,7 +4366,10 @@ fn pairing_request_waits_for_local_approval_before_device_is_created() {
         )
         .expect("pairing request should register");
 
-    assert_eq!(request.device_id, "phone-approve");
+    assert_eq!(
+        request.device_id,
+        key_device_id("verify-key-1", TEST_BROKER_ORIGIN)
+    );
     assert_eq!(relay.paired_devices.len(), 0);
     assert_eq!(relay.pending_pairing_requests.len(), 1);
 
@@ -4384,8 +4387,283 @@ fn pairing_request_waits_for_local_approval_before_device_is_created() {
             .device
             .as_ref()
             .map(|device| device.device_id.as_str()),
-        Some("phone-approve")
+        Some(key_device_id("verify-key-1", TEST_BROKER_ORIGIN).as_str())
     );
+}
+
+fn request_test_pairing(
+    relay: &mut RelayState,
+    requested: Option<&str>,
+    verify_key: &str,
+    now: u64,
+) -> crate::protocol::PendingPairingRequestView {
+    let ticket = relay
+        .prepare_pairing_ticket(Some(60), Vec::new())
+        .expect("pairing ticket should prepare");
+    relay
+        .install_pairing_ticket(&ticket, unix_now())
+        .expect("pairing ticket should install");
+    relay
+        .register_pairing_request(
+            &ticket.pairing_id,
+            requested.map(str::to_string),
+            None,
+            &format!("surface-{now}"),
+            verify_key.to_string(),
+            now,
+        )
+        .expect("pairing request should register")
+}
+
+fn pair_test_device(relay: &mut RelayState, requested: &str, verify_key: &str, now: u64) -> String {
+    let request = request_test_pairing(relay, Some(requested), verify_key, now);
+    relay
+        .decide_pairing_request(&request.pairing_id, true, None, now)
+        .expect("approval should complete pairing")
+        .device
+        .expect("approved pairing should return a device")
+        .device_id
+}
+
+/// What `issue_test_pairing_ticket`'s broker address reduces to.
+const TEST_BROKER_ORIGIN: &str = "ws://127.0.0.1:8789";
+
+fn key_device_id(verify_key: &str, broker_origin: &str) -> String {
+    format!(
+        "mobile-{}",
+        relay_util::sha256_hex(&format!("{verify_key}\n{broker_origin}"))
+    )
+}
+
+/// Relay roots holding an `allowed` and a `forbidden` folder; the TempDir must outlive them.
+fn allowed_and_forbidden_roots(relay: &mut RelayState) -> (tempfile::TempDir, String, String) {
+    let root = tempfile::TempDir::new().expect("relay root");
+    let allowed = normalize_cwd(&root.path().join("allowed").to_string_lossy());
+    let forbidden = normalize_cwd(&root.path().join("forbidden").to_string_lossy());
+    std::fs::create_dir_all(&allowed).expect("allowed dir");
+    std::fs::create_dir_all(&forbidden).expect("forbidden dir");
+    relay.allowed_roots = vec![normalize_cwd(&root.path().to_string_lossy())];
+    (root, allowed, forbidden)
+}
+
+#[test]
+fn a_pairing_phone_gets_the_id_derived_from_its_key_whatever_it_asks_for() {
+    for requested in [None, Some("phone-1"), Some("mobile-abcdef")] {
+        let mut relay = test_state();
+        let victim = pair_test_device(&mut relay, "victim", "victim-key", 90);
+        let request = request_test_pairing(&mut relay, requested, "phone-key", 100);
+        assert_eq!(
+            request.device_id,
+            key_device_id("phone-key", ""),
+            "{requested:?}"
+        );
+        assert_eq!(request.device_id.len(), 71);
+        // A retry over a fresh peer may ask again, here for a paired phone's id.
+        relay
+            .register_pairing_request(
+                &request.pairing_id,
+                Some(victim.clone()),
+                None,
+                "surface-retry",
+                "phone-key".to_string(),
+                100,
+            )
+            .expect("the same phone may retry");
+
+        let device = relay
+            .decide_pairing_request(&request.pairing_id, true, None, 101)
+            .expect("approval should complete pairing")
+            .device
+            .expect("approved pairing should return a device");
+        assert_eq!(device.device_id, request.device_id);
+        assert_eq!(
+            relay.paired_devices[&victim].device_verify_key,
+            "victim-key"
+        );
+    }
+}
+
+#[test]
+fn another_key_cannot_take_an_id_even_after_its_history_is_cleared() {
+    let mut relay = test_state();
+    let first = pair_test_device(&mut relay, "phone", "first-key", 100);
+    assert!(relay.revoke_paired_device(&first, 200));
+    relay.clear_device_history();
+    assert!(relay.device_records.is_empty());
+
+    let second = pair_test_device(&mut relay, &first, "second-key", 300);
+
+    assert_eq!(second, key_device_id("second-key", ""));
+}
+
+#[test]
+fn pairing_with_a_taken_device_id_and_another_key_cannot_replace_that_device() {
+    let mut relay = test_state();
+    let victim = pair_test_device(&mut relay, "victim-phone", "victim-key", 100);
+    let victim_secret = relay
+        .paired_device_payload_secret(&victim)
+        .expect("victim should be paired");
+
+    let newcomer_id = pair_test_device(&mut relay, &victim, "attacker-key", 200);
+
+    assert_ne!(newcomer_id, victim);
+    assert_eq!(
+        relay.paired_devices[&victim].device_verify_key,
+        "victim-key"
+    );
+    assert_eq!(
+        relay.paired_device_payload_secret(&victim).as_deref(),
+        Ok(victim_secret.as_str())
+    );
+}
+
+#[test]
+fn a_retried_request_that_asks_for_a_paired_phones_id_keeps_its_own() {
+    let mut relay = test_state();
+    let victim = pair_test_device(&mut relay, "victim-phone", "victim-key", 100);
+    let victim_secret = relay
+        .paired_device_payload_secret(&victim)
+        .expect("victim should be paired");
+    let request = request_test_pairing(&mut relay, None, "phone-key", 200);
+
+    relay
+        .register_pairing_request(
+            &request.pairing_id,
+            Some(victim.clone()),
+            None,
+            "surface-201",
+            "phone-key".to_string(),
+            201,
+        )
+        .expect("the same phone may retry over a fresh peer");
+    let device = relay
+        .decide_pairing_request(&request.pairing_id, true, None, 202)
+        .expect("approval should complete pairing")
+        .device
+        .expect("approved pairing should return a device");
+
+    assert_eq!(device.device_id, request.device_id);
+    assert_eq!(
+        relay.paired_devices[&victim].device_verify_key,
+        "victim-key"
+    );
+    assert_eq!(
+        relay.paired_device_payload_secret(&victim).as_deref(),
+        Ok(victim_secret.as_str())
+    );
+}
+
+#[test]
+fn re_pairing_with_the_same_key_updates_the_device_in_place() {
+    let mut relay = test_state();
+    let phone = pair_test_device(&mut relay, "phone", "phone-key", 100);
+    let first_secret = relay
+        .paired_device_payload_secret(&phone)
+        .expect("phone should be paired");
+
+    let again = pair_test_device(&mut relay, "phone", "phone-key", 200);
+
+    assert_eq!(again, phone);
+    assert_eq!(relay.paired_devices.len(), 1);
+    assert_ne!(
+        relay.paired_device_payload_secret(&phone).as_deref(),
+        Ok(first_secret.as_str())
+    );
+}
+
+#[test]
+fn rejecting_a_re_pair_leaves_the_still_paired_device_approved() {
+    let mut relay = test_state();
+    let phone = pair_test_device(&mut relay, "phone", "phone-key", 100);
+    let secret = relay
+        .paired_device_payload_secret(&phone)
+        .expect("phone should be paired");
+    let request = request_test_pairing(&mut relay, None, "phone-key", 300);
+
+    relay
+        .decide_pairing_request(&request.pairing_id, false, None, 301)
+        .expect("rejection should succeed");
+
+    assert_eq!(
+        relay.device_records[&phone].lifecycle_state,
+        DeviceLifecycleState::Approved
+    );
+    assert_eq!(
+        relay.paired_device_payload_secret(&phone).as_deref(),
+        Ok(secret.as_str())
+    );
+}
+
+#[test]
+fn a_pending_re_pair_keeps_the_live_device_listed_as_approved() {
+    let mut relay = test_state();
+    let phone = pair_test_device(&mut relay, "phone", "phone-key", 100);
+    request_test_pairing(&mut relay, None, "phone-key", 200);
+
+    let devices = relay.devices_response();
+
+    let listed = devices
+        .device_records
+        .iter()
+        .find(|record| record.device_id == phone)
+        .expect("the live phone should be listed");
+    assert_eq!(listed.lifecycle_state, DeviceLifecycleState::Approved);
+    assert_eq!(devices.pending_pairing_requests.len(), 1);
+}
+
+#[test]
+fn revoking_a_scoped_device_does_not_widen_what_its_accepted_work_may_touch() {
+    let mut relay = test_state();
+    let (_root, allowed, forbidden) = allowed_and_forbidden_roots(&mut relay);
+    relay.paired_devices.insert(
+        "phone".to_string(),
+        PairedDevice {
+            device_id: "phone".to_string(),
+            label: "Phone".to_string(),
+            payload_secret: "secret".to_string(),
+            device_verify_key: TEST_VERIFY_KEY_B64.to_string(),
+            created_at: 1,
+            last_seen_at: Some(1),
+            last_peer_id: None,
+            broker_join_ticket_expires_at: None,
+            path_scope: vec![allowed.clone()],
+            pairing_broker: None,
+        },
+    );
+    relay.ensure_runtime_for_thread("waiting").current_cwd = forbidden.clone();
+    assert!(!relay.workspace_scope(Some("phone")).allows(&forbidden));
+    assert!(!relay.device_reaches_thread("waiting", "phone"));
+
+    assert!(relay.revoke_paired_device("phone", 2));
+
+    let scope = relay.workspace_scope(Some("phone"));
+    assert!(!scope.allows(&forbidden));
+    assert!(scope.allows(&allowed));
+    assert!(
+        !relay.device_reaches_thread("waiting", "phone"),
+        "a revoked phone's accepted request could answer a session outside its folders"
+    );
+}
+
+#[test]
+fn a_rejected_re_pair_of_a_revoked_phone_keeps_the_scope_its_accepted_work_runs_under() {
+    let mut relay = test_state();
+    let (_root, allowed, forbidden) = allowed_and_forbidden_roots(&mut relay);
+    let phone = pair_test_device(&mut relay, "phone", "phone-key", 100);
+    relay
+        .paired_devices
+        .get_mut(&phone)
+        .expect("phone")
+        .path_scope = vec![allowed];
+    assert!(relay.revoke_paired_device(&phone, 101));
+    let request = request_test_pairing(&mut relay, None, "phone-key", 200);
+    assert_eq!(request.device_id, phone);
+
+    relay
+        .decide_pairing_request(&request.pairing_id, false, None, 201)
+        .expect("rejection should succeed");
+
+    assert!(!relay.workspace_scope(Some(&phone)).allows(&forbidden));
 }
 
 #[test]
@@ -4451,7 +4729,7 @@ fn devices_response_exposes_pending_device_record_metadata() {
     let record = devices
         .device_records
         .iter()
-        .find(|record| record.device_id == "phone-pending")
+        .find(|record| record.device_id == key_device_id("verify-key-pending", TEST_BROKER_ORIGIN))
         .expect("pending device record should be present");
 
     assert_eq!(record.lifecycle_state, DeviceLifecycleState::Pending);
@@ -4498,7 +4776,7 @@ fn approving_pairing_request_updates_device_record_metadata() {
     let record = devices
         .device_records
         .iter()
-        .find(|record| record.device_id == "phone-approved")
+        .find(|record| record.device_id == key_device_id("verify-key-approved", TEST_BROKER_ORIGIN))
         .expect("approved device record should be present");
 
     assert_eq!(record.lifecycle_state, DeviceLifecycleState::Approved);
@@ -4523,7 +4801,7 @@ fn approve_test_phone(
     relay: &mut RelayState,
     broker_url: &str,
     device_id: &str,
-) -> serde_json::Value {
+) -> (serde_json::Value, String) {
     let ticket = issue_test_pairing_ticket(relay, broker_url, "room-a", "relay-a", Some(60));
     relay
         .register_pairing_request(
@@ -4535,21 +4813,23 @@ fn approve_test_phone(
             100,
         )
         .expect("pairing request should register");
-    relay
+    let approved = relay
         .decide_pairing_request(&ticket.pairing_id, true, None, 101)
-        .expect("approval should succeed");
-    qr_payload(&ticket)
+        .expect("approval should succeed")
+        .device
+        .expect("approval should yield a device");
+    (qr_payload(&ticket), approved.device_id)
 }
 
 #[test]
 fn an_approved_phone_remembers_the_broker_its_qr_named() {
     let mut relay = test_state();
-    let qr = approve_test_phone(&mut relay, "wss://app.sealwire.dev", "phone-a");
+    let (qr, phone) = approve_test_phone(&mut relay, "wss://app.sealwire.dev", "phone-a");
     let field = |name: &str| qr[name].as_str().expect("qr field").to_string();
 
     let persisted = PersistedRelayState::from_relay(&relay);
     assert_eq!(
-        persisted.paired_devices["phone-a"].pairing_broker,
+        persisted.paired_devices[&phone].pairing_broker,
         Some(PairingBroker {
             broker_url: field("broker_url"),
             broker_room_id: field("broker_channel_id"),
@@ -4563,12 +4843,12 @@ fn an_approved_phone_remembers_the_broker_its_qr_named() {
 #[test]
 fn the_device_list_says_which_broker_each_phone_was_paired_through() {
     let mut relay = test_state();
-    approve_test_phone(&mut relay, "wss://app.sealwire.dev", "phone-cloud");
-    let cloud = relay.paired_devices["phone-cloud"]
+    let (_, phone_cloud) = approve_test_phone(&mut relay, "wss://app.sealwire.dev", "phone-cloud");
+    let cloud = relay.paired_devices[&phone_cloud]
         .pairing_broker
         .clone()
         .expect("an approved phone records its broker");
-    let mut legacy = relay.paired_devices["phone-cloud"].clone();
+    let mut legacy = relay.paired_devices[&phone_cloud].clone();
     legacy.device_id = "phone-old".to_string();
     legacy.pairing_broker = None;
     relay.device_records.insert(
@@ -4590,7 +4870,7 @@ fn the_device_list_says_which_broker_each_phone_was_paired_through() {
         Some("relay-a".to_string()),
         Some(cloud.clone()),
     );
-    let listed = view(&relay, "phone-cloud");
+    let listed = view(&relay, &phone_cloud);
     assert_eq!(
         listed.pairing_broker_url.as_deref(),
         Some("wss://app.sealwire.dev")
@@ -4606,12 +4886,12 @@ fn the_device_list_says_which_broker_each_phone_was_paired_through() {
         }),
     );
     assert!(
-        !view(&relay, "phone-cloud").pairing_broker_current,
+        !view(&relay, &phone_cloud).pairing_broker_current,
         "the same address under another relay key is a pairing the phone cannot use"
     );
 
     relay.set_broker_target(None, None, None);
-    let listed = view(&relay, "phone-cloud");
+    let listed = view(&relay, &phone_cloud);
     assert_eq!(
         listed.pairing_broker_url.as_deref(),
         Some("wss://app.sealwire.dev"),
@@ -4622,6 +4902,62 @@ fn the_device_list_says_which_broker_each_phone_was_paired_through() {
     let old = view(&relay, "phone-old");
     assert_eq!(old.pairing_broker_url, None);
     assert!(!old.pairing_broker_current);
+}
+
+#[test]
+fn one_key_paired_through_two_brokers_is_two_devices_with_their_own_secrets() {
+    let mut relay = test_state();
+    let (_, on_a) = approve_test_phone(&mut relay, "wss://broker-a.example", "phone");
+    let secret_a = relay
+        .paired_device_payload_secret(&on_a)
+        .expect("phone should be paired through A");
+
+    let (_, on_b) = approve_test_phone(&mut relay, "wss://app.sealwire.dev", "phone");
+
+    assert_ne!(on_b, on_a);
+    assert_eq!(relay.paired_devices.len(), 2);
+    assert_eq!(
+        relay.paired_device_payload_secret(&on_a).as_deref(),
+        Ok(secret_a.as_str())
+    );
+    let broker_url = |id: &str| {
+        relay.paired_devices[id]
+            .pairing_broker
+            .as_ref()
+            .map(|broker| broker.broker_url.clone())
+    };
+    assert_eq!(broker_url(&on_a).as_deref(), Some("wss://broker-a.example"));
+    assert_eq!(broker_url(&on_b).as_deref(), Some("wss://app.sealwire.dev"));
+}
+
+#[test]
+fn re_pairing_through_the_same_broker_address_is_the_same_device_whatever_the_room() {
+    let mut relay = test_state();
+    let mut pair_through = |broker_url: &str, room: &str| {
+        let ticket = issue_test_pairing_ticket(&mut relay, broker_url, room, "relay-a", Some(60));
+        relay
+            .register_pairing_request(
+                &ticket.pairing_id,
+                None,
+                None,
+                "surface-a",
+                "phone-key".to_string(),
+                100,
+            )
+            .expect("pairing request should register");
+        relay
+            .decide_pairing_request(&ticket.pairing_id, true, None, 101)
+            .expect("approval should complete pairing")
+            .device
+            .expect("approved pairing should return a device")
+            .device_id
+    };
+
+    let first = pair_through("wss://app.sealwire.dev", "room-a");
+    let again = pair_through("wss://app.sealwire.dev/", "room-b");
+
+    assert_eq!(again, first);
+    assert_eq!(first, key_device_id("phone-key", "wss://app.sealwire.dev"));
 }
 
 #[test]
@@ -4670,7 +5006,7 @@ fn rejecting_pairing_request_records_rejected_device_state() {
     let record = devices
         .device_records
         .iter()
-        .find(|record| record.device_id == "phone-rejected")
+        .find(|record| record.device_id == key_device_id("verify-key-rejected", TEST_BROKER_ORIGIN))
         .expect("rejected device record should be present");
 
     assert_eq!(record.lifecycle_state, DeviceLifecycleState::Rejected);
@@ -4695,7 +5031,7 @@ fn revoke_all_other_devices_keeps_selected_device_and_marks_others_revoked() {
         .consume_pairing_ticket(
             &keep_ticket.pairing_id,
             &keep_ticket.pairing_secret,
-            Some("phone-keep".to_string()),
+            "phone-keep",
             Some("Keep Phone".to_string()),
             "verify-key-keep".to_string(),
             Some(300),
@@ -4715,7 +5051,7 @@ fn revoke_all_other_devices_keeps_selected_device_and_marks_others_revoked() {
         .consume_pairing_ticket(
             &drop_ticket.pairing_id,
             &drop_ticket.pairing_secret,
-            Some("phone-drop".to_string()),
+            "phone-drop",
             Some("Drop Phone".to_string()),
             "verify-key-drop".to_string(),
             Some(400),
@@ -4910,7 +5246,7 @@ fn completed_pairing_can_replay_result_to_reconnected_peer() {
             .device
             .as_ref()
             .map(|device| device.device_id.as_str()),
-        Some("phone-replay")
+        Some(key_device_id("verify-key-4", TEST_BROKER_ORIGIN).as_str())
     );
     assert!(replay.payload_secret.is_some());
 }
@@ -5467,7 +5803,7 @@ fn consume_pairing_ticket_overwrites_path_scope_on_repair() {
         .consume_pairing_ticket(
             &first_ticket.pairing_id,
             &first_ticket.pairing_secret,
-            Some("my-phone".to_string()),
+            "my-phone",
             Some("Phone".to_string()),
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -5494,7 +5830,7 @@ fn consume_pairing_ticket_overwrites_path_scope_on_repair() {
         .consume_pairing_ticket(
             &second_ticket.pairing_id,
             &second_ticket.pairing_secret,
-            Some("my-phone".to_string()),
+            "my-phone",
             Some("Phone".to_string()),
             TEST_VERIFY_KEY_B64.to_string(),
             None,
@@ -5696,14 +6032,14 @@ fn full_pairing_flow_carries_path_scope_to_paired_device() {
 
     let on_disk = relay
         .paired_devices
-        .get("mobile-test-device")
+        .get(&approved.device_id)
         .expect("device should be persisted");
     assert_eq!(
         on_disk.path_scope, scope,
         "PairedDevice on disk should carry the scope"
     );
     assert_eq!(
-        relay.device_path_scope("mobile-test-device"),
+        relay.device_path_scope(&approved.device_id),
         scope,
         "device_path_scope accessor should agree"
     );

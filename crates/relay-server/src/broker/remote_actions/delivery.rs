@@ -609,12 +609,18 @@ pub(super) async fn publish_remote_action_result_private(
         .as_ref()
         .map(|snapshot| snapshot.transcript_truncated)
         .unwrap_or(false);
+    let secret = match response_secret {
+        Some(secret) => secret.to_string(),
+        None => state.paired_device_payload_secret(&device_id).await?,
+    };
     let snapshot = match snapshot {
         Some(snapshot) => {
             let compacted =
                 snapshot.compact_for(crate::protocol::SessionSnapshotCompactProfile::RemoteSurface);
-            let scoped = state.snapshot_for_device(&compacted, &device_id).await;
-            Some(scoped.unwrap_or(compacted))
+            state
+                .snapshot_for_secret(&compacted, &device_id, &secret)
+                .await
+                .map(|scoped| scoped.unwrap_or(compacted))
         }
         None => None,
     };
@@ -663,10 +669,6 @@ pub(super) async fn publish_remote_action_result_private(
         error_code,
         ..
     } = outcome;
-    let secret = match response_secret {
-        Some(secret) => secret.to_string(),
-        None => state.paired_device_payload_secret(&device_id).await?,
-    };
     let size_breakdown = measure_remote_action_result_sizes(
         action,
         ok,

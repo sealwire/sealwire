@@ -468,7 +468,7 @@ impl RelayState {
         &mut self,
         pairing_id: &str,
         pairing_secret: &str,
-        requested_device_id: Option<String>,
+        device_id: &str,
         device_label: Option<String>,
         device_verify_key: String,
         broker_join_ticket_expires_at: Option<u64>,
@@ -487,14 +487,8 @@ impl RelayState {
         }
         self.pending_pairings.remove(pairing_id);
 
-        let device_id = normalize_remote_device_id(requested_device_id.as_deref())
-            .filter(|candidate| !candidate.is_empty())
-            .unwrap_or_else(|| format!("device-{}", random_token(8).to_ascii_lowercase()));
-        let label_fallback = requested_device_id
-            .as_deref()
-            .or(Some(peer_id))
-            .unwrap_or("Remote Device");
-        let label = normalize_device_label(device_label, label_fallback);
+        let device_id = device_id.to_string();
+        let label = normalize_device_label(device_label, &device_id);
         let payload_secret = random_token(40);
 
         let approved_device = {
@@ -569,10 +563,16 @@ impl RelayState {
         now: u64,
     ) -> Result<PendingPairingRequestView, String> {
         self.prune_expired_pairings(now);
-        let (ticket_expires_at, ticket_path_scope) = self
+        let (ticket_expires_at, ticket_path_scope, ticket_broker) = self
             .pending_pairings
             .get(pairing_id)
-            .map(|pairing| (pairing.expires_at, pairing.path_scope.clone()))
+            .map(|pairing| {
+                (
+                    pairing.expires_at,
+                    pairing.path_scope.clone(),
+                    pairing.pairing_broker.clone(),
+                )
+            })
             .ok_or_else(|| "pairing request is missing or expired".to_string())?;
         // Refused rather than queued: the restored claim would overwrite the newcomer.
         if self.claimed_pairing_requests.contains(pairing_id) {
@@ -581,40 +581,28 @@ impl RelayState {
                     .to_string(),
             );
         }
+        let label = normalize_device_label(
+            device_label,
+            requested_device_id.as_deref().unwrap_or(peer_id),
+        );
         if let Some(existing) = self.pending_pairing_requests.get_mut(pairing_id) {
             // Rebinding exists so ONE device can retry over a fresh broker peer (a
             // network blip mid-approval). It must stay keyed to that device: the
-            // Ed25519 verify key is the only stable identity here, since device_id
-            // and label are both attacker-chosen. Without this check anyone else
-            // holding the QR could register last and silently inherit the approval
-            // the operator is about to grant — along with the payload_secret and
-            // refresh tokens that ride the pairing result.
+            // Ed25519 verify key is the only stable identity here, since the label is
+            // attacker-chosen. Without this check anyone else holding the QR could
+            // register last and silently inherit the approval the operator is about
+            // to grant — along with the payload_secret and refresh tokens that ride
+            // the pairing result.
             if existing.device_verify_key != device_verify_key {
                 return Err(PAIRING_TAKEN_ERROR.to_string());
             }
-            let label_fallback = requested_device_id
-                .as_deref()
-                .or(Some(peer_id))
-                .unwrap_or("Remote Device");
-            if let Some(device_id) = normalize_remote_device_id(requested_device_id.as_deref())
-                .filter(|candidate| !candidate.is_empty())
-            {
-                existing.device_id = device_id;
-            }
-            existing.label = normalize_device_label(device_label, label_fallback);
+            existing.label = label;
             existing.broker_peer_id = peer_id.to_string();
             existing.path_scope = ticket_path_scope;
             return Ok(existing.to_view());
         }
 
-        let device_id = normalize_remote_device_id(requested_device_id.as_deref())
-            .filter(|candidate| !candidate.is_empty())
-            .unwrap_or_else(|| format!("device-{}", random_token(8).to_ascii_lowercase()));
-        let label_fallback = requested_device_id
-            .as_deref()
-            .or(Some(peer_id))
-            .unwrap_or("Remote Device");
-        let label = normalize_device_label(device_label, label_fallback);
+        let device_id = key_device_id(&device_verify_key, ticket_broker.as_ref());
 
         let request = PendingPairingRequest {
             pairing_id: pairing_id.to_string(),
@@ -687,7 +675,7 @@ impl RelayState {
             let (device, token) = self.consume_pairing_ticket(
                 pairing_id,
                 &pending.pairing_secret,
-                Some(request.device_id),
+                &request.device_id,
                 Some(request.label),
                 device_verify_key.clone(),
                 device_join_ticket_expires_at,
@@ -841,8 +829,8 @@ impl RelayState {
         true
     }
 
-    /// Forget revoked and rejected devices. Safe because access is decided by
-    /// `paired_devices` and the broker credential was already revoked; these are history.
+    /// Forget revoked and rejected devices. A revoked record still limits the folders its
+    /// device's already-accepted work may touch, so such work loses that limit here.
     pub fn clear_device_history(&mut self) -> Vec<String> {
         let mut removed: Vec<String> = self
             .device_records
@@ -1019,10 +1007,19 @@ impl RelayState {
     }
 
     pub fn device_path_scope(&self, device_id: &str) -> Vec<String> {
-        self.paired_devices
+        self.device_folder_limit(device_id).to_vec()
+    }
+
+    /// Empty means no limit of its own. Work accepted before a revoke still runs, so a revoked
+    /// device keeps its limit rather than the empty one local operators have.
+    pub(super) fn device_folder_limit(&self, device_id: &str) -> &[String] {
+        if let Some(device) = self.paired_devices.get(device_id) {
+            return &device.path_scope;
+        }
+        self.device_records
             .get(device_id)
-            .map(|device| device.path_scope.clone())
-            .unwrap_or_default()
+            .filter(|record| record.lifecycle_state == DeviceLifecycleState::Revoked)
+            .map_or(&[], |record| record.path_scope.as_slice())
     }
 
     /// What `device_id` may reach right now; `None` is the local operator, bound by the roots alone.
@@ -1195,6 +1192,15 @@ impl RelayState {
         created_at: u64,
         now: u64,
     ) {
+        // A rejected re-pair changes nothing about the device it named: a live one stays
+        // listed and revocable, a revoked one keeps the scope its accepted work runs under.
+        let revoked = self
+            .device_records
+            .get(device_id)
+            .is_some_and(|record| record.lifecycle_state == DeviceLifecycleState::Revoked);
+        if revoked || self.paired_devices.contains_key(device_id) {
+            return;
+        }
         let record = self
             .device_records
             .entry(device_id.to_string())
@@ -1230,6 +1236,7 @@ impl RelayState {
         record.last_peer_id = device.last_peer_id.clone();
         record.device_verify_key = device.device_verify_key.clone();
         record.broker_join_ticket_expires_at = device.broker_join_ticket_expires_at;
+        record.path_scope = device.path_scope.clone();
     }
 
     fn prune_claim_challenges_for_peer(&mut self, device_id: &str, peer_id: &str) {
@@ -1276,43 +1283,6 @@ fn refused_pairing_result(
     }
 }
 
-pub(crate) fn normalize_remote_device_id(value: Option<&str>) -> Option<String> {
-    let input = value?.trim().to_ascii_lowercase();
-    if input.is_empty() {
-        return None;
-    }
-
-    let mut normalized = String::new();
-    let mut previous_was_dash = false;
-
-    for character in input.chars() {
-        if character.is_ascii_alphanumeric() {
-            normalized.push(character);
-            previous_was_dash = false;
-            continue;
-        }
-
-        if matches!(character, '-' | '_' | ' ' | '.')
-            && !previous_was_dash
-            && !normalized.is_empty()
-        {
-            normalized.push('-');
-            previous_was_dash = true;
-        }
-    }
-
-    while normalized.ends_with('-') {
-        normalized.pop();
-    }
-
-    if normalized.is_empty() {
-        None
-    } else {
-        normalized.truncate(48);
-        Some(normalized)
-    }
-}
-
 pub(crate) fn normalize_device_label(value: Option<String>, fallback: &str) -> String {
     let label = super::super::non_empty(value).unwrap_or_else(|| fallback.trim().to_string());
     let mut normalized = label.trim().to_string();
@@ -1323,6 +1293,23 @@ pub(crate) fn normalize_device_label(value: Option<String>, fallback: &str) -> S
         normalized = normalized.chars().take(80).collect();
     }
     normalized
+}
+
+/// Never what the phone asks for, so a phone can only be paired under its own key's id. The
+/// broker's origin is in it so each broker's pairing keeps its own secret, as the list groups them.
+fn key_device_id(device_verify_key: &str, broker: Option<&PairingBroker>) -> String {
+    let broker_origin = broker
+        .map(
+            |broker| match Url::parse(&broker.broker_url).map(|url| url.origin()) {
+                Ok(origin) if origin.is_tuple() => origin.ascii_serialization(),
+                _ => broker.broker_url.clone(),
+            },
+        )
+        .unwrap_or_default();
+    format!(
+        "mobile-{}",
+        sha256_hex(&format!("{device_verify_key}\n{broker_origin}"))
+    )
 }
 
 fn random_token(length: usize) -> String {

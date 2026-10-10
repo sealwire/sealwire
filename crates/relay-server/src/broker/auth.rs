@@ -31,6 +31,12 @@ pub(crate) const RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV: &str = "RELAY_BROKER_DEV
 const CONTROL_PLANE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONTROL_PLANE_RESPONSE_BYTES: usize = 64 * 1024;
 
+#[cfg(test)]
+std::thread_local! {
+    /// Fails client grants on this test's thread, as a broker outage between grants would.
+    pub(crate) static TEST_FAIL_CLIENT_GRANTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct PublicRelayRegistration {
     pub(crate) relay_id: String,
@@ -417,6 +423,10 @@ impl BrokerAuthConfig {
         client_verify_key: &str,
         device_label: Option<String>,
     ) -> Result<Option<ClientBrokerGrant>, String> {
+        #[cfg(test)]
+        if TEST_FAIL_CLIENT_GRANTS.with(|fail| fail.get()) {
+            return Err("broker client grant failed".to_string());
+        }
         match self {
             Self::SelfHostedSharedSecret { .. } => Ok(None),
             Self::PublicControlPlane {

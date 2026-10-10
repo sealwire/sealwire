@@ -745,15 +745,16 @@ impl AppState {
         relay.snapshot()
     }
 
-    pub(crate) async fn snapshot_for_device(
+    pub(crate) async fn snapshot_for_secret(
         &self,
         snapshot: &SessionSnapshot,
         device_id: &str,
-    ) -> Option<SessionSnapshot> {
+        secret: &str,
+    ) -> Option<Option<SessionSnapshot>> {
         self.relay
             .read()
             .await
-            .snapshot_for_device(snapshot, device_id)
+            .snapshot_for_secret(snapshot, device_id, secret)
     }
 
     /// A point-in-time local snapshot for a surface that just CONNECTED.

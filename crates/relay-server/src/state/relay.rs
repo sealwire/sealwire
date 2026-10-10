@@ -1028,11 +1028,6 @@ impl RelayState {
         });
     }
 
-    /// Whether a device is currently paired (gates push delivery).
-    pub(crate) fn is_device_paired(&self, device_id: &str) -> bool {
-        self.paired_devices.contains_key(device_id)
-    }
-
     /// Drop any push subscription whose device is no longer paired — e.g. a stale
     /// entry restored from a state file written before revoke-time pruning existed.
     pub(crate) fn prune_orphaned_push_subscriptions(&mut self) {
@@ -4605,7 +4600,11 @@ so {} never got it — hand over again when you are ready.",
             .values()
             .filter(|request| request.expires_at > now);
         let mut device_records = self.device_records.clone();
-        for request in live_requests.clone() {
+        // A re-pair of a live device must not take it off the list where it is revoked.
+        for request in live_requests
+            .clone()
+            .filter(|request| !self.paired_devices.contains_key(&request.device_id))
+        {
             device_records.insert(
                 request.device_id.clone(),
                 DeviceRecord {
@@ -6649,25 +6648,24 @@ so {} never got it — hand over again when you are ready.",
     }
 
     fn device_is_folder_limited(&self, device_id: &str) -> bool {
-        self.paired_devices
-            .get(device_id)
-            .is_some_and(|device| !device.path_scope.is_empty())
+        !self.device_folder_limit(device_id).is_empty()
     }
 
-    /// `snapshot` without what `device_id` may not reach, or `None` when it reaches all of it.
-    pub(crate) fn snapshot_for_device(
+    /// What a message sealed with `secret` may show `device_id`. Outer `None`: nothing, as a
+    /// revoke or re-pair replaced that secret. Inner `None`: the whole snapshot.
+    pub(crate) fn snapshot_for_secret(
         &self,
         snapshot: &SessionSnapshot,
         device_id: &str,
-    ) -> Option<SessionSnapshot> {
-        // Targets are read before this runs, so a device revoked in between is no longer on
-        // record; it gets nothing rather than being taken for one with no folder limit.
-        let on_record = self.paired_devices.contains_key(device_id);
-        if on_record && !self.device_is_folder_limited(device_id) {
+        secret: &str,
+    ) -> Option<Option<SessionSnapshot>> {
+        if self.paired_devices.get(device_id)?.payload_secret != secret {
             return None;
         }
-        let reaches =
-            |thread_id: &str| on_record && self.device_reaches_thread(thread_id, device_id);
+        if !self.device_is_folder_limited(device_id) {
+            return Some(None);
+        }
+        let reaches = |thread_id: &str| self.device_reaches_thread(thread_id, device_id);
         let mut scoped = snapshot.clone();
         scoped
             .pending_approvals
@@ -6693,7 +6691,7 @@ so {} never got it — hand over again when you are ready.",
             scoped.workspace_missing = None;
             scoped.current_tool = None;
         }
-        Some(scoped)
+        Some(Some(scoped))
     }
 
     /// Whether a DEVICE should receive deltas for `thread_id` — true when any of its

@@ -1,3 +1,6 @@
+use super::super::tests::{
+    canonical, folder_limited_phone_state, folder_limited_phone_state_and_relay, re_pair_phone_1,
+};
 use super::authentication::issue_claim_challenge_outcome;
 use super::delivery::{
     build_encrypted_remote_action_result_chunk_payloads, cached_remote_action_result,
@@ -3178,25 +3181,11 @@ fn encrypted_actions_require_the_authenticated_action_id() {
     }
 }
 
-// The reply to a phone's own action carries a snapshot too, so the folder limit has to
-// hold there as well as on the broadcast one.
-#[tokio::test]
-async fn an_action_reply_gives_a_folder_limited_phone_nothing_outside_its_folder() {
-    let canonical = |dir: &tempfile::TempDir| {
-        std::fs::canonicalize(dir.path())
-            .expect("tempdir canonicalizes")
-            .to_string_lossy()
-            .to_string()
-    };
-    let phone_dir = tempfile::TempDir::new().expect("phone tempdir");
-    let session_dir = tempfile::TempDir::new().expect("session tempdir");
-    let session_cwd = canonical(&session_dir);
-    let state =
-        super::super::tests::folder_limited_phone_state(&canonical(&phone_dir), &session_cwd).await;
+/// What the phone reads in its reply to `action-1`, sealed with `response_secret`.
+async fn reply_text(state: &AppState, response_secret: Option<&str>) -> String {
     let (writer, mut now_queue, _queued) = super::super::writer::test_writer();
-
     publish_remote_action_result_private(
-        &state,
+        state,
         &writer,
         "surface-a".to_string(),
         "phone-1".to_string(),
@@ -3206,12 +3195,11 @@ async fn an_action_reply_gives_a_folder_limited_phone_nothing_outside_its_folder
         RemoteActionOutcome::default(),
         None,
         true,
-        None,
+        response_secret,
         None,
     )
     .await
     .expect("the reply publishes");
-
     let tokio_tungstenite::tungstenite::Message::Text(text) =
         now_queue.try_recv().expect("one reply frame")
     else {
@@ -3221,8 +3209,38 @@ async fn an_action_reply_gives_a_folder_limited_phone_nothing_outside_its_folder
     let envelope: EncryptedEnvelope =
         serde_json::from_value(frame["payload"]["envelope"].clone()).expect("envelope");
     let reply: serde_json::Value = decrypt_json("secret", &envelope).expect("reply decrypts");
-    let text = reply.to_string();
+    reply.to_string()
+}
+
+// The reply to a phone's own action carries a snapshot too, so the folder limit has to
+// hold there as well as on the broadcast one.
+#[tokio::test]
+async fn an_action_reply_gives_a_folder_limited_phone_nothing_outside_its_folder() {
+    let phone_dir = tempfile::TempDir::new().expect("phone tempdir");
+    let session_dir = tempfile::TempDir::new().expect("session tempdir");
+    let session_cwd = canonical(&session_dir);
+    let state = folder_limited_phone_state(&canonical(&phone_dir), &session_cwd).await;
+
+    let text = reply_text(&state, None).await;
+
     assert!(!text.contains("the secret reply"), "transcript leaked");
     assert!(!text.contains("cat secrets.txt"), "approval leaked");
     assert!(!text.contains(&session_cwd), "session folder leaked");
+}
+
+// A result keeps the secret it was produced under. If the same phone re-pairs with a wider
+// folder limit before the reply goes out, that secret must not open a snapshot scoped by it.
+#[tokio::test]
+async fn an_action_reply_under_a_replaced_secret_carries_nothing_the_re_pair_allows() {
+    let phone_dir = tempfile::TempDir::new().expect("phone tempdir");
+    let session_dir = tempfile::TempDir::new().expect("session tempdir");
+    let session_cwd = canonical(&session_dir);
+    let (state, relay) =
+        folder_limited_phone_state_and_relay(&canonical(&phone_dir), &session_cwd).await;
+    re_pair_phone_1(&mut *relay.write().await, &session_cwd);
+
+    let text = reply_text(&state, Some("secret")).await;
+
+    assert!(!text.contains("the secret reply"), "transcript leaked");
+    assert!(!text.contains("cat secrets.txt"), "approval leaked");
 }

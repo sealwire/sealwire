@@ -1563,98 +1563,10 @@ async fn revoking_a_device_ends_its_sessions_and_a_new_phone_pairs_locally() {
     assert_eq!(relay.starts().await, 0);
 
     // A new phone: QR on this computer, its own key, approved here.
-    let ticket = relay
-        .state
-        .start_pairing_with(
-            &relay.config,
-            crate::protocol::PairingStartInput {
-                expires_in_seconds: Some(600),
-                path_scope: Some(Vec::new()),
-            },
-        )
-        .await
-        .expect("QR");
-    let new_phone_key = SigningKey::from_bytes(&[43; 32]);
-    relay.hello("surface-new").await;
-    relay
-        .send_as(
-            "surface-new",
-            serde_json::json!({
-                "protocol_version": RELAY_PROTOCOL_VERSION,
-                "kind": "pairing_request",
-                "pairing_id": ticket.pairing_id,
-                "envelope": encrypt_json(
-                    &ticket.pairing_secret,
-                    &PairingRequestPlaintext {
-                        device_id: Some("phone-new".to_string()),
-                        device_label: Some("New phone".to_string()),
-                        device_verify_key: STANDARD.encode(new_phone_key.verifying_key().to_bytes()),
-                        pairing_proof: STANDARD.encode(
-                            new_phone_key
-                                .sign(super::super::pairing_proof_message(&ticket.pairing_id, Some("phone-new")).as_bytes())
-                                .to_bytes(),
-                        ),
-                    },
-                ).unwrap(),
-            }),
-        )
-        .await;
-    for _ in 0..100 {
-        if !relay
-            .state
-            .snapshot()
-            .await
-            .pending_pairing_requests
-            .is_empty()
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    relay
-        .state
-        .decide_pairing_request_with(
-            &relay.config,
-            &ticket.pairing_id,
-            crate::protocol::PairingDecisionInput {
-                decision: crate::protocol::PairingDecision::Approve,
-            },
-        )
-        .await
-        .expect("approved on this computer");
-    let result = relay
-        .next_payload(Duration::from_secs(5), |payload| {
-            payload["kind"] == "encrypted_pairing_result"
-        })
-        .await
-        .expect("pairing result");
-    let envelope = serde_json::from_value(result["envelope"].clone()).unwrap();
-    let paired_result: serde_json::Value = decrypt_json(&ticket.pairing_secret, &envelope).unwrap();
-    assert_eq!(paired_result["ok"], true, "{paired_result}");
-    let new_phone = Phone {
-        device_id: paired_result["device"]["device_id"]
-            .as_str()
-            .unwrap()
-            .to_string(),
-        secret: paired_result["payload_secret"]
-            .as_str()
-            .unwrap()
-            .to_string(),
-        key: new_phone_key,
-    };
-    let mut fresh = relay.claim_as("surface-new", &new_phone).await;
-    let works = relay.attempt(&mut fresh, "op-new-phone", relay.start_session());
-    relay.send_signed(&works).await;
-    let answer = relay
-        .result_with(
-            &new_phone.secret,
-            "surface-new",
-            "op-new-phone",
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("the new phone is answered");
-    assert_eq!(answer["ok"], true, "{answer}");
+    let ticket = request_pairing_as(&mut relay, "surface-new", "phone-new", 43).await;
+    approve(&relay, &ticket).await;
+    let (new_phone, _) = paired_phone(&mut relay, &ticket, 43).await;
+    still_answered(&mut relay, "surface-new", &new_phone, "op-new-phone").await;
     assert_eq!(relay.starts().await, 1);
 }
 
@@ -1774,5 +1686,198 @@ async fn a_remote_write_is_on_disk_before_its_result() {
     assert_eq!(
         saved, 1,
         "the project must be in the database when the result arrives"
+    );
+}
+
+/// A QR made on this computer, scanned from `peer` by the phone holding `[key_seed; 32]`,
+/// left waiting for the operator.
+async fn request_pairing_as(
+    relay: &mut RelayUnderTest,
+    peer: &str,
+    device_id: &str,
+    key_seed: u8,
+) -> crate::protocol::PairingTicketView {
+    let ticket = relay
+        .state
+        .start_pairing_with(
+            &relay.config,
+            crate::protocol::PairingStartInput {
+                expires_in_seconds: Some(600),
+                path_scope: Some(Vec::new()),
+            },
+        )
+        .await
+        .expect("QR");
+    relay.hello(peer).await;
+    relay
+        .send_as(
+            peer,
+            serde_json::json!({
+                "protocol_version": RELAY_PROTOCOL_VERSION,
+                "kind": "pairing_request",
+                "pairing_id": ticket.pairing_id,
+                "envelope": super::signed_pairing_request(
+                    &ticket.pairing_id,
+                    &ticket.pairing_secret,
+                    key_seed,
+                    device_id,
+                ),
+            }),
+        )
+        .await;
+    for _ in 0..100 {
+        if relay
+            .relay
+            .read()
+            .await
+            .devices_response()
+            .pending_pairing_requests
+            .iter()
+            .any(|request| request.pairing_id == ticket.pairing_id)
+        {
+            return ticket;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the pairing request never reached the operator");
+}
+
+async fn approve(relay: &RelayUnderTest, ticket: &crate::protocol::PairingTicketView) {
+    relay
+        .state
+        .decide_pairing_request_with(
+            &relay.config,
+            &ticket.pairing_id,
+            crate::protocol::PairingDecisionInput {
+                decision: crate::protocol::PairingDecision::Approve,
+            },
+        )
+        .await
+        .expect("approved on this computer");
+}
+
+/// The phone `[key_seed; 32]` became by its approved pairing, and the result it was sent.
+async fn paired_phone(
+    relay: &mut RelayUnderTest,
+    ticket: &crate::protocol::PairingTicketView,
+    key_seed: u8,
+) -> (Phone, serde_json::Value) {
+    let result = relay
+        .next_payload(Duration::from_secs(5), |payload| {
+            payload["kind"] == "encrypted_pairing_result"
+        })
+        .await
+        .expect("pairing result");
+    let envelope = serde_json::from_value(result["envelope"].clone()).unwrap();
+    let paired: serde_json::Value = decrypt_json(&ticket.pairing_secret, &envelope).unwrap();
+    assert_eq!(paired["ok"], true, "{paired}");
+    let phone = Phone {
+        device_id: paired["device"]["device_id"].as_str().unwrap().to_string(),
+        secret: paired["payload_secret"].as_str().unwrap().to_string(),
+        key: SigningKey::from_bytes(&[key_seed; 32]),
+    };
+    (phone, paired)
+}
+
+async fn still_answered(relay: &mut RelayUnderTest, peer: &str, phone: &Phone, action_id: &str) {
+    let mut claim = relay.claim_as(peer, phone).await;
+    let attempt = relay.attempt(&mut claim, action_id, relay.start_session());
+    relay.send_signed(&attempt).await;
+    let answer = relay
+        .result_with(&phone.secret, peer, action_id, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("{} got no answer for {action_id}", phone.device_id));
+    assert_eq!(answer["ok"], true, "{answer}");
+}
+
+#[tokio::test]
+async fn approving_a_new_phone_that_asks_for_a_paired_phones_id_pairs_it_as_itself() {
+    let mut relay = RelayUnderTest::start(&["surface-a", "surface-new"]).await;
+    relay.hello("surface-a").await;
+    let ticket = request_pairing_as(&mut relay, "surface-new", "phone-1", 43).await;
+
+    approve(&relay, &ticket).await;
+
+    let (newcomer, paired) = paired_phone(&mut relay, &ticket, 43).await;
+    assert_ne!(newcomer.device_id, "phone-1");
+    // The broker join ticket must name the newcomer, or phone-1's broker login is the one reissued.
+    let join_claims = relay_broker::join_ticket::JoinTicketKey::from_secret(
+        b"test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d",
+    )
+    .unwrap()
+    .verify(paired["device_join_ticket"].as_str().expect("join ticket"))
+    .expect("join ticket verifies");
+    assert_eq!(
+        join_claims.device_id.as_deref(),
+        Some(newcomer.device_id.as_str())
+    );
+    still_answered(&mut relay, "surface-a", &phone(), "op-phone-1").await;
+    still_answered(&mut relay, "surface-new", &newcomer, "op-newcomer").await;
+    let relay_state = relay.relay.read().await;
+    assert_eq!(
+        relay_state.paired_devices["phone-1"].device_verify_key,
+        STANDARD.encode(phone().key.verifying_key().to_bytes())
+    );
+    assert_eq!(relay_state.paired_devices.len(), 2);
+}
+
+/// Work a phone had accepted still runs after it is revoked, but inside the folders it was
+/// limited to rather than every relay root.
+#[tokio::test]
+async fn a_revoked_phones_accepted_resume_stays_in_its_folder() {
+    let mut relay = RelayUnderTest::start(&["surface-a"]).await;
+    let forbidden_cwd = relay.cwd();
+    let allowed = relay.workspace.path().join("allowed");
+    std::fs::create_dir(&allowed).unwrap();
+    let snapshot = relay
+        .state
+        .start_session(
+            serde_json::from_value(serde_json::json!({
+                "provider": "fake", "cwd": forbidden_cwd, "device_id": "local-browser",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let thread_id = snapshot.active_thread_id.unwrap();
+    relay
+        .relay
+        .write()
+        .await
+        .paired_devices
+        .get_mut("phone-1")
+        .unwrap()
+        .path_scope = vec![allowed.to_string_lossy().into_owned()];
+    relay.hello("surface-a").await;
+    let mut claim = relay.claim("surface-a").await;
+    relay.fake.hold_list_models(true);
+    let attempt = relay.attempt(
+        &mut claim,
+        "resume-before-revoke",
+        serde_json::json!({
+            "type": "resume_session", "input": { "thread_id": thread_id },
+        }),
+    );
+    relay.send_signed(&attempt).await;
+    wait_until_preparing(&relay, "resume-before-revoke").await;
+    assert!(
+        relay
+            .state
+            .revoke_device_with(Some(&relay.config), "phone-1")
+            .await
+            .unwrap()
+            .revoked
+    );
+
+    relay.fake.hold_list_models(false);
+    tokio::time::sleep(QUIET).await;
+
+    assert!(
+        relay
+            .fake
+            .thread_ids_seen_by("resume_thread")
+            .await
+            .is_empty(),
+        "the revoked phone's accepted work reached a folder outside its limit"
     );
 }
