@@ -801,6 +801,9 @@ fn build_push_client(lookup: Lookup, proxy: Option<&str>) -> Result<reqwest::Cli
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none());
     let builder = match proxy {
+        Some(proxy) if !is_http_proxy(proxy) => {
+            return Err("web push needs an http:// or https:// proxy".to_string());
+        }
         // Set explicitly so NO_PROXY cannot send a push direct: this client has no address check.
         Some(proxy) => builder.proxy(
             reqwest::Proxy::https(proxy)
@@ -813,6 +816,15 @@ fn build_push_client(lookup: Lookup, proxy: Option<&str>) -> Result<reqwest::Cli
     builder
         .build()
         .map_err(|error| format!("failed to build the push client: {error}"))
+}
+
+/// reqwest accepts any scheme here, but hyper-util silently drops all but http/https, which
+/// would send pushes direct. A value with no usable scheme is read by reqwest as `http://`.
+fn is_http_proxy(proxy: &str) -> bool {
+    match url::Url::parse(proxy) {
+        Ok(url) if url.has_host() => matches!(url.scheme(), "http" | "https"),
+        _ => true,
+    }
 }
 
 /// The proxy reqwest would pick for an https URL: the first set variable of each pair.
@@ -1477,40 +1489,46 @@ mod tests {
     // even for a host NO_PROXY lists: that client has no address check.
     #[tokio::test]
     async fn push_requests_go_through_a_proxy_set_in_the_environment() {
-        let (proxy_port, via_proxy) = counting_listener("127.0.0.1:0").await;
-        let (direct_port, direct) = counting_listener("127.0.0.1:0").await;
         let probe = format!(
             "{}::push_proxy_probe",
             module_path!().split_once("::").unwrap().1
         );
-        // Proxy settings are read from the process environment, so the probe runs in a child.
-        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args([probe.as_str(), "--exact", "--ignored"])
-            .env(PROXY_PROBE_ENV, direct_port.to_string())
-            .env("HTTPS_PROXY", format!("http://localhost:{proxy_port}"))
-            .env("NO_PROXY", "*")
-            .env_remove("https_proxy")
-            .env_remove("ALL_PROXY")
-            .env_remove("all_proxy")
-            .env_remove("no_proxy")
-            .output()
-            .await
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            output.status.success() && stdout.contains("1 passed"),
-            "the probe did not run: {stdout}{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            direct.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "with a proxy configured, a push connected directly"
-        );
-        assert!(
-            via_proxy.load(std::sync::atomic::Ordering::SeqCst) > 0,
-            "the push did not go through the proxy in HTTPS_PROXY"
-        );
+        // reqwest accepts an ftp:// proxy that hyper-util then drops, which would leave
+        // pushes going direct with no address check.
+        for (scheme, reaches_proxy) in [("http", true), ("ftp", false)] {
+            let (proxy_port, via_proxy) = counting_listener("127.0.0.1:0").await;
+            let (direct_port, direct) = counting_listener("127.0.0.1:0").await;
+            // Proxy settings are read from the process environment, so the probe runs in a child.
+            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([probe.as_str(), "--exact", "--ignored"])
+                .env(PROXY_PROBE_ENV, direct_port.to_string())
+                .env("HTTPS_PROXY", format!("{scheme}://localhost:{proxy_port}"))
+                .env("NO_PROXY", "*")
+                .env_remove("https_proxy")
+                .env_remove("ALL_PROXY")
+                .env_remove("all_proxy")
+                .env_remove("no_proxy")
+                .output()
+                .await
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "the probe did not run: {stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                direct.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "with a {scheme}:// proxy configured, a push connected directly"
+            );
+            if reaches_proxy {
+                assert!(
+                    via_proxy.load(std::sync::atomic::Ordering::SeqCst) > 0,
+                    "the push did not go through the proxy in HTTPS_PROXY"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1519,9 +1537,11 @@ mod tests {
         let Ok(direct_port) = std::env::var(PROXY_PROBE_ENV) else {
             return;
         };
+        let Ok(client) = build_push_client(no_dns(), configured_proxy().as_deref()) else {
+            return;
+        };
         // `localhost` keeps a direct attempt on this machine instead of real DNS.
-        let _ = build_push_client(no_dns(), configured_proxy().as_deref())
-            .expect("push client")
+        let _ = client
             .post(format!("https://localhost:{direct_port}/push"))
             .send()
             .await;
