@@ -542,6 +542,93 @@ mod tests {
         assert!(!context.dirty, "nothing has been touched yet");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_nested_git_symlink_cannot_borrow_parent_trust_to_run_filters() {
+        assert_nested_git_boundary_cannot_run_filters(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_nested_git_directory_cannot_borrow_parent_trust_to_run_filters() {
+        assert_nested_git_boundary_cannot_run_filters(true).await;
+    }
+
+    #[cfg(unix)]
+    async fn assert_nested_git_boundary_cannot_run_filters(metadata_directory: bool) {
+        use std::path::Path;
+
+        let dir = TempDir::new().expect("tmp");
+        let parent = init_repo(dir.path()).await;
+        let source = Path::new(&parent).join("nested");
+        std::fs::create_dir(&source).unwrap();
+        init_repo(&source).await;
+        std::fs::write(
+            source.join(".gitattributes"),
+            "seed.txt filter=trust_probe\n",
+        )
+        .unwrap();
+        git(&source, &["add", ".gitattributes"]).await;
+        git(&source, &["commit", "-q", "-m", "attributes"]).await;
+
+        let metadata = Path::new(&parent).join("nested-metadata");
+        std::fs::rename(source.join(".git"), &metadata).unwrap();
+        let cwd = if metadata_directory {
+            std::fs::copy(source.join("seed.txt"), metadata.join("seed.txt")).unwrap();
+            std::fs::copy(
+                source.join(".gitattributes"),
+                metadata.join(".gitattributes"),
+            )
+            .unwrap();
+            git(
+                &metadata,
+                &[
+                    "--git-dir=.",
+                    "config",
+                    "core.worktree",
+                    metadata.to_str().unwrap(),
+                ],
+            )
+            .await;
+            metadata
+        } else {
+            std::os::unix::fs::symlink(&metadata, source.join(".git")).unwrap();
+            source
+        };
+        git(
+            &cwd,
+            &[
+                "config",
+                "filter.trust_probe.clean",
+                "touch filter-executed; cat",
+            ],
+        )
+        .await;
+        std::fs::write(cwd.join("seed.txt"), "line2\n").unwrap();
+        let marker = cwd.join("filter-executed");
+        let app = build_app(&parent, vec![parent.clone()]).await;
+        trust(&app, &parent).await;
+
+        let context = app
+            .workspace_git_context(None, cwd.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert!(context.restricted);
+        assert!(!context.dirty_known);
+        let grants = app.relay.read().await.trust_grants();
+        let error = super::super::collect_workspace_diff(cwd.to_str().unwrap(), &grants)
+            .await
+            .expect_err("an ungranted repository must not run a diff");
+        assert!(error.contains("not a granted workspace"));
+        assert!(!marker.exists());
+
+        git(&cwd, &["status", "--porcelain"]).await;
+        assert!(
+            marker.exists(),
+            "the fixture must execute its filter without the trust gate"
+        );
+    }
+
     // Stripped exactly the way `list_worktrees_in` strips it, or the chip and the
     // diff panel's root picker disagree about what this tree is called.
     #[tokio::test]

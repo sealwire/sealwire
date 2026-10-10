@@ -172,8 +172,19 @@ pub(crate) fn repository_root(start: &Path) -> Option<PathBuf> {
         let dot_git = dir.join(".git");
         // symlink_metadata, not metadata: a `.git` symlink aimed at a FIFO would
         // otherwise be followed, and reading a FIFO parks the thread forever.
-        let Ok(metadata) = std::fs::symlink_metadata(&dot_git) else {
-            continue;
+        let metadata = match std::fs::symlink_metadata(&dot_git) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Git also discovers repositories whose metadata lives in this directory.
+                if dir.join("HEAD").is_file()
+                    && ((dir.join("objects").is_dir() && dir.join("refs").is_dir())
+                        || dir.join("commondir").is_file())
+                {
+                    return None;
+                }
+                continue;
+            }
+            Err(_) => return None,
         };
         // An ordinary repository: `.git` is a directory, and its parent is the root.
         // Nothing inside it is consulted, so nothing inside it can lie.
@@ -181,7 +192,8 @@ pub(crate) fn repository_root(start: &Path) -> Option<PathBuf> {
             return Some(dir.to_path_buf());
         }
         if !metadata.is_file() {
-            continue;
+            // Git follows `.git` symlinks; borrowing an ancestor's grant would run a different repo.
+            return None;
         }
         return main_worktree_of(dir, &dot_git);
     }
