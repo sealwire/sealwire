@@ -626,14 +626,14 @@ impl PushDispatcher {
         relay: Arc<RwLock<RelayState>>,
         vapid: VapidKeys,
     ) -> Result<mpsc::UnboundedSender<PushJob>, String> {
-        let through_proxy = proxy_configured();
-        if through_proxy {
+        let proxy = configured_proxy();
+        if proxy.is_some() {
             info!("web push goes through the proxy in the environment; push addresses are not checked");
         }
         let (tx, rx) = mpsc::unbounded_channel();
         let dispatcher = Self {
             relay,
-            http: build_push_client(system_lookup(), through_proxy)?,
+            http: build_push_client(system_lookup(), proxy.as_deref())?,
             vapid,
         };
         tokio::spawn(dispatcher.run(rx));
@@ -796,31 +796,34 @@ impl reqwest::dns::Resolve for PushResolver {
 /// queue; redirects are off because they would reach a host [`PushResolver`] never checked.
 /// A proxy resolves the host itself, so proxy users keep the old unchecked path, and their
 /// proxy's own host (often loopback or LAN) must not go through [`PushResolver`] either.
-fn build_push_client(lookup: Lookup, through_proxy: bool) -> Result<reqwest::Client, String> {
+fn build_push_client(lookup: Lookup, proxy: Option<&str>) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none());
-    let builder = if through_proxy {
-        builder
-    } else {
-        builder
+    let builder = match proxy {
+        // Set explicitly so NO_PROXY cannot send a push direct: this client has no address check.
+        Some(proxy) => builder.proxy(
+            reqwest::Proxy::https(proxy)
+                .map_err(|error| format!("invalid proxy for web push: {error}"))?,
+        ),
+        None => builder
             .no_proxy()
-            .dns_resolver(Arc::new(PushResolver { lookup }))
+            .dns_resolver(Arc::new(PushResolver { lookup })),
     };
     builder
         .build()
         .map_err(|error| format!("failed to build the push client: {error}"))
 }
 
-/// Mirrors how reqwest picks a proxy for an https URL: the first of each pair that is set.
-fn proxy_configured() -> bool {
+/// The proxy reqwest would pick for an https URL: the first set variable of each pair.
+fn configured_proxy() -> Option<String> {
     [["HTTPS_PROXY", "https_proxy"], ["ALL_PROXY", "all_proxy"]]
         .iter()
-        .any(|names| {
+        .find_map(|names| {
             names
                 .iter()
                 .find_map(|name| std::env::var(name).ok())
-                .is_some_and(|value| !value.is_empty())
+                .filter(|value| !value.is_empty())
         })
 }
 
@@ -872,7 +875,7 @@ mod tests {
     }
 
     fn push_client(lookup: Lookup) -> reqwest::Client {
-        build_push_client(lookup, false).expect("push client")
+        build_push_client(lookup, None).expect("push client")
     }
 
     fn fixed_lookup(answer: &[&str]) -> Lookup {
@@ -1470,11 +1473,12 @@ mod tests {
     const PROXY_PROBE_ENV: &str = "SEALWIRE_PUSH_PROXY_PROBE";
 
     // Users who need a proxy to reach the push services keep working, including a proxy
-    // named by a host that resolves to a loopback or LAN address.
+    // named by a host that resolves to a loopback or LAN address. Nothing may go direct,
+    // even for a host NO_PROXY lists: that client has no address check.
     #[tokio::test]
     async fn push_requests_go_through_a_proxy_set_in_the_environment() {
-        let (port, dialed) = counting_listener("127.0.0.1:0").await;
-        let proxy = format!("http://localhost:{port}");
+        let (proxy_port, via_proxy) = counting_listener("127.0.0.1:0").await;
+        let (direct_port, direct) = counting_listener("127.0.0.1:0").await;
         let probe = format!(
             "{}::push_proxy_probe",
             module_path!().split_once("::").unwrap().1
@@ -1482,12 +1486,12 @@ mod tests {
         // Proxy settings are read from the process environment, so the probe runs in a child.
         let output = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([probe.as_str(), "--exact", "--ignored"])
-            .env(PROXY_PROBE_ENV, "1")
-            .env("HTTPS_PROXY", &proxy)
+            .env(PROXY_PROBE_ENV, direct_port.to_string())
+            .env("HTTPS_PROXY", format!("http://localhost:{proxy_port}"))
+            .env("NO_PROXY", "*")
             .env_remove("https_proxy")
             .env_remove("ALL_PROXY")
             .env_remove("all_proxy")
-            .env_remove("NO_PROXY")
             .env_remove("no_proxy")
             .output()
             .await
@@ -1498,8 +1502,13 @@ mod tests {
             "the probe did not run: {stdout}{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert_eq!(
+            direct.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "with a proxy configured, a push connected directly"
+        );
         assert!(
-            dialed.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            via_proxy.load(std::sync::atomic::Ordering::SeqCst) > 0,
             "the push did not go through the proxy in HTTPS_PROXY"
         );
     }
@@ -1507,12 +1516,13 @@ mod tests {
     #[tokio::test]
     #[ignore = "run by push_requests_go_through_a_proxy_set_in_the_environment"]
     async fn push_proxy_probe() {
-        if std::env::var_os(PROXY_PROBE_ENV).is_none() {
+        let Ok(direct_port) = std::env::var(PROXY_PROBE_ENV) else {
             return;
-        }
-        let _ = build_push_client(no_dns(), proxy_configured())
+        };
+        // `localhost` keeps a direct attempt on this machine instead of real DNS.
+        let _ = build_push_client(no_dns(), configured_proxy().as_deref())
             .expect("push client")
-            .post("https://notify.attacker.test/push")
+            .post(format!("https://localhost:{direct_port}/push"))
             .send()
             .await;
     }
