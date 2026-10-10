@@ -213,6 +213,11 @@ pub struct DeviceAccessDecision {
 /// enrollment tokens, relay leases, and device caps are evaluated.
 #[async_trait]
 pub trait BrokerAccessStrategy: Send + Sync {
+    /// Called only for broker-issued credentials; expiry must not turn a known caller anonymous.
+    async fn relay_quota_key(&self, _relay_id: &str) -> Result<Option<String>, AccessDenial> {
+        Ok(None)
+    }
+
     /// Authorize (and classify) an enrollment attempt before the control plane
     /// persists a registration. `enrollment_token` is optional; open strategies
     /// ignore it. `existing_relay_id` is set when re-enrolling an identity that

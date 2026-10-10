@@ -1,5 +1,215 @@
 use super::*;
 
+#[tokio::test]
+async fn credential_admission_random_tokens_never_query_or_reload_the_database() {
+    for forced in [false, true] {
+        let path = temp_state_path("admission-random");
+        let plane = shared_json_plane(&path, |inner| {
+            inner.force_reload_before_use = forced;
+        })
+        .await;
+        let outcomes = unknown_bearer_streams(&plane).await;
+        assert!(outcomes.iter().all(Result::is_err));
+        assert_eq!(plane.inner.probe_count.load(Ordering::SeqCst), 0);
+        assert_eq!(full_loads(&plane), 0);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[tokio::test]
+async fn credential_admission_unknown_client_ids_never_probe_the_database() {
+    let path = temp_state_path("admission-client-id");
+    let plane = shared_json_plane(&path, |_| {}).await;
+    let result = plane
+        .create_credential_refresh_challenge(
+            CredentialRefreshChallengeRequest {
+                client_id: "client-fabricated".to_string(),
+                broker_room_id: None,
+                device_id: None,
+                nonce: "fresh-nonce".to_string(),
+                signature: STANDARD.encode([0_u8; 64]),
+            },
+            "https://broker.example",
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(plane.inner.probe_count.load(Ordering::SeqCst), 0);
+    assert_eq!(full_loads(&plane), 0);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn credential_admission_forged_tags_and_wrong_token_kinds_never_probe() {
+    let path = temp_state_path("admission-tag");
+    let reader = shared_json_plane(&path, |_| {}).await;
+    let writer = json_plane(&path).await;
+    let relay = writer
+        .issue_relay_registration_for_verify_key(&ticket_verify_key(), None)
+        .await
+        .unwrap();
+    let device = writer
+        .issue_device_grant(
+            &relay.relay_refresh_token,
+            device_request(&relay, "phone"),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut forged = device.device_refresh_token.clone().into_bytes();
+    let at = forged.len() - 5;
+    forged[at] = if forged[at] == b'A' { b'B' } else { b'A' };
+    assert!(reader
+        .issue_device_ws_token(std::str::from_utf8(&forged).unwrap())
+        .await
+        .is_err());
+    assert!(reader
+        .issue_client_session(&device.device_refresh_token)
+        .await
+        .is_err());
+    assert!(reader
+        .issue_device_ws_token(&relay.relay_refresh_token)
+        .await
+        .is_err());
+    assert_eq!(reader.inner.probe_count.load(Ordering::SeqCst), 0);
+    assert_eq!(full_loads(&reader), 0);
+    reader
+        .issue_device_ws_token(&device.device_refresh_token)
+        .await
+        .unwrap();
+    assert_eq!(reader.inner.probe_count.load(Ordering::SeqCst), 1);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn credential_admission_a_public_client_id_needs_its_key_before_any_lookup() {
+    use ed25519_dalek::Signer;
+    let path = temp_state_path("admission-proof");
+    let reader = shared_json_plane(&path, |_| {}).await;
+    let writer = json_plane(&path).await;
+    let key = ticket_signing_key();
+    let client_id = {
+        let mut store = writer.inner.state.lock().await;
+        let (id, _) = store.issue_or_rotate_client_identity(
+            &writer.inner.credential_key,
+            &ticket_verify_key(),
+            None,
+            unix_now(),
+            100,
+        );
+        writer.persist(&mut store).await.unwrap();
+        id
+    };
+    assert!(client_id.len() <= MAX_ID_BYTES);
+    let mut request = CredentialRefreshChallengeRequest {
+        client_id,
+        broker_room_id: None,
+        device_id: None,
+        nonce: "new-nonce".into(),
+        signature: STANDARD.encode([0_u8; 64]),
+    };
+    let origin = "https://broker.example";
+    assert!(reader
+        .create_credential_refresh_challenge(request.clone(), origin)
+        .await
+        .is_err());
+    assert_eq!(reader.inner.probe_count.load(Ordering::SeqCst), 0);
+    request.signature = STANDARD.encode(
+        key.sign(credential_refresh_init_message(&request, origin).as_bytes())
+            .to_bytes(),
+    );
+    reader
+        .create_credential_refresh_challenge(request, origin)
+        .await
+        .unwrap();
+    assert_eq!(reader.inner.probe_count.load(Ordering::SeqCst), 1);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn credential_admission_legacy_tokens_survive_restart_restore_and_rotation_but_not_revoke() {
+    let path = temp_state_path("admission-legacy");
+    let legacy_token = "dref-issued-before-upgrade";
+    let legacy_grace = "dref-superseded-before-upgrade";
+    let mut stored = PublicControlStateStore::default();
+    stored.seed_relay_registrations(parse_relay_registrations(Some(serde_json::json!([{
+        "relay_id": "relay-elsewhere", "broker_room_id": "room-elsewhere", "refresh_token": "legacy-relay", "relay_verify_key": ticket_verify_key(),
+    }]).to_string())).unwrap());
+    save_public_control_json(&path, &stored).await.unwrap();
+    mint_device_token_on_disk(&path, legacy_token).await;
+    let mut stored = load_public_control_json(&path).await.unwrap();
+    stored
+        .grants_by_hash
+        .get_mut(&sha256_hex(legacy_token))
+        .unwrap()
+        .superseded
+        .push(SupersededToken {
+            refresh_token_hash: sha256_hex(legacy_grace),
+            expires_at: unix_now() + 1000,
+        });
+    let old_client = PersistedClientIdentity {
+        client_id: "client-old-id".into(),
+        client_verify_key: ticket_verify_key(),
+        refresh_token_hash: sha256_hex("legacy-client"),
+        created_at: unix_now(),
+        client_label: None,
+        superseded: Vec::new(),
+    };
+    stored
+        .client_registrations_by_hash
+        .insert(old_client.refresh_token_hash.clone(), old_client);
+    save_public_control_json(&path, &stored).await.unwrap();
+    let writer = json_plane(&path).await;
+    writer.issue_client_session("legacy-client").await.unwrap();
+    writer.issue_device_ws_token(legacy_grace).await.unwrap();
+    let mut stored = load_public_control_json(&path).await.unwrap();
+    let device = stored
+        .grants_by_hash
+        .remove(&sha256_hex(legacy_token))
+        .unwrap();
+    save_public_control_json(&path, &stored).await.unwrap();
+    let reader = shared_json_plane(&path, |_| {}).await;
+    stored
+        .grants_by_hash
+        .insert(device.refresh_token_hash.clone(), device);
+    save_public_control_json(&path, &stored).await.unwrap();
+    reader.issue_device_ws_token(legacy_token).await.unwrap();
+    let rotated = reader
+        .issue_device_grant(
+            "legacy-relay",
+            DeviceGrantRequest {
+                relay_id: "relay-elsewhere".into(),
+                broker_room_id: "room-elsewhere".into(),
+                device_id: "device-elsewhere".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let restarted = json_plane(&path).await;
+    restarted.issue_device_ws_token(legacy_token).await.unwrap();
+    restarted
+        .issue_device_ws_token(&rotated.device_refresh_token)
+        .await
+        .unwrap();
+    restarted
+        .revoke_device_grant(
+            "legacy-relay",
+            "device-elsewhere",
+            DeviceGrantRevokeRequest {
+                relay_id: "relay-elsewhere".into(),
+                broker_room_id: "room-elsewhere".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(restarted.issue_device_ws_token(legacy_token).await.is_err());
+    assert!(restarted
+        .issue_device_ws_token(&rotated.device_refresh_token)
+        .await
+        .is_err());
+    let _ = std::fs::remove_file(path);
+}
+
 fn temp_state_path(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "public-control-miss-reload-{tag}-{}-{}.json",
@@ -158,8 +368,8 @@ async fn unknown_bearers_never_buy_a_full_reload_while_memory_is_fresh() {
     );
     assert_eq!(loads, 0, "40 unknown bearers caused {loads} full reloads");
     assert_eq!(
-        probes, 40,
-        "each unknown bearer should cost one indexed probe"
+        probes, 0,
+        "fabricated tokens must be rejected before the database"
     );
 }
 
@@ -314,17 +524,24 @@ async fn a_load_that_read_before_the_mint_does_not_make_a_miss_final() {
     let reader = shared_json_plane(&path, |_| {}).await;
     json_plane(&path).await;
 
+    let token = reader
+        .inner
+        .credential_key
+        .mint(CredentialKind::Device, "relay-elsewhere");
     let held = reader.inner.state.lock().await;
     let request = {
         let reader = reader.clone();
-        tokio::spawn(async move { reader.issue_device_ws_token("dref-early").await })
+        {
+            let token = token.clone();
+            tokio::spawn(async move { reader.issue_device_ws_token(&token).await })
+        }
     };
     tokio::time::sleep(Duration::from_millis(20)).await;
     let loaded = reader
         .load_full_state()
         .await
         .expect("load before the mint");
-    mint_device_token_on_disk(&path, "dref-early").await;
+    mint_device_token_on_disk(&path, &token).await;
     let mut held = held;
     *held = loaded;
     drop(held);
@@ -345,9 +562,16 @@ async fn a_positive_probe_is_not_overruled_by_a_load_that_began_before_it() {
     .await;
     json_plane(&path).await;
 
+    let token = reader
+        .inner
+        .credential_key
+        .mint(CredentialKind::Device, "relay-elsewhere");
     let request = {
         let reader = reader.clone();
-        tokio::spawn(async move { reader.issue_device_ws_token("dref-probed").await })
+        {
+            let token = token.clone();
+            tokio::spawn(async move { reader.issue_device_ws_token(&token).await })
+        }
     };
     tokio::time::sleep(Duration::from_millis(20)).await;
     {
@@ -357,7 +581,7 @@ async fn a_positive_probe_is_not_overruled_by_a_load_that_began_before_it() {
             .await
             .expect("load before the mint");
     }
-    mint_device_token_on_disk(&path, "dref-probed").await;
+    mint_device_token_on_disk(&path, &token).await;
     release.add_permits(1);
     let outcome = request.await.expect("request should finish");
     let _ = std::fs::remove_file(&path);
@@ -380,8 +604,12 @@ async fn a_database_failure_never_reads_as_an_invalid_credential() {
         .persistence_down
         .store(true, Ordering::SeqCst);
 
-    let from_probe = probe_fails.issue_device_ws_token("dref-any").await;
-    let from_load = load_fails.issue_device_ws_token("dref-any").await;
+    let token = probe_fails
+        .inner
+        .credential_key
+        .mint(CredentialKind::Device, "relay-elsewhere");
+    let from_probe = probe_fails.issue_device_ws_token(&token).await;
+    let from_load = load_fails.issue_device_ws_token(&token).await;
     let _ = std::fs::remove_file(&path);
 
     for (path_name, outcome) in [("probe", from_probe), ("reload", from_load)] {
@@ -552,13 +780,20 @@ async fn a_forced_reload_during_an_outage_is_attempted_once_not_per_request() {
     .await;
     plane.inner.persistence_down.store(true, Ordering::SeqCst);
 
-    let outcomes = unknown_bearer_streams(&plane).await;
+    let token = plane
+        .inner
+        .credential_key
+        .mint(CredentialKind::Device, "relay-forced");
+    let mut outcomes = Vec::new();
+    for _ in 0..40 {
+        outcomes.push(plane.issue_device_ws_token(&token).await);
+    }
     let loads = full_loads(&plane);
     let _ = std::fs::remove_file(&path);
 
     assert!(outcomes.iter().all(Result::is_err));
     assert!(
-        loads <= 2,
+        (1..=2).contains(&loads),
         "40 requests during an outage made {loads} full-reload attempts"
     );
 }

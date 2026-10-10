@@ -9,8 +9,9 @@ use super::{
     random_token, sha256_hex, trimmed_option_string, unix_now, JoinTicketClaims,
     PublicControlPlane, RelayControlChallengeRequest, RelayControlChallengeResponse,
     RelayWsTokenChallengeRequest, RelayWsTokenChallengeResponse, RelayWsTokenRequest,
-    RelayWsTokenResponse, DEFAULT_RELAY_WS_TICKET_ORIGIN, MAX_PENDING_RELAY_CONTROL_CHALLENGES,
-    MAX_PENDING_RELAY_WS_TICKET_CHALLENGES, MAX_TICKET_ORIGIN_BYTES, PUBLIC_ORIGIN_ENV,
+    RelayWsTokenResponse, DEFAULT_RELAY_WS_TICKET_ORIGIN,
+    MAX_PENDING_RELAY_CONTROL_CHALLENGES_PER_RELAY,
+    MAX_PENDING_RELAY_WS_TICKET_CHALLENGES_PER_RELAY, MAX_TICKET_ORIGIN_BYTES, PUBLIC_ORIGIN_ENV,
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -43,8 +44,12 @@ impl RelayProofTarget {
 
     fn challenge_parameters(&self) -> (&'static str, &'static str, usize) {
         match self {
-            Self::WsTicket { .. } => ("wch", "wt", MAX_PENDING_RELAY_WS_TICKET_CHALLENGES),
-            Self::Control { .. } => ("cch", "ct", MAX_PENDING_RELAY_CONTROL_CHALLENGES),
+            Self::WsTicket { .. } => (
+                "wch",
+                "wt",
+                MAX_PENDING_RELAY_WS_TICKET_CHALLENGES_PER_RELAY,
+            ),
+            Self::Control { .. } => ("cch", "ct", MAX_PENDING_RELAY_CONTROL_CHALLENGES_PER_RELAY),
         }
     }
 }
@@ -131,7 +136,12 @@ impl PublicControlPlane {
         };
         let mut pending = challenges.lock().await;
         pending.retain(|_, item| item.expires_at > now);
-        if pending.len() >= capacity {
+        if pending
+            .values()
+            .filter(|entry| entry.context.identity.relay_id == context.identity.relay_id)
+            .count()
+            >= capacity
+        {
             return Err(format!(
                 "too many pending {} challenges; retry shortly",
                 context.target.label()

@@ -96,6 +96,82 @@ async fn test_url() -> Option<(String, tokio::sync::MutexGuard<'static, ()>)> {
 }
 
 #[tokio::test]
+async fn postgres_credential_admission_migrates_old_tokens_and_recognizes_another_brokers_issuance()
+{
+    let Some((url, _serial)) = test_url().await else {
+        return;
+    };
+    let pool = connect_and_init(&url).await;
+    truncate_all(&pool).await;
+    sqlx::query("DROP TABLE IF EXISTS public_legacy_credentials")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let old_token = "rref-before-hmac-upgrade";
+    let old = store_from(
+        vec![relay_reg(&sha256_hex(old_token), None)],
+        vec![],
+        vec![],
+        vec![],
+    );
+    save_public_control_postgres(&pool, &PublicControlStateStore::default(), &old)
+        .await
+        .unwrap();
+    let make = || {
+        PublicControlPlane::from_parts_with_postgres(
+            Some("postgres-admission-issuer-a3f76b4c2089d15e6b0fa873c4e9521d".into()),
+            None,
+            None,
+            Some(url.clone()),
+            None,
+            None,
+        )
+    };
+    let reader = make().await.unwrap();
+    let relay = old.relay_registrations_by_hash.values().next().unwrap();
+    reader
+        .authenticate_relay(old_token, &relay.relay_id, &relay.broker_room_id)
+        .await
+        .unwrap();
+    let stored: String =
+        sqlx::query_scalar("SELECT credentials FROM public_legacy_credentials WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(stored.contains(&sha256_hex(old_token)));
+    assert!(!stored.contains(old_token));
+    let writer = make().await.unwrap();
+    let issued = writer
+        .issue_device_grant(
+            old_token,
+            DeviceGrantRequest {
+                relay_id: relay.relay_id.clone(),
+                broker_room_id: relay.broker_room_id.clone(),
+                device_id: "new-phone".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(reader
+        .issue_device_session("dref-fabricated")
+        .await
+        .is_err());
+    assert_eq!(reader.inner.probe_count.load(Ordering::SeqCst), 0);
+    reader
+        .issue_device_session(&issued.device_refresh_token)
+        .await
+        .unwrap();
+    assert_eq!(reader.inner.probe_count.load(Ordering::SeqCst), 1);
+    let restarted = make().await.unwrap();
+    restarted
+        .authenticate_relay(old_token, &relay.relay_id, &relay.broker_room_id)
+        .await
+        .unwrap();
+    truncate_all(&pool).await;
+}
+
+#[tokio::test]
 async fn postgres_rotation_cannot_restore_a_concurrently_revoked_device() {
     assert_postgres_rotation_revoke_conflict(false).await;
 }
@@ -599,6 +675,10 @@ fn postgres_plane(pool: PgPool, reload_before_use: bool) -> PublicControlPlane {
                 b"client-lockout-repro-issuer-a3f76b4c2089d15e6b0fa873c4e9521d",
             )
             .expect("issuer key"),
+            credential_key: CredentialKey::new(
+                b"client-lockout-repro-issuer-a3f76b4c2089d15e6b0fa873c4e9521d",
+            ),
+            legacy_credentials: LegacyCredentials::default(),
             relay_ws_ttl_secs: DEFAULT_PUBLIC_RELAY_WS_TTL_SECS,
             device_ws_ttl_secs: DEFAULT_PUBLIC_DEVICE_WS_TTL_SECS,
             rotation_grace_secs: DEFAULT_PUBLIC_ROTATION_GRACE_SECS,
@@ -773,11 +853,12 @@ async fn client_token_in_db_but_not_in_memory_is_rejected_without_reload() {
     let pool = connect_and_init(&url).await;
     truncate_all(&pool).await;
 
-    let token = "cref-lockout-repro-token";
-    inject_client_identity_into_db(&pool, "client-lockout", token).await;
+    let token = CredentialKey::new(b"client-lockout-repro-issuer-a3f76b4c2089d15e6b0fa873c4e9521d")
+        .mint(CredentialKind::Client, "client-lockout");
+    inject_client_identity_into_db(&pool, "client-lockout", &token).await;
 
     let plane = postgres_plane(pool.clone(), false);
-    let result = plane.issue_client_session(token).await;
+    let result = plane.issue_client_session(&token).await;
 
     truncate_all(&pool).await;
 
@@ -804,11 +885,12 @@ async fn client_token_in_db_authenticates_with_reload_before_use() {
     let pool = connect_and_init(&url).await;
     truncate_all(&pool).await;
 
-    let token = "cref-lockout-repro-token";
-    inject_client_identity_into_db(&pool, "client-lockout", token).await;
+    let token = CredentialKey::new(b"client-lockout-repro-issuer-a3f76b4c2089d15e6b0fa873c4e9521d")
+        .mint(CredentialKind::Client, "client-lockout");
+    inject_client_identity_into_db(&pool, "client-lockout", &token).await;
 
     let plane = postgres_plane(pool.clone(), true);
-    let session = plane.issue_client_session(token).await;
+    let session = plane.issue_client_session(&token).await;
 
     truncate_all(&pool).await;
 
@@ -835,22 +917,42 @@ async fn postgres_probe_gates_the_reload_on_a_miss() {
         succeeded: true,
     });
 
+    let known_token = plane
+        .inner
+        .credential_key
+        .mint(CredentialKind::Client, "client-probe");
+    let current_token = plane
+        .inner
+        .credential_key
+        .mint(CredentialKind::Client, "client-rotated");
+    let old_token = plane
+        .inner
+        .credential_key
+        .mint(CredentialKind::Client, "client-rotated");
+    let expired_current = plane
+        .inner
+        .credential_key
+        .mint(CredentialKind::Client, "client-expired");
+    let expired_token = plane
+        .inner
+        .credential_key
+        .mint(CredentialKind::Client, "client-expired");
     let unknown = plane.issue_client_session("cref-probe-unknown").await;
     let loads_after_unknown = plane.inner.full_load_count.load(Ordering::SeqCst);
-    inject_client_identity_into_db(&pool, "client-probe", "cref-probe-token").await;
-    let known = plane.issue_client_session("cref-probe-token").await;
+    inject_client_identity_into_db(&pool, "client-probe", &known_token).await;
+    let known = plane.issue_client_session(&known_token).await;
     // Rotated elsewhere: the old token lives only in the superseded JSON column.
     sqlx::query(
         "INSERT INTO public_client_identities \
          (refresh_token_hash, client_id, client_verify_key, created_at, client_label, \
           superseded_tokens) VALUES ($1, $2, $3, 300, NULL, $4)",
     )
-    .bind(sha256_hex("cref-probe-current"))
+    .bind(sha256_hex(&current_token))
     .bind("client-rotated")
     .bind("cvk-client-rotated")
     .bind(
         encode_superseded(&[SupersededToken {
-            refresh_token_hash: sha256_hex("cref-probe-old"),
+            refresh_token_hash: sha256_hex(&old_token),
             expires_at: unix_now() + 3600,
         }])
         .expect("encode superseded"),
@@ -858,18 +960,18 @@ async fn postgres_probe_gates_the_reload_on_a_miss() {
     .execute(&pool)
     .await
     .expect("inject rotated client identity row");
-    let rotated = plane.issue_client_session("cref-probe-old").await;
+    let rotated = plane.issue_client_session(&old_token).await;
     sqlx::query(
         "INSERT INTO public_client_identities \
          (refresh_token_hash, client_id, client_verify_key, created_at, client_label, \
           superseded_tokens) VALUES ($1, $2, $3, 300, NULL, $4)",
     )
-    .bind(sha256_hex("cref-probe-expired-current"))
+    .bind(sha256_hex(&expired_current))
     .bind("client-expired")
     .bind("cvk-client-expired")
     .bind(
         encode_superseded(&[SupersededToken {
-            refresh_token_hash: sha256_hex("cref-probe-expired"),
+            refresh_token_hash: sha256_hex(&expired_token),
             expires_at: 1,
         }])
         .expect("encode superseded"),
@@ -878,7 +980,7 @@ async fn postgres_probe_gates_the_reload_on_a_miss() {
     .await
     .expect("inject expired client identity row");
     let loads_before_expired = plane.inner.full_load_count.load(Ordering::SeqCst);
-    let expired = plane.issue_client_session("cref-probe-expired").await;
+    let expired = plane.issue_client_session(&expired_token).await;
     let loads_after_expired = plane.inner.full_load_count.load(Ordering::SeqCst);
     truncate_all(&pool).await;
 

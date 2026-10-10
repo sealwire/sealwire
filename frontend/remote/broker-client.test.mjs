@@ -1967,7 +1967,7 @@ function resetRemoteIdentityState(state) {
   state.pendingActionChunks?.clear?.();
 }
 
-function mockSignedRefreshFetch(calls, room = null) {
+function mockSignedRefreshFetch(calls, room = null, initialStatus = 401) {
   let recovered = false;
   const device = {
     broker_room_id: "room-a",
@@ -2022,7 +2022,7 @@ function mockSignedRefreshFetch(calls, room = null) {
       } };
     }
     if (!recovered) {
-      return { ok: false, status: 401, async json() { return { message: "expired old token" }; } };
+      return { ok: false, status: initialStatus, async json() { return { message: "missing cookie or exhausted source allowance" }; } };
     }
     return { ok: true, status: 200, async json() {
       return path === "/api/public/relays" ? { client_id: "client-1", relays: [] } : device;
@@ -2076,7 +2076,8 @@ test("client recovery never signs for a broker outside the page origin", async (
   assert.equal(calls.includes("/api/public/client/refresh"), false);
 });
 
-test("expired client cookie recovers with a signed challenge", async (t) => {
+for (const initialStatus of [401, 429]) {
+test(`${initialStatus} client cookie recovers with a signed challenge`, async (t) => {
   installBrowserStubs();
   window.location.href = "https://broker.example.test/";
   const { state } = await import("./state.js");
@@ -2084,7 +2085,7 @@ test("expired client cookie recovers with a signed challenge", async (t) => {
   t.after(() => resetRemoteIdentityState(state));
   state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
   const calls = [];
-  globalThis.fetch = mockSignedRefreshFetch(calls);
+  globalThis.fetch = mockSignedRefreshFetch(calls, null, initialStatus);
   const { refreshRelayDirectory } = await import("./broker-client.js");
 
   await refreshRelayDirectory("expired cookie", { silent: true });
@@ -2097,7 +2098,7 @@ test("expired client cookie recovers with a signed challenge", async (t) => {
   ]);
 });
 
-test("expired device cookie recovers with a signed challenge", async (t) => {
+test(`${initialStatus} device cookie recovers with a signed challenge`, async (t) => {
   installBrowserStubs();
   window.location.href = "https://broker.example.test/";
   FakeWebSocket.instances = [];
@@ -2110,7 +2111,7 @@ test("expired device cookie recovers with a signed challenge", async (t) => {
   seedSocketState(state);
   state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
   const calls = [];
-  globalThis.fetch = mockSignedRefreshFetch(calls, "room-a");
+  globalThis.fetch = mockSignedRefreshFetch(calls, "room-a", initialStatus);
   const { connectBroker } = await import("./broker-client.js");
 
   await connectBroker("expired cookie");
@@ -2121,6 +2122,8 @@ test("expired device cookie recovers with a signed challenge", async (t) => {
   assert.match(FakeWebSocket.instances[0].url, /join_ticket=signed-recovery-ws-token/);
   assert.ok(calls.includes("/api/public/client/refresh"));
 });
+
+}
 
 test("a lost recovery challenge retries without expiring the paired device", async (t) => {
   const browser = installBrowserStubs();
@@ -2163,6 +2166,31 @@ test("a lost recovery challenge retries without expiring the paired device", asy
   assert.equal(state.remoteAuth.deviceSessionExpired, false);
   assert.equal(state.remoteAuth.deviceJoinTicket, "signed-recovery-ws-token");
 });
+
+for (const foreignBroker of [false, true]) {
+  test(`rate-limited recovery preserves the pairing (${foreignBroker ? "foreign" : "same"} broker)`, async (t) => {
+    const browser = installBrowserStubs();
+    window.location.href = "https://broker.example.test/";
+    FakeWebSocket.instances = [];
+    const { state, saveRemoteAuth } = await import("./state.js");
+    resetRemoteIdentityState(state);
+    t.after(() => resetRemoteIdentityState(state));
+    seedCookieOnlyRoomAProfile(state, saveRemoteAuth);
+    saveRemoteAuth({ ...state.remoteAuth, brokerUrl: foreignBroker ? "wss://other.example.test" : "wss://broker.example.test" });
+    state.clientAuth = { clientId: "client-1", brokerControlUrl: "https://broker.example.test" };
+    const paths = [];
+    globalThis.fetch = async (url) => {
+      paths.push(new URL(url).pathname);
+      return { ok: false, status: 429, async json() { return { message: "rate limited" }; } };
+    };
+    const { connectBroker } = await import("./broker-client.js");
+    await connectBroker("source allowance exhausted");
+    assert.equal(state.remoteAuth.deviceSessionExpired, false);
+    assert.equal(paths.filter((path) => path === "/api/public/client/refresh/challenge").length, foreignBroker ? 0 : 1);
+    assert.equal(browser.scheduledTimerDelays().length, 1);
+    assert.equal(FakeWebSocket.instances.length, 0);
+  });
+}
 
 test("revoked device recovery stops without scheduling another attempt", async (t) => {
   const browser = installBrowserStubs();

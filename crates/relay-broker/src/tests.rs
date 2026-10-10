@@ -3526,7 +3526,7 @@ async fn relay_ws_ticket_challenge_rejects_expiry_replay_and_double_complete() {
 #[tokio::test]
 async fn relay_ws_ticket_challenges_are_capped() {
     let plane = test_public_control_plane().await;
-    for index in 0..4096 {
+    for index in 0..64 {
         plane
             .create_relay_ws_ticket_challenge(
                 "relay-refresh-1",
@@ -5508,7 +5508,7 @@ async fn public_api_rate_limit_is_enforced() {
     let address = spawn_public_mode_app_with(
         test_public_control_plane().await,
         BrokerHardeningConfig {
-            public_api_rate_limit_per_minute: 1,
+            authenticated_api_rate_limit_per_minute: 2,
             ..BrokerHardeningConfig::default()
         },
         SecurityHeadersConfig::default(),
@@ -5543,6 +5543,61 @@ async fn public_api_rate_limit_is_enforced() {
 }
 
 #[tokio::test]
+async fn credential_admission_paired_phone_survives_exhausted_anonymous_budget() {
+    let plane = test_public_control_plane().await;
+    let device = plane
+        .issue_device_grant(
+            "relay-refresh-1",
+            DeviceGrantRequest {
+                relay_id: "relay-1".to_string(),
+                broker_room_id: "room-a".to_string(),
+                device_id: "already-paired".to_string(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let address = spawn_public_mode_app_with(
+        plane,
+        BrokerHardeningConfig {
+            public_api_rate_limit_per_minute: 2,
+            public_api_global_rate_limit_per_minute: 2,
+            ..BrokerHardeningConfig::default()
+        },
+        SecurityHeadersConfig::default(),
+    )
+    .await;
+    let http = reqwest::Client::new();
+    for _ in 0..2 {
+        let response = http
+            .post(format!(
+                "http://{address}/api/public/relay-enrollment/challenge"
+            ))
+            .json(&RelayEnrollmentChallengeRequest {
+                relay_verify_key: seeded_relay_verify_key(),
+                relay_label: None,
+            })
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+    let response = http
+        .post(format!("http://{address}/api/public/device/ws-token"))
+        .bearer_auth(device.device_refresh_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "a paired phone must refresh even from the same address as anonymous callers"
+    );
+    let ticket: DeviceWsTokenResponse = response.json().await.unwrap();
+    assert_eq!(ticket.device_id, "already-paired");
+}
+
+#[tokio::test]
 async fn public_api_global_rate_limit_bounds_distinct_client_ips() {
     let guard = BanGuard {
         blocklist: Blocklist::disabled(),
@@ -5559,13 +5614,10 @@ async fn public_api_global_rate_limit_bounds_distinct_client_ips() {
     .await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://{address}/api/public/relay/ws-token");
-    let body = RelayWsTokenRequest {
-        relay_id: "relay-1".to_string(),
-        broker_room_id: "room-a".to_string(),
-        relay_peer_id: "relay-1".to_string(),
-        challenge_id: String::new(),
-        challenge_signature: String::new(),
+    let url = format!("http://{address}/api/public/relay-enrollment/challenge");
+    let body = RelayEnrollmentChallengeRequest {
+        relay_verify_key: seeded_relay_verify_key(),
+        relay_label: None,
     };
     let first = client
         .post(&url)
@@ -6710,7 +6762,15 @@ async fn enrollment_rejects_legacy_license_code_wire_field() {
 #[tokio::test]
 async fn injected_required_token_conflict_idempotence_and_same_identity_race() {
     let access = std::sync::Arc::new(FakeTokenAccessStrategy::new(None));
-    let address = spawn_public_mode_app_with_access(access.clone()).await;
+    let (address, _, _) = spawn_public_mode_app_with_access_hardening(
+        access.clone(),
+        BrokerState::default(),
+        BrokerHardeningConfig {
+            public_api_rate_limit_per_minute: 100,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
 
     let (status, body) = enroll_relay(address, "tok-missing", None)
         .await
@@ -6810,7 +6870,15 @@ async fn injected_device_limit_enforced_through_endpoint() {
 #[tokio::test]
 async fn device_grant_invalid_bearer_hides_access_state() {
     let access = std::sync::Arc::new(FakeTokenAccessStrategy::new(None));
-    let address = spawn_public_mode_app_with_access(access.clone()).await;
+    let (address, _, _) = spawn_public_mode_app_with_access_hardening(
+        access.clone(),
+        BrokerState::default(),
+        BrokerHardeningConfig {
+            public_api_rate_limit_per_minute: 100,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
     let active = enroll_relay(address, "leak-active", Some("ACTIVE-T"))
         .await
         .expect("enroll active");
@@ -7054,6 +7122,7 @@ struct ScriptedAccessStrategy {
     deny_device_socket: Option<AccessDenial>,
     deny_release: Option<AccessDenial>,
     device_limit: Option<u32>,
+    quota_key: Option<String>,
     /// Optional pause before returning from authorize_* (for TOCTOU tests).
     authorize_hook: Option<std::sync::Arc<dyn Fn(&AccessRequestContext) + Send + Sync>>,
     seen: std::sync::Mutex<Vec<AccessRequestContext>>,
@@ -7069,6 +7138,7 @@ impl ScriptedAccessStrategy {
             deny_device_socket: None,
             deny_release: None,
             device_limit: None,
+            quota_key: None,
             authorize_hook: None,
             seen: std::sync::Mutex::new(Vec::new()),
         }
@@ -7088,6 +7158,9 @@ impl ScriptedAccessStrategy {
 
 #[async_trait::async_trait]
 impl BrokerAccessStrategy for ScriptedAccessStrategy {
+    async fn relay_quota_key(&self, _relay_id: &str) -> Result<Option<String>, AccessDenial> {
+        Ok(self.quota_key.clone())
+    }
     async fn authorize_enrollment(
         &self,
         ctx: &AccessRequestContext,
@@ -7987,10 +8060,10 @@ async fn access_release_reload_uncertain_returns_503_even_when_memory_target_cle
 }
 
 #[tokio::test]
-async fn access_release_rate_limit_runs_before_auth_and_strategy() {
+async fn released_credentials_are_rejected_without_consulting_access_again() {
     let access = std::sync::Arc::new(ScriptedAccessStrategy::allow());
     let mut hardening = BrokerHardeningConfig::default();
-    hardening.public_api_rate_limit_per_minute = 1;
+    hardening.authenticated_api_rate_limit_per_minute = 2;
     let (address, _, _) = spawn_public_mode_app_with_access_hardening(
         access.clone(),
         BrokerState::default(),
@@ -8000,7 +8073,7 @@ async fn access_release_rate_limit_runs_before_auth_and_strategy() {
     let enrolled = enroll_relay(address, "release-limit", None)
         .await
         .expect("enroll");
-    // First release succeeds and consumes the single per-route budget.
+    // The control challenge and release consume the same identity budget.
     let released: AccessReleaseResponse = public_post(
         address,
         "/api/public/relay/access/release",
@@ -8021,8 +8094,7 @@ async fn access_release_rate_limit_runs_before_auth_and_strategy() {
         1
     );
 
-    // Second call is rate-limited before auth/strategy (would otherwise be 401
-    // because the refresh chain is already gone).
+    // Released credentials no longer own the relay budget.
     let limited = public_post_response(
         address,
         "/api/public/relay/access/release",
@@ -8033,7 +8105,7 @@ async fn access_release_rate_limit_runs_before_auth_and_strategy() {
         },
     )
     .await;
-    assert_eq!(limited.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.status(), reqwest::StatusCode::UNAUTHORIZED);
     assert_eq!(
         access
             .seen_contexts()
@@ -10124,3 +10196,114 @@ async fn a_spoofed_edge_ip_off_the_edge_cannot_dodge_a_ban_or_spend_a_victims_bu
         "the budget is live and keyed on the edge address"
     );
 }
+
+#[tokio::test]
+async fn audit_public_api_budget_is_per_ipv6_network_not_per_address() {
+    let guard = BanGuard {
+        blocklist: Blocklist::disabled(),
+        trusted_ip_header: Some("x-forwarded-for".parse().unwrap()),
+    };
+    let address = spawn_app_with_guard_and_hardening(
+        guard,
+        BrokerHardeningConfig {
+            public_api_rate_limit_per_minute: 1,
+            public_api_global_rate_limit_per_minute: 100,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/api/public/client/claim");
+    let body = serde_json::json!({ "claim_id": "x", "claim_signature": "x" });
+    let send = |ip: &'static str| {
+        let (client, url, body) = (client.clone(), url.clone(), body.clone());
+        async move {
+            client
+                .post(&url)
+                .header("x-forwarded-for", ip)
+                .json(&body)
+                .send()
+                .await
+                .expect("request")
+                .status()
+        }
+    };
+    assert_ne!(
+        send("2001:db8:9:9::1").await,
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        send("2001:db8:9:9::1").await,
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_ne!(
+        send("2001:db8:1:2::1").await,
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        send("2001:db8:1:2::2").await,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "a second address in the same /64 got a fresh per-client budget"
+    );
+}
+
+#[tokio::test]
+async fn audit_one_address_cannot_fill_the_shared_budget_by_spreading_over_routes() {
+    let guard = BanGuard {
+        blocklist: Blocklist::disabled(),
+        trusted_ip_header: Some("x-forwarded-for".parse().unwrap()),
+    };
+    let address = spawn_app_with_guard_and_hardening(
+        guard,
+        BrokerHardeningConfig {
+            public_api_rate_limit_per_minute: 2,
+            public_api_global_rate_limit_per_minute: 4,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let send = |get: bool, path: &'static str, ip: &'static str| {
+        let client = client.clone();
+        let url = format!("http://{address}{path}");
+        async move {
+            let request = if get {
+                client.get(&url)
+            } else {
+                client.post(&url)
+            };
+            request
+                .header("x-forwarded-for", ip)
+                .send()
+                .await
+                .expect("request")
+                .status()
+        }
+    };
+    let mut admitted = 0;
+    for (get, path) in [
+        (true, "/api/public/relays"),
+        (false, "/api/public/client/session"),
+        (false, "/api/public/device/session"),
+    ] {
+        for _ in 0..2 {
+            let status = send(get, path, "198.51.100.7").await;
+            if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+                admitted += 1;
+            }
+        }
+    }
+    let victim = send(false, "/api/public/device/ws-token", "203.0.113.9").await;
+    assert!(
+        admitted <= 2,
+        "one address got {admitted} requests through, more than its own budget of 2"
+    );
+    assert_ne!(
+        victim,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "one address used up the shared budget and locked out a phone reconnecting from elsewhere"
+    );
+}
+
+#[path = "tests/credential_admission.rs"]
+mod credential_admission_tests;

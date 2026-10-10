@@ -1,4 +1,7 @@
+mod credentials;
 mod relay_proofs;
+pub(crate) use credentials::{CredentialAdmission, CredentialSubject};
+use credentials::{CredentialKey, LegacyCredentials};
 pub(crate) use relay_proofs::verify_relay_control_signature;
 use relay_proofs::{configured_ticket_origin, PendingRelayProofChallenge};
 pub use relay_proofs::{
@@ -82,8 +85,9 @@ const DEFAULT_PUBLIC_DB_MAX_CONNECTIONS: u32 = 5;
 const DEFAULT_PUBLIC_DB_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_PUBLIC_DB_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_PUBLIC_DB_CONCURRENCY: usize = 8;
-// Keep recovery capacity above the default API budget over a challenge's lifetime.
-const MAX_PENDING_CREDENTIAL_REFRESHES: usize = 4096;
+// One relay cannot multiply recovery capacity by creating more client identities.
+const MAX_PENDING_REFRESHES_PER_QUOTA: usize = 64;
+const MAX_CLIENT_IDENTITIES_PER_RELAY: usize = 64;
 const MAX_PENDING_REFRESHES_PER_CLIENT: usize = 4;
 /// Minimum gap between the end of one full reload and the start of the next.
 const MISS_RELOAD_MIN_INTERVAL: Duration = Duration::from_secs(1);
@@ -99,8 +103,8 @@ const MAX_ID_BYTES: usize = 128;
 /// binds if that budget is raised.
 const MAX_PENDING_RELAY_ENROLLMENT_CHALLENGES: usize = 4096;
 const DEFAULT_RELAY_WS_TICKET_CHALLENGE_TTL_SECS: u64 = 60;
-const MAX_PENDING_RELAY_WS_TICKET_CHALLENGES: usize = 4096;
-const MAX_PENDING_RELAY_CONTROL_CHALLENGES: usize = 4096;
+const MAX_PENDING_RELAY_WS_TICKET_CHALLENGES_PER_RELAY: usize = 64;
+const MAX_PENDING_RELAY_CONTROL_CHALLENGES_PER_RELAY: usize = 64;
 pub const RELAY_CONTROL_CHALLENGE_HEADER: &str = "x-relay-control-challenge-id";
 pub const RELAY_CONTROL_SIGNATURE_HEADER: &str = "x-relay-control-signature";
 const MAX_TICKET_ORIGIN_BYTES: usize = 256;
@@ -646,6 +650,8 @@ pub struct PublicControlPlane {
 
 struct PublicControlPlaneInner {
     issuer_key: JoinTicketKey,
+    credential_key: CredentialKey,
+    legacy_credentials: LegacyCredentials,
     relay_ws_ttl_secs: u64,
     device_ws_ttl_secs: u64,
     rotation_grace_secs: u64,
@@ -704,7 +710,7 @@ struct FullLoad {
 }
 
 #[derive(Clone, Copy)]
-enum CredentialKind {
+pub(crate) enum CredentialKind {
     Relay,
     Device,
     Client,
@@ -765,6 +771,7 @@ struct PendingClientClaim {
 }
 
 struct PendingCredentialRefresh {
+    quota_key: String,
     challenge: CredentialRefreshChallengeResponse,
     client_verify_key: String,
     request_nonce: String,
@@ -800,6 +807,8 @@ struct PersistedPublicControlState {
     // scale cleanly to multiple broker instances. Move this state to a shared
     // database before we support multi-broker/public HA deployments.
     schema_version: u32,
+    #[serde(default)]
+    legacy_credentials: Option<LegacyCredentials>,
     #[serde(default)]
     relay_registrations: Vec<PersistedRelayRegistration>,
     #[serde(default)]
@@ -864,6 +873,7 @@ struct PersistedClientRelayGrant {
 
 #[derive(Debug, Default, Clone, PartialEq)]
 struct PublicControlStateStore {
+    legacy_credentials: Option<LegacyCredentials>,
     relay_registrations_by_hash: HashMap<String, PersistedRelayRegistration>,
     client_registrations_by_hash: HashMap<String, PersistedClientIdentity>,
     grants_by_hash: HashMap<String, PersistedDeviceGrant>,
@@ -964,10 +974,14 @@ impl PublicControlPlane {
         if seeded {
             persistence.save(&mut state).await?;
         }
+        let legacy_credentials =
+            LegacyCredentials::load_or_create(&persistence, &mut state).await?;
 
         Ok(Self {
             inner: Arc::new(PublicControlPlaneInner {
                 issuer_key,
+                credential_key: CredentialKey::new(issuer_secret.as_bytes()),
+                legacy_credentials,
                 relay_ws_ttl_secs: parse_optional_u64(
                     PUBLIC_RELAY_WS_TTL_SECS_ENV,
                     relay_ws_ttl_secs,
@@ -1412,7 +1426,10 @@ impl PublicControlPlane {
             .authenticate_relay(bearer_token, &request.relay_id, &request.broker_room_id)
             .await?;
         check_id_length("device_id", &request.device_id)?;
-        let refresh_token = format!("dref-{}", random_token(40).to_ascii_lowercase());
+        let refresh_token = self
+            .inner
+            .credential_key
+            .mint(CredentialKind::Device, &registration.relay_id);
         let refresh_token_hash = sha256_hex(&refresh_token);
         let created_at = unix_now();
 
@@ -1669,7 +1686,25 @@ impl PublicControlPlane {
 
         let created_at = unix_now();
         let mut store = self.lock_state().await?;
+        let existing_id = store
+            .client_identity_for_verify_key(&pending.client_verify_key)
+            .map(|client| client.client_id);
+        let grants: Vec<_> = store
+            .client_relay_grants_by_key
+            .values()
+            .filter(|grant| grant.relay_id == pending.relay_id)
+            .collect();
+        if grants.len() >= MAX_CLIENT_IDENTITIES_PER_RELAY
+            && !grants
+                .iter()
+                .any(|grant| Some(&grant.client_id) == existing_id.as_ref())
+        {
+            return Err(
+                "too many client identities for this relay; revoke an existing device first".into(),
+            );
+        }
         let (client_id, client_refresh_token) = store.issue_or_rotate_client_identity(
+            &self.inner.credential_key,
             &pending.client_verify_key,
             pending.client_label,
             created_at,
@@ -1768,7 +1803,7 @@ impl PublicControlPlane {
         let token_hash = sha256_hex(bearer_token.trim());
         let now = unix_now();
         let Some((mut store, (primary_hash, client))) = self
-            .find_credential(CredentialKind::Client, &token_hash, |store| {
+            .find_credential(CredentialKind::Client, bearer_token, |store| {
                 find_client_identity_for_token(store, &token_hash, now)
             })
             .await?
@@ -1779,8 +1814,12 @@ impl PublicControlPlane {
         if primary_hash != token_hash {
             return Err("client refresh token is invalid; signing proof required".to_string());
         }
-        let refreshed_token =
-            store.rotate_client_identity(&client, unix_now(), self.inner.rotation_grace_secs);
+        let refreshed_token = store.rotate_client_identity(
+            &self.inner.credential_key,
+            &client,
+            unix_now(),
+            self.inner.rotation_grace_secs,
+        );
         self.persist(&mut store).await?;
         Ok((client.client_id, refreshed_token))
     }
@@ -1790,6 +1829,16 @@ impl PublicControlPlane {
         request: CredentialRefreshChallengeRequest,
         broker_origin: &str,
     ) -> Result<CredentialRefreshChallengeResponse, String> {
+        self.create_credential_refresh_challenge_with_quota(request, broker_origin, None)
+            .await
+    }
+
+    pub(crate) async fn create_credential_refresh_challenge_with_quota(
+        &self,
+        request: CredentialRefreshChallengeRequest,
+        broker_origin: &str,
+        quota_key: Option<String>,
+    ) -> Result<CredentialRefreshChallengeResponse, String> {
         check_id_length("client_id", &request.client_id)?;
         check_id_length("nonce", &request.nonce)?;
         if request.nonce.is_empty() {
@@ -1797,6 +1846,12 @@ impl PublicControlPlane {
         }
         if let Some(room) = &request.broker_room_id {
             check_id_length("broker_room_id", room)?;
+        }
+        if self
+            .refresh_challenge_subject(&request, broker_origin)
+            .is_none()
+        {
+            return Err("credential refresh is invalid".to_string());
         }
         let Some((store, client)) = self
             .find_credential(CredentialKind::ClientId, &request.client_id, |store| {
@@ -1826,6 +1881,12 @@ impl PublicControlPlane {
         if request.device_id.is_some() && request.device_id != device_id {
             return Err("credential refresh is invalid".to_string());
         }
+        let quota_key = quota_key.unwrap_or_else(|| {
+            store
+                .client_quota_relay(&client.client_id)
+                .map(|relay| format!("relay:{relay}"))
+                .unwrap_or_else(|| format!("client:{}", client.client_id))
+        });
         drop(store);
         let now = unix_now();
         let challenge = CredentialRefreshChallengeResponse {
@@ -1855,12 +1916,20 @@ impl PublicControlPlane {
                 "too many pending credential refreshes for this client; retry shortly".to_string(),
             );
         }
-        if pending.len() >= MAX_PENDING_CREDENTIAL_REFRESHES {
-            return Err("too many pending credential refreshes; retry shortly".to_string());
+        if pending
+            .values()
+            .filter(|entry| entry.quota_key == quota_key)
+            .count()
+            >= MAX_PENDING_REFRESHES_PER_QUOTA
+        {
+            return Err(
+                "too many pending credential refreshes for this account; retry shortly".to_string(),
+            );
         }
         pending.insert(
             challenge.challenge_id.clone(),
             PendingCredentialRefresh {
+                quota_key,
                 challenge: challenge.clone(),
                 client_verify_key: client.client_verify_key,
                 request_nonce: request.nonce,
@@ -1919,10 +1988,17 @@ impl PublicControlPlane {
                 Ok((device, ws))
             })
             .transpose()?;
-        let client_token =
-            store.rotate_client_identity(&client, now, self.inner.rotation_grace_secs);
+        let client_token = store.rotate_client_identity(
+            &self.inner.credential_key,
+            &client,
+            now,
+            self.inner.rotation_grace_secs,
+        );
         let (device_token, device_ws) = if let Some((mut device, ws)) = device {
-            let token = format!("dref-{}", random_token(40).to_ascii_lowercase());
+            let token = self
+                .inner
+                .credential_key
+                .mint(CredentialKind::Device, &device.relay_id);
             device.superseded = carry_superseded(
                 &device.superseded,
                 device.refresh_token_hash.clone(),
@@ -1998,7 +2074,7 @@ impl PublicControlPlane {
         let token_hash = sha256_hex(bearer_token.trim());
         let grant = {
             let Some((mut store, (primary_hash, grant))) = self
-                .find_credential(CredentialKind::Device, &token_hash, |store| {
+                .find_credential(CredentialKind::Device, bearer_token, |store| {
                     find_device_grant_for_token(store, &token_hash, now)
                 })
                 .await?
@@ -2199,9 +2275,16 @@ impl PublicControlPlane {
     async fn find_credential<T>(
         &self,
         kind: CredentialKind,
-        token_hash: &str,
+        credential: &str,
         lookup: impl Fn(&PublicControlStateStore) -> Option<T>,
     ) -> Result<Option<(MutexGuard<'_, PublicControlStateStore>, T)>, String> {
+        if self.credential_subject(kind, credential).is_none() {
+            return Ok(None);
+        }
+        let token_hash = match kind {
+            CredentialKind::ClientId => credential.to_string(),
+            _ => sha256_hex(credential.trim()),
+        };
         let store = self.lock_state().await?;
         if let Some(found) = lookup(&store) {
             return Ok(Some((store, found)));
@@ -2210,7 +2293,7 @@ impl PublicControlPlane {
             return Ok(None);
         }
         drop(store);
-        if !self.probe_credential(kind, token_hash).await? {
+        if !self.probe_credential(kind, &token_hash).await? {
             return Ok(None);
         }
         let observed = Instant::now();
@@ -2296,7 +2379,7 @@ impl PublicControlPlane {
     ) -> Result<PersistedRelayRegistration, String> {
         let token_hash = sha256_hex(bearer_token.trim());
         let registration = self
-            .find_credential(CredentialKind::Relay, &token_hash, |store| {
+            .find_credential(CredentialKind::Relay, bearer_token, |store| {
                 store.relay_registrations_by_hash.get(&token_hash).cloned()
             })
             .await?
@@ -2318,7 +2401,7 @@ impl PublicControlPlane {
         let token_hash = sha256_hex(bearer_token.trim());
         let now = unix_now();
         let Some((_store, (_, identity))) = self
-            .find_credential(CredentialKind::Client, &token_hash, |store| {
+            .find_credential(CredentialKind::Client, bearer_token, |store| {
                 find_client_identity_for_token(store, &token_hash, now)
             })
             .await?
@@ -2357,7 +2440,7 @@ impl PublicControlPlane {
         let token_hash = sha256_hex(bearer_token.trim());
         let now = unix_now();
         let Some((_store, (_, grant))) = self
-            .find_credential(CredentialKind::Device, &token_hash, |store| {
+            .find_credential(CredentialKind::Device, bearer_token, |store| {
                 find_device_grant_for_token(store, &token_hash, now)
             })
             .await?
@@ -2380,7 +2463,7 @@ impl PublicControlPlane {
         let token_hash = sha256_hex(bearer_token.trim());
         let now = unix_now();
         Ok(self
-            .find_credential(CredentialKind::Device, &token_hash, |store| {
+            .find_credential(CredentialKind::Device, bearer_token, |store| {
                 find_device_grant_for_token(store, &token_hash, now)
             })
             .await?
@@ -2404,7 +2487,10 @@ impl PublicControlPlane {
                 let (relay_id, broker_room_id) = store.issue_new_relay_ids();
                 (relay_id, broker_room_id)
             };
-        let relay_refresh_token = format!("rref-{}", random_token(40).to_ascii_lowercase());
+        let relay_refresh_token = self
+            .inner
+            .credential_key
+            .mint(CredentialKind::Relay, &relay_id);
         let refresh_token_hash = sha256_hex(&relay_refresh_token);
         let registration = PersistedRelayRegistration {
             relay_id: relay_id.clone(),
@@ -2759,6 +2845,7 @@ impl PublicControlStateStore {
             ));
         }
         Ok(Self {
+            legacy_credentials: persisted.legacy_credentials,
             relay_registrations_by_hash: persisted
                 .relay_registrations
                 .into_iter()
@@ -2790,6 +2877,7 @@ impl PublicControlStateStore {
     fn to_persisted(&self) -> PersistedPublicControlState {
         PersistedPublicControlState {
             schema_version: PUBLIC_CONTROL_STATE_VERSION,
+            legacy_credentials: self.legacy_credentials.clone(),
             relay_registrations: self.relay_registrations_by_hash.values().cloned().collect(),
             client_registrations: self
                 .client_registrations_by_hash
@@ -2917,6 +3005,7 @@ impl PublicControlStateStore {
 
     fn issue_or_rotate_client_identity(
         &mut self,
+        credential_key: &CredentialKey,
         client_verify_key: &str,
         client_label: Option<String>,
         created_at: u64,
@@ -2934,9 +3023,13 @@ impl PublicControlStateStore {
                 );
                 (client_id, existing.client_label.clone(), superseded)
             } else {
-                (issue_client_id(client_verify_key), None, Vec::new())
+                (
+                    credential_key.client_id(client_verify_key),
+                    None,
+                    Vec::new(),
+                )
             };
-        let client_refresh_token = format!("cref-{}", random_token(40).to_ascii_lowercase());
+        let client_refresh_token = credential_key.mint(CredentialKind::Client, &client_id);
         let refresh_token_hash = sha256_hex(&client_refresh_token);
         self.client_registrations_by_hash.insert(
             refresh_token_hash.clone(),
@@ -2954,6 +3047,7 @@ impl PublicControlStateStore {
 
     fn rotate_client_identity(
         &mut self,
+        credential_key: &CredentialKey,
         client: &PersistedClientIdentity,
         now: u64,
         grace_secs: u64,
@@ -2974,7 +3068,7 @@ impl PublicControlStateStore {
             );
         }
         self.remove_client_identity_by_client_id(&client.client_id);
-        let client_refresh_token = format!("cref-{}", random_token(40).to_ascii_lowercase());
+        let client_refresh_token = credential_key.mint(CredentialKind::Client, &client.client_id);
         let refresh_token_hash = sha256_hex(&client_refresh_token);
         self.client_registrations_by_hash.insert(
             refresh_token_hash.clone(),
@@ -3526,6 +3620,7 @@ async fn load_public_control_postgres(pool: &PgPool) -> Result<PublicControlStat
 
     PublicControlStateStore::from_persisted(PersistedPublicControlState {
         schema_version: PUBLIC_CONTROL_STATE_VERSION,
+        legacy_credentials: None,
         relay_registrations: relay_rows
             .into_iter()
             .map(decode_relay_registration)
@@ -4141,11 +4236,6 @@ fn carry_superseded(
         kept.drain(..excess);
     }
     kept
-}
-
-fn issue_client_id(client_verify_key: &str) -> String {
-    let digest = sha256_hex(client_verify_key);
-    format!("client-{}", &digest[..16])
 }
 
 fn public_mode_requires_persistent_state() -> bool {

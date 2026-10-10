@@ -84,9 +84,9 @@ use tower_http::{
 use tracing::{debug, warn};
 
 const RATE_LIMIT_WINDOW_SECS: u64 = 60;
-const DEFAULT_PUBLIC_API_RATE_LIMIT_PER_MINUTE: usize = 120;
-/// Cross-client ceiling for public control-plane HTTP requests. Per-IP limits
-/// provide fairness; this cap bounds aggregate work during a distributed flood.
+const DEFAULT_PUBLIC_API_RATE_LIMIT_PER_MINUTE: usize = 5;
+const DEFAULT_AUTHENTICATED_API_RATE_LIMIT_PER_MINUTE: usize = 120;
+// Enrollment can create durable state without a previously issued credential.
 const DEFAULT_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE: usize = 600;
 const DEFAULT_JOIN_RATE_LIMIT_PER_MINUTE: usize = 40;
 /// Join attempts per client network across all rooms. The room is caller-chosen, so the
@@ -230,6 +230,8 @@ const DEVICE_SCOPED_SESSION_COOKIE_PATH: &str = "/api/public/device";
 const DEVICE_SESSION_ROOM_MAX_BYTES: usize = 512;
 const CLIENT_SESSION_COOKIE_NAME: &str = "agent_relay_client_session";
 const DEVICE_SESSION_COOKIE_MAX_AGE_SECS: u64 = 60 * 60 * 24 * 400;
+const AUTHENTICATED_API_RATE_LIMIT_ENV: &str =
+    "RELAY_BROKER_AUTHENTICATED_API_RATE_LIMIT_PER_MINUTE";
 const PUBLIC_API_RATE_LIMIT_ENV: &str = "RELAY_BROKER_PUBLIC_API_RATE_LIMIT_PER_MINUTE";
 const PUBLIC_API_GLOBAL_RATE_LIMIT_ENV: &str =
     "RELAY_BROKER_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE";
@@ -689,6 +691,9 @@ struct VerifiedBrokerJoin {
 struct BrokerHardeningState {
     config: BrokerHardeningConfig,
     rate_limiter: SlidingWindowRateLimiter,
+    credential_rate_limiter: RegisteredRateLimiter,
+    credential_probe_rate_limiter: SlidingWindowRateLimiter,
+    account_rate_limiter: RegisteredRateLimiter,
     /// Separate from `rate_limiter` so join churn cannot fill the map the API shares.
     join_rate_limiter: SlidingWindowRateLimiter,
     /// Keyed by an authenticated relay, so its keys cannot be minted by strangers.
@@ -703,6 +708,7 @@ struct BrokerHardeningState {
 #[derive(Clone, Debug)]
 struct BrokerHardeningConfig {
     public_api_rate_limit_per_minute: usize,
+    authenticated_api_rate_limit_per_minute: usize,
     public_api_global_rate_limit_per_minute: usize,
     join_rate_limit_per_minute: usize,
     join_ip_rate_limit_per_minute: usize,
@@ -741,6 +747,45 @@ impl ByteBudget {
 #[derive(Clone, Default)]
 struct SlidingWindowRateLimiter {
     buckets: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+}
+
+#[derive(Clone, Default)]
+struct RegisteredRateLimiter {
+    inner: Arc<Mutex<RegisteredRateWindows>>,
+}
+
+#[derive(Default)]
+struct RegisteredRateWindows {
+    buckets: HashMap<String, VecDeque<Instant>>,
+    pruned_at: Option<Instant>,
+}
+
+impl RegisteredRateLimiter {
+    async fn allow(&self, key: String, limit: usize) -> bool {
+        let now = Instant::now();
+        let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
+        let cutoff = now.checked_sub(window).unwrap_or(now);
+        let mut inner = self.inner.lock().await;
+        if inner
+            .pruned_at
+            .is_none_or(|last| now.duration_since(last) >= window)
+        {
+            inner
+                .buckets
+                .retain(|_, bucket| bucket.back().is_some_and(|last| *last > cutoff));
+            inner.pruned_at = Some(now);
+        }
+        // Only live registrations reach this map; another account cannot reserve all its slots.
+        let bucket = inner.buckets.entry(key).or_default();
+        while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
+            bucket.pop_front();
+        }
+        if bucket.len() >= limit {
+            return false;
+        }
+        bucket.push_back(now);
+        true
+    }
 }
 
 /// Per-peer token bucket over published **bytes**.
@@ -871,6 +916,8 @@ impl Default for BrokerHardeningConfig {
     fn default() -> Self {
         Self {
             public_api_rate_limit_per_minute: DEFAULT_PUBLIC_API_RATE_LIMIT_PER_MINUTE,
+            authenticated_api_rate_limit_per_minute:
+                DEFAULT_AUTHENTICATED_API_RATE_LIMIT_PER_MINUTE,
             public_api_global_rate_limit_per_minute:
                 DEFAULT_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE,
             join_rate_limit_per_minute: DEFAULT_JOIN_RATE_LIMIT_PER_MINUTE,
@@ -893,6 +940,10 @@ impl Default for BrokerHardeningConfig {
 impl BrokerHardeningConfig {
     fn from_env() -> Result<Self, String> {
         Ok(Self {
+            authenticated_api_rate_limit_per_minute: parse_usize_env(
+                AUTHENTICATED_API_RATE_LIMIT_ENV,
+                DEFAULT_AUTHENTICATED_API_RATE_LIMIT_PER_MINUTE,
+            )?,
             public_api_rate_limit_per_minute: parse_usize_env(
                 PUBLIC_API_RATE_LIMIT_ENV,
                 DEFAULT_PUBLIC_API_RATE_LIMIT_PER_MINUTE,
@@ -1729,6 +1780,9 @@ fn app_with_access_strategy_parts(
             hardening: BrokerHardeningState {
                 config: hardening_config,
                 rate_limiter: SlidingWindowRateLimiter::default(),
+                credential_rate_limiter: RegisteredRateLimiter::default(),
+                credential_probe_rate_limiter: SlidingWindowRateLimiter::default(),
+                account_rate_limiter: RegisteredRateLimiter::default(),
                 join_rate_limiter: SlidingWindowRateLimiter::default(),
                 relay_rate_limiter: SlidingWindowRateLimiter::default(),
                 publish_rate_limiter: SlidingWindowRateLimiter::default(),
@@ -2020,7 +2074,7 @@ async fn public_create_relay_enrollment_challenge(
     State(state): State<BrokerAppState>,
     Json(input): Json<RelayEnrollmentChallengeRequest>,
 ) -> Result<Json<RelayEnrollmentChallengeResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "relay_enrollment_challenge").await?;
+    enforce_shared_api_rate_limit(&state, remote_addr).await?;
     let control_plane = require_public_control_plane(&state)?;
     control_plane
         .create_relay_enrollment_challenge(input)
@@ -2057,7 +2111,7 @@ async fn public_complete_relay_enrollment(
     State(state): State<BrokerAppState>,
     Json(input): Json<RelayEnrollmentCompleteRequest>,
 ) -> Result<Json<RelayEnrollmentResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "relay_enrollment_complete").await?;
+    enforce_shared_api_rate_limit(&state, remote_addr).await?;
 
     let enrollment_token = trimmed_option_string(input.enrollment_token.clone());
 
@@ -2176,7 +2230,18 @@ async fn public_create_relay_ws_ticket_challenge(
     headers: HeaderMap,
     Json(input): Json<RelayWsTokenChallengeRequest>,
 ) -> Result<Json<RelayWsTokenChallengeResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "relay_ws_token_challenge").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Relay,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     control_plane
@@ -2192,7 +2257,18 @@ async fn public_issue_relay_ws_token(
     headers: HeaderMap,
     Json(input): Json<RelayWsTokenRequest>,
 ) -> Result<Json<RelayWsTokenResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "relay_ws_token").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Relay,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
 
     // Authenticate first so an unauthenticated caller cannot probe relay IDs to
     // learn which relays the access strategy would allow or deny.
@@ -2251,7 +2327,18 @@ async fn public_create_relay_control_challenge(
     headers: HeaderMap,
     Json(input): Json<RelayControlChallengeRequest>,
 ) -> Result<Json<RelayControlChallengeResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "relay_control_challenge").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Relay,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     control_plane
@@ -2293,7 +2380,18 @@ async fn public_release_relay_access(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<AccessReleaseResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "relay_access_release").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Relay,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     let input: AccessReleaseRequest = verified_relay_control_body(
@@ -2368,7 +2466,18 @@ async fn public_issue_pairing_ws_token(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<PairingWsTokenResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "pairing_ws_token").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Relay,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     let input: PairingWsTokenRequest = verified_relay_control_body(
@@ -2412,7 +2521,18 @@ async fn public_issue_device_grant(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<DeviceGrantResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "device_grant").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Relay,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     let input: DeviceGrantRequest = verified_relay_control_body(
@@ -2465,7 +2585,18 @@ async fn public_issue_client_grant(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<ClientGrantResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "client_grant").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Relay,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     let input: ClientGrantRequest = verified_relay_control_body(
@@ -2494,7 +2625,11 @@ async fn public_claim_client_identity(
     State(state): State<BrokerAppState>,
     Json(input): Json<ClientClaimRequest>,
 ) -> Result<Json<ClientClaimResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "client_claim").await?;
+    let subject = match state.join_verifier.public_control_plane() {
+        Some(plane) => plane.claim_admission(&input).await,
+        None => None,
+    };
+    enforce_credential_api_rate_limit(&state, remote_addr, subject).await?;
     let control_plane = require_public_control_plane(&state)?;
     control_plane
         .claim_client_identity(input)
@@ -2508,7 +2643,18 @@ async fn public_list_client_relays(
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
 ) -> Result<Json<ClientRelaysResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "client_relays").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Client,
+            client_refresh_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = client_refresh_token(&headers)?;
     match control_plane.list_client_relays(bearer).await {
@@ -2534,7 +2680,18 @@ async fn public_issue_client_session(
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<ClientSessionResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "client_session").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Client,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     let mut response_headers = HeaderMap::new();
@@ -2554,7 +2711,18 @@ async fn public_clear_client_session(
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<DeviceSessionClearResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "clear_client_session").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Client,
+            client_refresh_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let _ = require_public_control_plane(&state)?;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -2573,11 +2741,25 @@ async fn public_create_credential_refresh_challenge(
     headers: HeaderMap,
     Json(input): Json<CredentialRefreshChallengeRequest>,
 ) -> Result<Json<CredentialRefreshChallengeResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "credential_refresh_challenge").await?;
+    let subject = match (
+        state.join_verifier.public_control_plane(),
+        request_origin(&headers, None),
+    ) {
+        (Some(plane), Some(origin)) => plane.refresh_challenge_subject(&input, &origin),
+        _ => None,
+    };
+    let admission = signed_client_admission(
+        &state,
+        remote_addr,
+        subject,
+        input.broker_room_id.as_deref(),
+    )
+    .await?;
+    let quota = enforce_credential_api_rate_limit(&state, remote_addr, admission).await?;
     let origin = request_origin(&headers, None)
         .ok_or_else(|| public_api_error("broker origin is required".to_string()))?;
     require_public_control_plane(&state)?
-        .create_credential_refresh_challenge(input, &origin)
+        .create_credential_refresh_challenge_with_quota(input, &origin, quota)
         .await
         .map(Json)
         .map_err(public_api_error)
@@ -2589,7 +2771,18 @@ async fn public_refresh_credentials(
     headers: HeaderMap,
     Json(input): Json<CredentialRefreshRequest>,
 ) -> Result<(HeaderMap, Json<CredentialRefreshResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "credential_refresh").await?;
+    let subject = match (
+        state.join_verifier.public_control_plane(),
+        request_origin(&headers, None),
+    ) {
+        (Some(plane), Some(origin)) => plane.refresh_subject(&input, &origin).await,
+        _ => None,
+    };
+    let room = require_public_control_plane(&state)?
+        .pending_refresh_room(&input.challenge_id)
+        .await;
+    let admission = signed_client_admission(&state, remote_addr, subject, room.as_deref()).await?;
+    enforce_credential_api_rate_limit(&state, remote_addr, admission).await?;
     let origin = request_origin(&headers, None)
         .ok_or_else(|| public_api_error("broker origin is required".to_string()))?;
     let (response, client_token, device_token) = require_public_control_plane(&state)?
@@ -2634,7 +2827,18 @@ async fn public_rotate_client_identity(
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<ClientIdentityRotateResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "rotate_client_identity").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Client,
+            client_refresh_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let auth = client_refresh_auth(&headers)?;
     let secure = request_uses_https(&headers, None);
@@ -2678,7 +2882,18 @@ async fn public_revoke_client_identity(
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<ClientIdentityRevokeResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "revoke_client_identity").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Client,
+            client_refresh_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let auth = client_refresh_auth(&headers)?;
     let response = match control_plane.revoke_client_identity(auth.token()).await {
@@ -2708,7 +2923,18 @@ async fn public_issue_device_session(
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<DeviceSessionResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "device_session").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Device,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     let mut response_headers = HeaderMap::new();
@@ -2728,7 +2954,18 @@ async fn public_clear_device_session(
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<DeviceSessionClearResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "clear_device_session").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Device,
+            device_refresh_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let _ = require_public_control_plane(&state)?;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -2746,7 +2983,18 @@ async fn public_issue_device_ws_token(
     State(state): State<BrokerAppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<DeviceWsTokenResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "device_ws_token").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Device,
+            device_refresh_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = device_refresh_token(&headers)?;
     let mut response_headers = HeaderMap::new();
@@ -2787,7 +3035,18 @@ async fn public_issue_device_session_scoped(
     Path(room): Path<String>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<DeviceSessionResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "device_session").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Device,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     validate_room_id(&room)?;
     let bearer = bearer_token(&headers)?;
@@ -2809,7 +3068,20 @@ async fn public_clear_device_session_scoped(
     Path(room): Path<String>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<DeviceSessionClearResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "clear_device_session").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Device,
+            device_refresh_token_scoped(&headers, &room)
+                .map(|(_, token)| token)
+                .ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     validate_room_id(&room)?;
     let secure = request_uses_https(&headers, None);
@@ -2848,7 +3120,20 @@ async fn public_issue_device_ws_token_scoped(
     Path(room): Path<String>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<DeviceWsTokenResponse>), (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "device_ws_token").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Device,
+            device_refresh_token_scoped(&headers, &room)
+                .map(|(_, token)| token)
+                .ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     validate_room_id(&room)?;
     let (source, bearer) = device_refresh_token_scoped(&headers, &room)?;
@@ -2904,7 +3189,18 @@ async fn public_revoke_device_grant(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<DeviceGrantRevokeResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "revoke_device_grant").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Relay,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     let operation = format!("POST /api/public/devices/{device_id}/revoke");
@@ -2923,7 +3219,18 @@ async fn public_revoke_other_device_grants(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<DeviceGrantBulkRevokeResponse>, (StatusCode, Json<ApiErrorBody>)> {
-    enforce_public_api_rate_limit(&state, remote_addr, "revoke_other_device_grants").await?;
+    enforce_credential_api_rate_limit(
+        &state,
+        remote_addr,
+        credential_admission(
+            &state,
+            remote_addr,
+            public_control::CredentialKind::Relay,
+            bearer_token(&headers).ok(),
+        )
+        .await?,
+    )
+    .await?;
     let control_plane = require_public_control_plane(&state)?;
     let bearer = bearer_token(&headers)?;
     let input: DeviceGrantBulkRevokeRequest = verified_relay_control_body(
@@ -4144,15 +4451,156 @@ fn public_api_auth_failure(message: &str) -> bool {
         || lower.contains("missing bearer token")
 }
 
-async fn enforce_public_api_rate_limit(
+async fn signed_client_admission(
     state: &BrokerAppState,
     remote_addr: SocketAddr,
-    route_name: &str,
+    subject: Option<public_control::CredentialSubject>,
+    room: Option<&str>,
+) -> Result<Option<public_control::CredentialAdmission>, (StatusCode, Json<ApiErrorBody>)> {
+    let Some(public_control::CredentialSubject::Client(client_id)) = subject else {
+        return Ok(None);
+    };
+    let Some(admission) = credential_admission(
+        state,
+        remote_addr,
+        public_control::CredentialKind::ClientId,
+        Some(&client_id),
+    )
+    .await?
+    else {
+        return Err(public_api_error("credential refresh is invalid".into()));
+    };
+    match require_public_control_plane(state)?
+        .scoped_admission(&admission, &client_id, room)
+        .await
+    {
+        Ok(scoped) => Ok(Some(scoped)),
+        Err(error) => {
+            enforce_credential_api_rate_limit(state, remote_addr, Some(admission)).await?;
+            Err(public_api_error(error))
+        }
+    }
+}
+
+async fn credential_admission(
+    state: &BrokerAppState,
+    remote_addr: SocketAddr,
+    kind: public_control::CredentialKind,
+    token: Option<&str>,
+) -> Result<Option<public_control::CredentialAdmission>, (StatusCode, Json<ApiErrorBody>)> {
+    let Some(plane) = state.join_verifier.public_control_plane() else {
+        return Ok(None);
+    };
+    let Some(token) = token else {
+        return Ok(None);
+    };
+    if plane.credential_subject(kind, token).is_none() {
+        return Ok(None);
+    }
+    if let Some(admission) = plane.cached_credential_admission(kind, token).await {
+        return Ok(Some(admission));
+    }
+    // Unknown issued tokens may be stale or revoked; neither can debit the owner's quota yet.
+    if !state
+        .hardening
+        .credential_probe_rate_limiter
+        .allow(
+            client_network(remote_addr.ip()).to_string(),
+            state.hardening.config.public_api_rate_limit_per_minute,
+        )
+        .await
+    {
+        return Err(public_rate_limit_error());
+    }
+    plane
+        .load_credential_admission(kind, token)
+        .await
+        .map_err(public_api_error)
+}
+
+async fn enforce_credential_api_rate_limit(
+    state: &BrokerAppState,
+    remote_addr: SocketAddr,
+    admission: Option<public_control::CredentialAdmission>,
+) -> Result<Option<String>, (StatusCode, Json<ApiErrorBody>)> {
+    let config = &state.hardening.config;
+    let Some(admission) = admission else {
+        if !state
+            .hardening
+            .rate_limiter
+            .allow(
+                format!("public-api:{}", client_network(remote_addr.ip())),
+                config.public_api_rate_limit_per_minute,
+            )
+            .await
+        {
+            return Err(public_rate_limit_error());
+        }
+        return Ok(None);
+    };
+    // A phone must not consume the allowance its relay needs to revoke it.
+    let (role, relay_id) = match admission {
+        public_control::CredentialAdmission::Relay(relay_id) => ("relay", relay_id),
+        public_control::CredentialAdmission::Client(Some(relay_id)) => ("client", relay_id),
+        public_control::CredentialAdmission::Client(None) => {
+            enforce_shared_api_rate_limit(state, remote_addr).await?;
+            return Ok(Some(format!(
+                "anonymous:{}",
+                client_network(remote_addr.ip())
+            )));
+        }
+    };
+    if !state
+        .hardening
+        .credential_rate_limiter
+        .allow(
+            format!("{role}:{relay_id}"),
+            config.authenticated_api_rate_limit_per_minute,
+        )
+        .await
+    {
+        return Err(public_rate_limit_error());
+    }
+    if let Some(account) = state
+        .access
+        .relay_quota_key(&relay_id)
+        .await
+        .map_err(access_denial_error)?
+    {
+        if !state
+            .hardening
+            .account_rate_limiter
+            .allow(
+                format!("{role}:{account}"),
+                config.authenticated_api_rate_limit_per_minute,
+            )
+            .await
+        {
+            return Err(public_rate_limit_error());
+        }
+        return Ok(Some(format!("license:{account}")));
+    }
+    Ok(Some(format!("relay:{relay_id}")))
+}
+
+fn public_rate_limit_error() -> (StatusCode, Json<ApiErrorBody>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(ApiErrorBody::new(
+            "rate_limited",
+            "public broker control-plane rate limit exceeded".to_string(),
+        )),
+    )
+}
+
+async fn enforce_shared_api_rate_limit(
+    state: &BrokerAppState,
+    remote_addr: SocketAddr,
 ) -> Result<(), (StatusCode, Json<ApiErrorBody>)> {
     let config = &state.hardening.config;
     if admit_public_api(
         &state.hardening.rate_limiter,
-        format!("public-api:{}:{route_name}", remote_addr.ip()),
+        format!("public-api:{}", client_network(remote_addr.ip())),
         config.public_api_rate_limit_per_minute,
         config.public_api_global_rate_limit_per_minute,
     )
@@ -4160,13 +4608,7 @@ async fn enforce_public_api_rate_limit(
     {
         Ok(())
     } else {
-        Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ApiErrorBody::new(
-                "rate_limited",
-                "public broker control-plane rate limit exceeded".to_string(),
-            )),
-        ))
+        Err(public_rate_limit_error())
     }
 }
 

@@ -597,6 +597,16 @@ export async function clearClientRefreshSession(brokerUrl) {
   }).catch(() => {});
 }
 
+function shouldRecoverBrokerCredentials(response, brokerUrl) {
+  if (!state.clientAuth?.clientId) return false;
+  if (response.status === 401) return true;
+  if (response.status !== 429) return false;
+  // A missing cookie can hit the source allowance before the broker recognizes the phone.
+  const origin = new URL(brokerControlUrl(brokerUrl)).origin;
+  return origin === new URL(state.clientAuth.brokerControlUrl).origin &&
+    origin === new URL(window.location.href).origin;
+}
+
 async function refreshBrokerCredentials(brokerUrl, { room = null, deviceId = null, signal } = {}) {
   const clientAuth = state.clientAuth;
   const clientId = clientAuth?.clientId;
@@ -687,7 +697,7 @@ export async function refreshRelayDirectory(reason, { silent = false } = {}) {
   let response = await fetch(url, {
     credentials: "same-origin",
   });
-  if (response.status === 401 && state.clientAuth?.clientId) {
+  if (shouldRecoverBrokerCredentials(response, currentClientControlUrl())) {
     await refreshBrokerCredentials(currentClientControlUrl());
     response = await fetch(url, { credentials: "same-origin" });
   }
@@ -1151,7 +1161,7 @@ async function refreshDeviceJoinTicket(reason) {
     }
 
     await ensureDeviceRefreshStillOwnsProfile(relayId, expectedProfileSignature, brokerUrl, room);
-    if (response.status === 401 && state.clientAuth?.clientId && room) {
+    if (room && shouldRecoverBrokerCredentials(response, brokerUrl)) {
       try {
         const recovered = await refreshBrokerCredentials(brokerUrl, {
           room,

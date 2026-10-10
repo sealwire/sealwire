@@ -441,6 +441,7 @@ async fn refresh_challenge_capacity_covers_the_default_api_budget() {
             pending.insert(
                 busy.challenge_id.clone(),
                 PendingCredentialRefresh {
+                    quota_key: "test-quota".into(),
                     challenge: busy,
                     client_verify_key: STANDARD.encode(key.verifying_key().to_bytes()),
                     request_nonce: format!("busy-nonce-{index}"),
