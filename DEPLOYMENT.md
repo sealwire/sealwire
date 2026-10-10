@@ -78,6 +78,13 @@ See the [self-hosted deployment example](examples/self-host-broker/README.md) an
 and keep the broker's settings and data across restarts so paired devices can
 reconnect.
 
+The `public` authentication mode adds broker-managed registration and refresh
+credentials. The standard public broker permits open enrollment and is intended
+for trusted users: its request limits do not bound the total number of saved
+registrations. A shared hosted service needs an access strategy that requires
+enrollment credentials and limits registrations per credential. See the
+[security model](docs/security-model.md#scope).
+
 ## Desktop app
 
 The macOS desktop app is available as a preview. It provides a menu-bar icon and

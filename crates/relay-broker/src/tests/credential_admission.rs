@@ -323,7 +323,7 @@ async fn another_relay(
 
 #[tokio::test]
 async fn review_regression_registered_counter_capacity_does_not_lock_out_a_new_relay() {
-    let registrations: Vec<_> = (0..=RATE_LIMIT_BUCKET_PRUNE_THRESHOLD).map(|i| json!({
+    let registrations: Vec<_> = (0..=RATE_LIMIT_CHURN_TEST_KEYS).map(|i| json!({
         "relay_id": format!("registered-{i}"), "broker_room_id": format!("room-{i}"),
         "refresh_token": format!("registered-token-{i}"), "relay_verify_key": seeded_relay_verify_key()
     })).collect();
@@ -342,7 +342,7 @@ async fn review_regression_registered_counter_capacity_does_not_lock_out_a_new_r
         SecurityHeadersConfig::default(),
     )
     .await;
-    for i in 0..=RATE_LIMIT_BUCKET_PRUNE_THRESHOLD {
+    for i in 0..=RATE_LIMIT_CHURN_TEST_KEYS {
         let response = public_post_response(address, "/api/public/relay/ws-token/challenge", &format!("registered-token-{i}"), &json!({
             "relay_id": format!("registered-{i}"), "broker_room_id": format!("room-{i}"), "relay_peer_id": format!("registered-{i}")
         })).await;
@@ -802,7 +802,7 @@ async fn anonymous_counter_churn_does_not_fill_the_credential_counter_map() {
         .unwrap();
     });
     let http = reqwest::Client::new();
-    for i in 0..(RATE_LIMIT_BUCKET_PRUNE_THRESHOLD + 2) {
+    for i in 0..(RATE_LIMIT_CHURN_TEST_KEYS + 2) {
         let ip = std::net::Ipv4Addr::from(0xc6120000 + i as u32);
         let response = http
             .post(format!("http://{address}/api/public/device/ws-token"))

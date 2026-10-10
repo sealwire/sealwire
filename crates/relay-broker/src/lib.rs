@@ -89,8 +89,7 @@ const DEFAULT_AUTHENTICATED_API_RATE_LIMIT_PER_MINUTE: usize = 120;
 // Enrollment can create durable state without a previously issued credential.
 const DEFAULT_PUBLIC_API_GLOBAL_RATE_LIMIT_PER_MINUTE: usize = 600;
 const DEFAULT_JOIN_RATE_LIMIT_PER_MINUTE: usize = 40;
-/// Join attempts per client network across all rooms. The room is caller-chosen, so the
-/// per-room budget above cannot bound attempts on its own.
+/// Failed-join log entries per network, isolated from authenticated allowances.
 const DEFAULT_JOIN_IP_RATE_LIMIT_PER_MINUTE: usize = 120;
 /// Pairing tickets one relay may mint a minute; someone pairing devices by hand needs
 /// well under 20.
@@ -113,10 +112,8 @@ const DEFAULT_PUBLISH_RATE_LIMIT_PER_MINUTE: usize = 240;
 /// reply at 20/s, and snapshots at 2/s together already exceed the delta bound alone.
 /// Surfaces, which are the actual abuse surface, keep the tight budget above.
 ///
-/// Crossing it is no longer silent: the relay treats a dropped publish as fatal and
-/// reconnects. So this number decides how often that costs a reconnect — set it below
-/// real traffic and the relay will flap, because the broker's window is keyed by peer
-/// and does not reset when the relay reconnects into it.
+/// A refused publish ends the relay session; its room's relay quota survives reconnects.
+/// A limit below normal traffic therefore makes the relay repeatedly reconnect.
 ///
 /// What it does NOT bound is bytes — see [`DEFAULT_RELAY_PUBLISH_BYTES_PER_MINUTE`] for
 /// the budget that does. The two are complementary: this one stops a peer spinning on
@@ -202,10 +199,6 @@ const GLOBAL_EGRESS_WARN_BYTES_PER_MINUTE: u64 = 2 * 1024 * 1024 * 1024;
 /// does not grow without bound across churning peers. Amortised: pruning is O(n) but only
 /// runs once the map is already large.
 const BYTE_BUCKET_PRUNE_THRESHOLD: usize = 1_024;
-/// Same idea for [`SlidingWindowRateLimiter`]: prune empty/expired windows once the map
-/// grows past this. New keys are refused (counted as limited) while at the cap after
-/// prune so arbitrary IP/key churn cannot grow the map without bound.
-const RATE_LIMIT_BUCKET_PRUNE_THRESHOLD: usize = 1_024;
 const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 24;
 /// Open sockets across all clients. Per-address limits cannot bound the sum, and each
 /// socket holds a descriptor and up to 2x the frame cap of read buffer (~256 MiB at 2048).
@@ -694,12 +687,12 @@ struct BrokerHardeningState {
     credential_rate_limiter: RegisteredRateLimiter,
     credential_probe_rate_limiter: SlidingWindowRateLimiter,
     account_rate_limiter: RegisteredRateLimiter,
-    /// Separate from `rate_limiter` so join churn cannot fill the map the API shares.
-    join_rate_limiter: SlidingWindowRateLimiter,
+    failed_join_rate_limiter: SlidingWindowRateLimiter,
+    join_rate_limiter: RegisteredRateLimiter,
     /// Keyed by an authenticated relay, so its keys cannot be minted by strangers.
-    relay_rate_limiter: SlidingWindowRateLimiter,
-    /// Keyed by a verified peer; kept apart because a refused publish is fatal to a relay.
-    publish_rate_limiter: SlidingWindowRateLimiter,
+    relay_rate_limiter: RegisteredRateLimiter,
+    /// Scoped by room and verified identity; a refused publish ends a relay session.
+    publish_rate_limiter: RegisteredRateLimiter,
     byte_limiter: ByteRateLimiter,
     publish_metrics: PublishMetrics,
     connection_tracker: ActiveConnectionTracker,
@@ -775,7 +768,7 @@ impl RegisteredRateLimiter {
                 .retain(|_, bucket| bucket.back().is_some_and(|last| *last > cutoff));
             inner.pruned_at = Some(now);
         }
-        // Only live registrations reach this map; another account cannot reserve all its slots.
+        // Authenticated identities must not lose their allowance to other users' activity.
         let bucket = inner.buckets.entry(key).or_default();
         while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
             bucket.pop_front();
@@ -790,7 +783,7 @@ impl RegisteredRateLimiter {
 
 /// Per-peer token bucket over published **bytes**.
 ///
-/// Keyed the same way as [`SlidingWindowRateLimiter`] — `(channel, peer)` on shared broker
+/// Keyed the same way as the publish frame limiter — `(channel, identity)` on shared broker
 /// state rather than on the connection — so a reconnect resumes the same bucket. That is
 /// load-bearing, not incidental: a relay that gets refused reconnects automatically, so a
 /// per-connection bucket would reset itself precisely when it is doing its job.
@@ -1187,40 +1180,8 @@ impl PublishMetricsInner {
 }
 
 impl SlidingWindowRateLimiter {
-    async fn allow(&self, key: String, limit: usize) -> bool {
-        let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
-        let now = Instant::now();
-        let cutoff = now.checked_sub(window).unwrap_or(now);
-        let mut buckets = self.buckets.lock().await;
-        // Prune empty/expired windows at the cardinality cap so churn can free slots.
-        // Without this, refusing inserts at the cap would also prevent prune from ever
-        // running (it used to require len > threshold), leaving a permanent full map.
-        if buckets.len() >= RATE_LIMIT_BUCKET_PRUNE_THRESHOLD {
-            buckets.retain(|_, bucket| {
-                while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
-                    bucket.pop_front();
-                }
-                !bucket.is_empty()
-            });
-        }
-        // After prune, refuse brand-new keys when still at the cardinality cap so
-        // churn cannot grow the map without bound. Existing keys keep refining.
-        if buckets.len() >= RATE_LIMIT_BUCKET_PRUNE_THRESHOLD && !buckets.contains_key(&key) {
-            return false;
-        }
-        let bucket = buckets.entry(key).or_default();
-        while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
-            bucket.pop_front();
-        }
-        if bucket.len() >= limit {
-            return false;
-        }
-        bucket.push_back(now);
-        true
-    }
-
-    /// Admits only when both windows have room, recording in both or neither, so a refused
-    /// caller plants no key: with the shared budget below the cap, the map cannot fill.
+    /// Each instance uses one shared budget: every live source spends at least one
+    /// shared slot, so its map needs at most `shared_limit + 1` live keys.
     async fn allow_both(
         &self,
         key: String,
@@ -1243,20 +1204,8 @@ impl SlidingWindowRateLimiter {
         if live(&key) >= limit || live(shared_key) >= shared_limit {
             return false;
         }
-        let new_keys = [key.as_str(), shared_key]
-            .iter()
-            .filter(|key| !buckets.contains_key(**key))
-            .count();
-        if buckets.len() + new_keys > RATE_LIMIT_BUCKET_PRUNE_THRESHOLD {
-            buckets.retain(|_, bucket| {
-                while bucket.front().is_some_and(|timestamp| *timestamp <= cutoff) {
-                    bucket.pop_front();
-                }
-                !bucket.is_empty()
-            });
-            if buckets.len() + new_keys > RATE_LIMIT_BUCKET_PRUNE_THRESHOLD {
-                return false;
-            }
+        if !buckets.contains_key(&key) && buckets.len() >= shared_limit.saturating_add(1) {
+            buckets.retain(|_, bucket| bucket.back().is_some_and(|last| *last > cutoff));
         }
         buckets.entry(key).or_default().push_back(now);
         buckets
@@ -1783,9 +1732,10 @@ fn app_with_access_strategy_parts(
                 credential_rate_limiter: RegisteredRateLimiter::default(),
                 credential_probe_rate_limiter: SlidingWindowRateLimiter::default(),
                 account_rate_limiter: RegisteredRateLimiter::default(),
-                join_rate_limiter: SlidingWindowRateLimiter::default(),
-                relay_rate_limiter: SlidingWindowRateLimiter::default(),
-                publish_rate_limiter: SlidingWindowRateLimiter::default(),
+                failed_join_rate_limiter: SlidingWindowRateLimiter::default(),
+                join_rate_limiter: RegisteredRateLimiter::default(),
+                relay_rate_limiter: RegisteredRateLimiter::default(),
+                publish_rate_limiter: RegisteredRateLimiter::default(),
                 byte_limiter: ByteRateLimiter::default(),
                 publish_metrics: PublishMetrics::default(),
                 connection_tracker: ActiveConnectionTracker::default(),
@@ -3300,25 +3250,6 @@ async fn handle_socket(
             return;
         }
     };
-    if !state
-        .hardening
-        .join_rate_limiter
-        .allow(
-            format!("join-ip:{}", client_network_key(remote_addr.ip())),
-            state.hardening.config.join_ip_rate_limit_per_minute,
-        )
-        .await
-    {
-        reject_socket(
-            &state.hardening.publish_metrics,
-            socket,
-            "rate_limited",
-            "broker join rate limit exceeded for this client",
-        )
-        .await;
-        return;
-    }
-
     let verified_join = match state.join_verifier.verify_connection(
         query.join_ticket.as_deref(),
         &channel_id,
@@ -3326,18 +3257,13 @@ async fn handle_socket(
     ) {
         Ok(verified_join) => verified_join,
         Err(message) => {
-            debug!(
-                remote_ip = %remote_addr.ip(),
-                broker_room_id = %channel_id,
-                role = ?query.role,
-                reason = %scrub_sensitive_message(&message),
-                "broker join rejected"
-            );
-            reject_socket(
-                &state.hardening.publish_metrics,
+            reject_failed_join(
+                &state,
                 socket,
-                "join_rejected",
-                state.join_verifier.client_join_error_message(),
+                remote_addr,
+                &channel_id,
+                query.role,
+                &message,
             )
             .await;
             return;
@@ -3360,30 +3286,6 @@ async fn handle_socket(
         }
     }
 
-    // Charged only once a ticket vouches for the room, so these keys track real rooms.
-    if !state
-        .hardening
-        .join_rate_limiter
-        .allow(
-            format!(
-                "join:{}:{}",
-                client_network_key(remote_addr.ip()),
-                channel_id
-            ),
-            state.hardening.config.join_rate_limit_per_minute,
-        )
-        .await
-    {
-        reject_socket(
-            &state.hardening.publish_metrics,
-            socket,
-            "rate_limited",
-            "broker join rate limit exceeded for this client",
-        )
-        .await;
-        return;
-    }
-
     // Capture the access epoch before the async policy check so a concurrent
     // access release (which bumps the epoch even for an empty room) cannot let
     // this join seat afterward.
@@ -3397,18 +3299,13 @@ async fn handle_socket(
     if let Err(reason) =
         authorize_verified_join_access(&state, remote_addr.ip(), &channel_id, &verified_join).await
     {
-        debug!(
-            remote_ip = %remote_addr.ip(),
-            broker_room_id = %channel_id,
-            role = ?query.role,
-            reason = %reason,
-            "broker join rejected by access strategy"
-        );
-        reject_socket(
-            &state.hardening.publish_metrics,
+        reject_failed_join(
+            &state,
             socket,
-            "join_rejected",
-            state.join_verifier.client_join_error_message(),
+            remote_addr,
+            &channel_id,
+            query.role,
+            &reason,
         )
         .await;
         return;
@@ -3430,11 +3327,13 @@ async fn handle_socket(
     if query.role == protocol::PeerRole::Relay {
         let expected_peer = verified_join.peer_id.clone().unwrap_or_default();
         if peer_id.as_deref().unwrap_or("") != expected_peer {
-            reject_socket(
-                &state.hardening.publish_metrics,
+            reject_failed_join(
+                &state,
                 socket,
-                "join_rejected",
-                state.join_verifier.client_join_error_message(),
+                remote_addr,
+                &channel_id,
+                query.role,
+                "requested peer_id did not match the verified ticket",
             )
             .await;
             return;
@@ -3480,39 +3379,51 @@ async fn handle_socket(
                 )
                 .await
                 {
-                    debug!(
-                        remote_ip = %remote_addr.ip(),
-                        broker_room_id = %channel_id,
-                        reason = %scrub_sensitive_message(&message),
-                        "broker relay join proof rejected"
-                    );
-                    reject_socket(
-                        &state.hardening.publish_metrics,
+                    reject_failed_join(
+                        &state,
                         socket,
-                        "join_rejected",
-                        state.join_verifier.client_join_error_message(),
+                        remote_addr,
+                        &channel_id,
+                        query.role,
+                        &message,
                     )
                     .await;
                     return;
                 }
             }
             Err(message) => {
-                debug!(
-                    remote_ip = %remote_addr.ip(),
-                    broker_room_id = %channel_id,
-                    reason = %scrub_sensitive_message(&message),
-                    "broker relay join proof rejected"
-                );
-                reject_socket(
-                    &state.hardening.publish_metrics,
+                reject_failed_join(
+                    &state,
                     socket,
-                    "join_rejected",
-                    state.join_verifier.client_join_error_message(),
+                    remote_addr,
+                    &channel_id,
+                    query.role,
+                    &message,
                 )
                 .await;
                 return;
             }
         }
+    }
+    // A signed relay ticket is insufficient without its private-key proof above.
+    let join_identity = verified_rate_limit_identity(&verified_join);
+    if !state
+        .hardening
+        .join_rate_limiter
+        .allow(
+            format!("join:{channel_id}:{join_identity}"),
+            state.hardening.config.join_rate_limit_per_minute,
+        )
+        .await
+    {
+        reject_socket(
+            &state.hardening.publish_metrics,
+            socket,
+            "rate_limited",
+            "broker join rate limit exceeded for this identity",
+        )
+        .await;
+        return;
     }
     let join = loop {
         let candidate = peer_id
@@ -3520,17 +3431,13 @@ async fn handle_socket(
             .unwrap_or_else(|| generated_peer_id(query.role));
         if let Some(expected_peer_id) = verified_join.peer_id.as_deref() {
             if candidate != expected_peer_id {
-                debug!(
-                    remote_ip = %remote_addr.ip(),
-                    broker_room_id = %channel_id,
-                    role = ?query.role,
-                    "broker join rejected because the requested peer_id did not match the verified ticket"
-                );
-                reject_socket(
-                    &state.hardening.publish_metrics,
+                reject_failed_join(
+                    &state,
                     socket,
-                    "join_rejected",
-                    state.join_verifier.client_join_error_message(),
+                    remote_addr,
+                    &channel_id,
+                    query.role,
+                    "requested peer_id did not match the verified ticket",
                 )
                 .await;
                 return;
@@ -3554,17 +3461,13 @@ async fn handle_socket(
             }
             Err(message) => {
                 if message.contains("access epoch changed") {
-                    debug!(
-                        remote_ip = %remote_addr.ip(),
-                        broker_room_id = %channel_id,
-                        role = ?query.role,
-                        "broker join rejected because access was released during authorization"
-                    );
-                    reject_socket(
-                        &state.hardening.publish_metrics,
+                    reject_failed_join(
+                        &state,
                         socket,
-                        "join_rejected",
-                        state.join_verifier.client_join_error_message(),
+                        remote_addr,
+                        &channel_id,
+                        query.role,
+                        "access was released during authorization",
                     )
                     .await;
                     return;
@@ -3572,18 +3475,13 @@ async fn handle_socket(
                 if peer_id.is_none() && message.contains("is already connected") {
                     continue;
                 }
-                debug!(
-                    remote_ip = %remote_addr.ip(),
-                    broker_room_id = %channel_id,
-                    role = ?query.role,
-                    reason = %scrub_sensitive_message(&message),
-                    "broker join failed"
-                );
-                reject_socket(
-                    &state.hardening.publish_metrics,
+                reject_failed_join(
+                    &state,
                     socket,
-                    "join_rejected",
-                    state.join_verifier.client_join_error_message(),
+                    remote_addr,
+                    &channel_id,
+                    query.role,
+                    &message,
                 )
                 .await;
                 return;
@@ -3591,9 +3489,7 @@ async fn handle_socket(
         }
     };
     let peer_id = peer_id.expect("broker should assign a peer id");
-    // Resolved once, from the verified ticket rather than the assigned peer_id, so
-    // reconnecting cannot hand this connection a fresh allowance.
-    let publish_identity = publish_limit_identity(&verified_join, &peer_id);
+    let publish_identity = join_identity;
     let connection_id = join.connection_id;
 
     let (mut sender, mut receiver) = socket.split();
@@ -3921,6 +3817,49 @@ async fn reject_socket(metrics: &PublishMetrics, socket: WebSocket, code: &str, 
     let _ = tokio::time::timeout(SOCKET_WRITE_TIMEOUT, sender.close()).await;
 }
 
+async fn reject_failed_join(
+    state: &BrokerAppState,
+    socket: WebSocket,
+    remote_addr: SocketAddr,
+    channel_id: &str,
+    role: protocol::PeerRole,
+    reason: &str,
+) {
+    let log_allowed = state
+        .hardening
+        .failed_join_rate_limiter
+        .allow_both(
+            format!("failed-join:{}", client_network_key(remote_addr.ip())),
+            state.hardening.config.join_ip_rate_limit_per_minute,
+            "failed-join:global",
+            state
+                .hardening
+                .config
+                .public_api_global_rate_limit_per_minute,
+        )
+        .await;
+    if log_allowed {
+        debug!(
+            remote_ip = %remote_addr.ip(),
+            broker_room_id = channel_id,
+            ?role,
+            reason = %scrub_sensitive_message(reason),
+            "broker join rejected"
+        );
+    }
+    reject_socket(
+        &state.hardening.publish_metrics,
+        socket,
+        if log_allowed {
+            "join_rejected"
+        } else {
+            "rate_limited"
+        },
+        state.join_verifier.client_join_error_message(),
+    )
+    .await;
+}
+
 fn default_web_root() -> PathBuf {
     if let Some(web_root) = std::env::var(BROKER_WEB_ROOT_ENV)
         .ok()
@@ -3947,32 +3886,26 @@ fn workspace_root() -> Option<PathBuf> {
         .ok()
 }
 
-/// The identity a publish allowance is keyed on — deliberately **not** the `peer_id`.
-///
-/// A surface's `peer_id` is minted fresh by the broker on every join (see
-/// [`generated_peer_id`]; a surface ticket pins nothing), so a budget keyed on it resets
-/// every time the peer reconnects. That makes the limit advisory for exactly the peers it
-/// is aimed at: at the default 40 joins/minute one credential could draw ~10 fresh bursts
-/// a minute, and concurrent sockets multiply it again.
-///
-/// The join ticket's `device_id`/`pairing_id` are authenticated and survive a reconnect,
-/// which is what a budget needs. Ticket validation guarantees a surface carries exactly
-/// one of them, so the `peer_id` fallback is unreachable for a validated surface join; it
-/// exists so an unauthenticated path can never silently become unkeyed.
-///
-/// A relay's ticket pins its `peer_id` and forbids both other ids, so relays fall through
-/// to that and keep the identity they already had.
-///
-/// Consequence worth knowing: two tabs on the same device now share one budget. That is
-/// the intended reading of "per peer" — the credential is the peer, not the socket.
-fn publish_limit_identity(verified: &VerifiedBrokerJoin, peer_id: &str) -> String {
-    if let Some(device_id) = verified.device_id.as_deref() {
-        return format!("device:{device_id}");
+// Relay peer ids are caller-chosen, while surface peer ids change on reconnect.
+// Callers scope this identity to the room, so renaming cannot reset a relay quota.
+fn verified_rate_limit_identity(verified: &VerifiedBrokerJoin) -> String {
+    match verified.kind {
+        JoinTicketKind::RelayJoin => "relay".to_string(),
+        JoinTicketKind::DeviceSurfaceJoin => format!(
+            "device:{}",
+            verified
+                .device_id
+                .as_deref()
+                .expect("verified device ticket carries a device_id")
+        ),
+        JoinTicketKind::PairingSurfaceJoin => format!(
+            "pairing:{}",
+            verified
+                .pairing_id
+                .as_deref()
+                .expect("verified pairing ticket carries a pairing_id")
+        ),
     }
-    if let Some(pairing_id) = verified.pairing_id.as_deref() {
-        return format!("pairing:{pairing_id}");
-    }
-    format!("peer:{peer_id}")
 }
 
 /// An IPv6 client typically holds a whole /64, so budgets per exact address would let it
@@ -4504,9 +4437,14 @@ async fn credential_admission(
     if !state
         .hardening
         .credential_probe_rate_limiter
-        .allow(
+        .allow_both(
             client_network(remote_addr.ip()).to_string(),
             state.hardening.config.public_api_rate_limit_per_minute,
+            "credential-probe:global",
+            state
+                .hardening
+                .config
+                .public_api_global_rate_limit_per_minute,
         )
         .await
     {
@@ -4525,17 +4463,7 @@ async fn enforce_credential_api_rate_limit(
 ) -> Result<Option<String>, (StatusCode, Json<ApiErrorBody>)> {
     let config = &state.hardening.config;
     let Some(admission) = admission else {
-        if !state
-            .hardening
-            .rate_limiter
-            .allow(
-                format!("public-api:{}", client_network(remote_addr.ip())),
-                config.public_api_rate_limit_per_minute,
-            )
-            .await
-        {
-            return Err(public_rate_limit_error());
-        }
+        enforce_shared_api_rate_limit(state, remote_addr).await?;
         return Ok(None);
     };
     // A phone must not consume the allowance its relay needs to revoke it.

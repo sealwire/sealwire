@@ -42,3 +42,9 @@ summary. See [`DEPLOYMENT.md`](../DEPLOYMENT.md) for setup and pairing, and
 This is a **single-owner** control plane: one operator, many devices. It is not
 hardened for multi-user hosted collaboration, untrusted tenants sharing a
 control plane, or org policy / enterprise audit workflows.
+
+The standard `public` broker permits open relay enrollment. Registrations have
+no total cap or automatic expiry, so this mode is intended for trusted users;
+request rate limits only slow registration growth. Hosted deployments must
+provide an access strategy that requires enrollment credentials and bounds
+registrations per credential before they are persisted.

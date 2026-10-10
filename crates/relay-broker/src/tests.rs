@@ -36,6 +36,8 @@ use crate::public_control::{
     RELAY_CONTROL_CHALLENGE_HEADER, RELAY_CONTROL_SIGNATURE_HEADER,
 };
 
+const RATE_LIMIT_CHURN_TEST_KEYS: usize = 1_024;
+
 #[tokio::test(start_paused = true)]
 async fn stalled_socket_writes_time_out() {
     let mut sender = Box::pin(futures_util::sink::unfold(
@@ -5663,7 +5665,7 @@ async fn websocket_join_rate_limit_is_enforced() {
         "room-a",
         protocol::PeerRole::Surface,
         None,
-        JoinTicketClaims::pairing_surface_join("room-a", "pair-join-rate-2", u64::MAX),
+        JoinTicketClaims::pairing_surface_join("room-a", "pair-join-rate-1", u64::MAX),
     );
 
     let (mut first_socket, _) = connect_async(&first_url)
@@ -5684,12 +5686,11 @@ async fn websocket_join_rate_limit_is_enforced() {
     }
 }
 
-/// The room is caller-chosen, so a per-(IP, room) budget alone let one client churn joins
-/// without limit, each planting a bucket in the limiter the control-plane API shares.
+// Caller-chosen rooms must not multiply failed-join logs or spend valid API quotas.
 #[tokio::test]
-async fn a_random_room_join_flood_is_capped_per_ip_and_leaves_the_public_api_usable() {
+async fn ticketless_join_logs_are_capped_per_network_without_spending_api_budget() {
     let address = spawn_public_mode_app().await;
-    let attempts = RATE_LIMIT_BUCKET_PRUNE_THRESHOLD + 32;
+    let attempts = RATE_LIMIT_CHURN_TEST_KEYS + 32;
     let mut codes = Vec::with_capacity(attempts);
     for index in 0..attempts {
         let (mut socket, _) =
@@ -5705,7 +5706,7 @@ async fn a_random_room_join_flood_is_capped_per_ip_and_leaves_the_public_api_usa
     assert!(
         first_limited.is_some_and(|index| index <= 300)
             && codes[300..].iter().all(|code| code == "rate_limited"),
-        "one client must not get hundreds of join attempts by varying the room \
+        "one source must not get a fresh failed-join log budget by varying the room \
          (first rate_limited at {first_limited:?})"
     );
 
@@ -5846,10 +5847,9 @@ async fn open_sockets_are_capped_across_addresses() {
     assert!(rejoined.is_some(), "closing a socket must free its slot");
 }
 
-/// The per-room key used the exact address, so one ticket rotated across a /64 planted a
-/// key per address in the join limiter.
+/// Rotating addresses must not hand one credential a fresh join allowance.
 #[tokio::test]
-async fn valid_ticket_joins_share_the_per_room_budget_across_an_ipv6_slash_64() {
+async fn valid_ticket_joins_share_the_identity_budget_across_ipv6_addresses() {
     let guard = BanGuard {
         blocklist: Blocklist::disabled(),
         trusted_ip_header: Some("x-forwarded-for".parse().expect("valid header name")),
@@ -5868,7 +5868,15 @@ async fn valid_ticket_joins_share_the_per_room_budget_across_an_ipv6_slash_64() 
             "room-a",
             protocol::PeerRole::Surface,
             None,
-            JoinTicketClaims::pairing_surface_join("room-a", source, u64::MAX),
+            JoinTicketClaims::pairing_surface_join(
+                "room-a",
+                if source == "2001:db8:5:7::1" {
+                    "other"
+                } else {
+                    "same"
+                },
+                u64::MAX,
+            ),
         );
         let mut request = url.into_client_request().expect("ws request builds");
         request
@@ -5891,7 +5899,7 @@ async fn valid_ticket_joins_share_the_per_room_budget_across_an_ipv6_slash_64() 
     let (_second, refused) = join("2001:db8:5:6::2").await;
     assert!(
         matches!(&refused, ServerMessage::Error { code, .. } if code == "rate_limited"),
-        "a second address in the same /64 must share the room's join budget: {refused:?}"
+        "the same credential on a second address must share its join budget: {refused:?}"
     );
     let (_other, welcome) = join("2001:db8:5:7::1").await;
     assert!(
@@ -6363,7 +6371,7 @@ async fn per_ip_rate_limit_keys_on_forwarded_client_ip() {
 }
 
 #[tokio::test]
-async fn websocket_join_rate_limit_keys_on_forwarded_client_ip() {
+async fn websocket_join_rate_limit_follows_identity_instead_of_forwarded_ip() {
     let guard = BanGuard {
         blocklist: Blocklist::disabled(),
         trusted_ip_header: Some("x-forwarded-for".parse().unwrap()),
@@ -6393,7 +6401,6 @@ async fn websocket_join_rate_limit_keys_on_forwarded_client_ip() {
         request
     };
 
-    // Same forwarded IP: first join is welcomed, the second hits the per-IP join limit.
     let (mut a1, _) = connect_async(join_request("pair-a-1", "203.0.113.5"))
         .await
         .expect("a1 connects");
@@ -6402,7 +6409,7 @@ async fn websocket_join_rate_limit_keys_on_forwarded_client_ip() {
         ServerMessage::Welcome { .. }
     ));
 
-    let (mut a2, _) = connect_async(join_request("pair-a-2", "203.0.113.5"))
+    let (mut a2, _) = connect_async(join_request("pair-a-1", "203.0.113.6"))
         .await
         .expect("a2 connects");
     match next_server_message(&mut a2).await {
@@ -6410,9 +6417,7 @@ async fn websocket_join_rate_limit_keys_on_forwarded_client_ip() {
         other => panic!("expected rate_limited, got {other:?}"),
     }
 
-    // A different forwarded IP has its own bucket -> welcomed, proving the WS join
-    // limit keys on the forwarded client IP, not the shared 127.0.0.1 socket.
-    let (mut b1, _) = connect_async(join_request("pair-b-1", "203.0.113.6"))
+    let (mut b1, _) = connect_async(join_request("pair-b-1", "203.0.113.5"))
         .await
         .expect("b1 connects");
     assert!(matches!(
@@ -8633,7 +8638,7 @@ async fn an_api_flood_from_many_addresses_cannot_refuse_a_relays_publish() {
     };
     let address = spawn_app_with_guard_and_hardening(guard, BrokerHardeningConfig::default()).await;
     let client = reqwest::Client::new();
-    for index in 0..RATE_LIMIT_BUCKET_PRUNE_THRESHOLD {
+    for index in 0..RATE_LIMIT_CHURN_TEST_KEYS {
         client
             .post(format!("http://{address}/api/public/relay/ws-token"))
             .header(
@@ -8825,18 +8830,17 @@ async fn publish_until_error(
     observed
 }
 
-/// The hole this exists to close: a relay inside its frame budget can still push
-/// bytes without bound.
-///
-/// 600 frames is a rounding error against the 36000/minute frame allowance, so the
-/// frame limiter cannot be what stops this. At ~56KiB each they are ~33MiB, which
-/// is far past any defensible per-minute byte budget — and today nothing counts
-/// them at all.
+/// A small byte budget makes this independent of how fast the test machine can
+/// send: the default budget may refill faster than a busy runner pumps frames.
 #[tokio::test]
 async fn a_relay_cannot_publish_unbounded_bytes_inside_its_frame_budget() {
     let address = spawn_app_with(
         BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
-        BrokerHardeningConfig::default(),
+        BrokerHardeningConfig {
+            relay_publish_bytes_per_minute: 16 * 1024,
+            relay_publish_burst_bytes: 128 * 1024,
+            ..BrokerHardeningConfig::default()
+        },
         SecurityHeadersConfig::default(),
     )
     .await;
@@ -8853,14 +8857,13 @@ async fn a_relay_cannot_publish_unbounded_bytes_inside_its_frame_budget() {
         .expect("relay socket should connect");
     let _welcome = next_server_message(&mut relay).await;
 
-    let observed = publish_until_error(relay, large_publish_frame(56 * 1024), 600).await;
+    let observed = publish_until_error(relay, large_publish_frame(56 * 1024), 8).await;
 
     assert_eq!(
         observed.as_deref(),
         Some("rate_limited"),
-        "a relay pushed ~33MiB in 600 frames and the broker never objected. The frame \
-         allowance cannot catch this — 600 frames is far inside 36000/minute — so \
-         without a byte budget one peer can move gigabytes a minute."
+        "eight frames are inside the frame allowance, but ~448KiB exceeds the byte \
+         burst plus any refill during the test; the byte budget must refuse a frame"
     );
 }
 
@@ -8923,7 +8926,11 @@ async fn a_relays_largest_designed_reply_is_not_byte_limited() {
 async fn reconnecting_does_not_reset_the_byte_budget() {
     let address = spawn_app_with(
         BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
-        BrokerHardeningConfig::default(),
+        BrokerHardeningConfig {
+            relay_publish_bytes_per_minute: 1,
+            relay_publish_burst_bytes: 64 * 1024,
+            ..BrokerHardeningConfig::default()
+        },
         SecurityHeadersConfig::default(),
     )
     .await;
@@ -8940,20 +8947,19 @@ async fn reconnecting_does_not_reset_the_byte_budget() {
         .await
         .expect("relay socket should connect");
     let _welcome = next_server_message(&mut relay).await;
-    let first = publish_until_error(relay, large_publish_frame(56 * 1024), 600).await;
+    let first = publish_until_error(relay, large_publish_frame(56 * 1024), 4).await;
     assert_eq!(
         first.as_deref(),
         Some("rate_limited"),
         "precondition: the first connection should have exhausted the byte budget"
     );
 
-    // Reconnect as the same peer and send a modest amount. The budget is still
-    // spent, so this must be refused too.
+    // One frame fits a fresh burst but not the balance carried over from before.
     let (mut relay, _) = connect_async(&relay_url)
         .await
         .expect("relay socket should reconnect");
     let _welcome = next_server_message(&mut relay).await;
-    let second = publish_until_error(relay, large_publish_frame(56 * 1024), 64).await;
+    let second = publish_until_error(relay, large_publish_frame(56 * 1024), 1).await;
 
     assert_eq!(
         second.as_deref(),
@@ -9515,7 +9521,7 @@ async fn reported_egress_equals_the_bytes_clients_actually_received() {
 /// The pairing branch of the identity must hold too.
 ///
 /// A pairing surface carries `pairing_id` and no `device_id`, so it exercises a different
-/// arm of `publish_limit_identity` than the device reconnect test. It is also the branch
+/// arm of `verified_rate_limit_identity` than the device reconnect test. It is also the branch
 /// that matters most for abuse: a pairing ticket is the credential encoded in a QR code,
 /// which is the one an attacker is most likely to have a copy of.
 #[tokio::test]
@@ -9653,44 +9659,42 @@ async fn pruning_keeps_buckets_that_are_still_in_debt() {
     );
 }
 
-/// Sliding-window limiter must prune stale keys and refuse unbounded unique-key churn.
+/// Untrusted key churn is bounded by admitted traffic, without resetting active windows.
 #[tokio::test(start_paused = true)]
 async fn sliding_window_rate_limiter_bounds_unique_key_churn() {
     let limiter = SlidingWindowRateLimiter::default();
     let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
 
-    assert!(limiter.allow("hot".to_string(), 2).await);
-    assert!(limiter.allow("hot".to_string(), 2).await);
-    assert!(!limiter.allow("hot".to_string(), 2).await);
+    let budget = RATE_LIMIT_CHURN_TEST_KEYS;
+    assert!(admit_public_api(&limiter, "hot".to_string(), 2, budget).await);
+    assert!(admit_public_api(&limiter, "hot".to_string(), 2, budget).await);
+    assert!(!admit_public_api(&limiter, "hot".to_string(), 2, budget).await);
 
-    for index in 0..(RATE_LIMIT_BUCKET_PRUNE_THRESHOLD * 2) {
-        let _ = limiter.allow(format!("filler-{index}"), 1).await;
+    for index in 0..(RATE_LIMIT_CHURN_TEST_KEYS * 2) {
+        let _ = admit_public_api(&limiter, format!("filler-{index}"), 1, budget).await;
     }
     assert!(
-        limiter.bucket_count_for_test().await <= RATE_LIMIT_BUCKET_PRUNE_THRESHOLD,
-        "unique-key churn must not grow the map past the hard cardinality cap"
+        limiter.bucket_count_for_test().await <= budget + 1,
+        "unique-key churn must not grow the map past the shared budget plus its counter"
     );
     assert!(
-        !limiter.allow("hot".to_string(), 2).await,
+        !admit_public_api(&limiter, "hot".to_string(), 2, budget).await,
         "hot key must keep its window through unrelated unique-key churn"
     );
     assert!(
-        !limiter.allow("overflow-new".to_string(), 1).await,
-        "new keys past the cardinality cap must be refused without inserting"
+        !admit_public_api(&limiter, "overflow-new".to_string(), 1, budget).await,
+        "requests past the shared budget must be refused without inserting"
     );
-    assert_eq!(
-        limiter.bucket_count_for_test().await,
-        RATE_LIMIT_BUCKET_PRUNE_THRESHOLD
-    );
+    assert_eq!(limiter.bucket_count_for_test().await, budget);
 
     tokio::time::advance(window + Duration::from_millis(1)).await;
     assert!(
-        limiter.allow("hot".to_string(), 2).await,
-        "after the window elapses, prune frees expired fillers and hot is allowed again"
+        admit_public_api(&limiter, "after-expiry".to_string(), 2, budget).await,
+        "after the window elapses, a new caller has shared allowance again"
     );
     assert!(
-        limiter.bucket_count_for_test().await < RATE_LIMIT_BUCKET_PRUNE_THRESHOLD,
-        "expired windows must be pruned once the map is at the cardinality cap"
+        limiter.bucket_count_for_test().await <= budget + 1,
+        "expired windows must not make the map exceed the shared budget"
     );
 }
 
@@ -10307,3 +10311,6 @@ async fn audit_one_address_cannot_fill_the_shared_budget_by_spreading_over_route
 
 #[path = "tests/credential_admission.rs"]
 mod credential_admission_tests;
+
+#[path = "tests/rate_limit_isolation.rs"]
+mod rate_limit_isolation;
