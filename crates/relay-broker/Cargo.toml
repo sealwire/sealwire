@@ -11,6 +11,8 @@ base64.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 ipnet.workspace = true
 rand.workspace = true
 relay-http = { path = "../relay-http" }
@@ -22,8 +24,9 @@ sqlx.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tower-http.workspace = true
+tower = "0.5"
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, features = ["json"] }
 
 [dev-dependencies]
 reqwest.workspace = true

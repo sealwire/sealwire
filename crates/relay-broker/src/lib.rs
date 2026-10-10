@@ -7,7 +7,10 @@ pub mod join_ticket;
 pub mod origin_guard;
 pub mod protocol;
 pub mod public_control;
+pub mod server;
 mod state;
+
+pub use server::serve;
 
 pub use access::{
     standard_public_access_strategy, AccessDenial, AccessDenialCode, AccessOperation,
@@ -696,6 +699,7 @@ struct BrokerHardeningState {
     byte_limiter: ByteRateLimiter,
     publish_metrics: PublishMetrics,
     connection_tracker: ActiveConnectionTracker,
+    tenant_connection_tracker: TenantConnectionTracker,
 }
 
 #[derive(Clone, Debug)]
@@ -714,6 +718,7 @@ struct BrokerHardeningConfig {
     relay_publish_burst_bytes: usize,
     max_connections_per_ip: usize,
     max_total_connections: usize,
+    max_surface_connections_per_tenant: usize,
     max_text_frame_bytes: usize,
     idle_timeout: Duration,
 }
@@ -924,6 +929,7 @@ impl Default for BrokerHardeningConfig {
             relay_publish_burst_bytes: DEFAULT_RELAY_PUBLISH_BURST_BYTES,
             max_connections_per_ip: DEFAULT_MAX_CONNECTIONS_PER_IP,
             max_total_connections: DEFAULT_MAX_TOTAL_CONNECTIONS,
+            max_surface_connections_per_tenant: 64,
             max_text_frame_bytes: DEFAULT_MAX_TEXT_FRAME_BYTES,
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
         }
@@ -979,6 +985,10 @@ impl BrokerHardeningConfig {
             max_total_connections: parse_usize_env(
                 MAX_TOTAL_CONNECTIONS_ENV,
                 DEFAULT_MAX_TOTAL_CONNECTIONS,
+            )?,
+            max_surface_connections_per_tenant: parse_usize_env(
+                "RELAY_BROKER_MAX_SURFACE_CONNECTIONS_PER_TENANT",
+                64,
             )?,
             max_text_frame_bytes: {
                 let configured =
@@ -1260,6 +1270,58 @@ impl ActiveConnectionTracker {
             counts.per_ip.remove(&remote_ip);
         } else {
             *entry -= 1;
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct TenantConnectionTracker {
+    counts: Arc<StdMutex<HashMap<(String, bool), usize>>>,
+}
+
+struct TenantConnectionPermit {
+    tracker: TenantConnectionTracker,
+    key: (String, bool),
+}
+
+impl TenantConnectionTracker {
+    fn try_acquire(
+        &self,
+        tenant: String,
+        role: protocol::PeerRole,
+        surface_limit: usize,
+    ) -> Result<TenantConnectionPermit, &'static str> {
+        let relay = role == protocol::PeerRole::Relay;
+        // A replacement relay needs one overlapping slot while the old socket closes.
+        let limit = if relay { 2 } else { surface_limit };
+        let key = (tenant, relay);
+        let mut counts = self
+            .counts
+            .lock()
+            .expect("tenant connection tracker should not be poisoned");
+        if counts.get(&key).copied().unwrap_or_default() >= limit {
+            return Err("too many broker connections for this tenant");
+        }
+        *counts.entry(key.clone()).or_default() += 1;
+        Ok(TenantConnectionPermit {
+            tracker: self.clone(),
+            key,
+        })
+    }
+}
+
+impl Drop for TenantConnectionPermit {
+    fn drop(&mut self) {
+        let mut counts = self
+            .tracker
+            .counts
+            .lock()
+            .expect("tenant connection tracker should not be poisoned");
+        if let Some(count) = counts.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.key);
+            }
         }
     }
 }
@@ -1739,6 +1801,7 @@ fn app_with_access_strategy_parts(
                 byte_limiter: ByteRateLimiter::default(),
                 publish_metrics: PublishMetrics::default(),
                 connection_tracker: ActiveConnectionTracker::default(),
+                tenant_connection_tracker: TenantConnectionTracker::default(),
             },
             public_monitoring: PublicMonitoringState::default(),
             access,
@@ -3296,20 +3359,24 @@ async fn handle_socket(
     // target a victim. Self-host / open mode has no registration table — strategy
     // still runs with the room id as a neutral key (OpenAccess allows;
     // Unavailable fails closed). Missing registration in public mode fails closed.
-    if let Err(reason) =
-        authorize_verified_join_access(&state, remote_addr.ip(), &channel_id, &verified_join).await
-    {
-        reject_failed_join(
-            &state,
-            socket,
-            remote_addr,
-            &channel_id,
-            query.role,
-            &reason,
-        )
-        .await;
-        return;
-    }
+    let tenant_key =
+        match authorize_verified_join_access(&state, remote_addr.ip(), &channel_id, &verified_join)
+            .await
+        {
+            Ok(key) => key,
+            Err(reason) => {
+                reject_failed_join(
+                    &state,
+                    socket,
+                    remote_addr,
+                    &channel_id,
+                    query.role,
+                    &reason,
+                )
+                .await;
+                return;
+            }
+        };
 
     // Only a ticket that PINS a peer_id (a relay join) may have it echoed back in
     // the query — the equality check below then validates the match. A surface
@@ -3425,6 +3492,23 @@ async fn handle_socket(
         .await;
         return;
     }
+    let _tenant_permit = match state.hardening.tenant_connection_tracker.try_acquire(
+        tenant_key,
+        query.role,
+        state.hardening.config.max_surface_connections_per_tenant,
+    ) {
+        Ok(permit) => permit,
+        Err(message) => {
+            reject_socket(
+                &state.hardening.publish_metrics,
+                socket,
+                "rate_limited",
+                message,
+            )
+            .await;
+            return;
+        }
+    };
     let join = loop {
         let candidate = peer_id
             .clone()
@@ -4336,7 +4420,7 @@ async fn authorize_verified_join_access(
     remote_ip: IpAddr,
     broker_room_id: &str,
     verified: &VerifiedBrokerJoin,
-) -> Result<(), &'static str> {
+) -> Result<String, &'static str> {
     let relay_id = match state.join_verifier.public_control_plane() {
         Some(control_plane) => match control_plane.relay_id_for_broker_room(broker_room_id).await {
             Some(relay_id) => relay_id,
@@ -4374,7 +4458,14 @@ async fn authorize_verified_join_access(
                 })?;
         }
     }
-    Ok(())
+    match state.access.relay_quota_key(&relay_id).await {
+        Ok(Some(key)) => Ok(format!("account:{key}")),
+        Ok(None) => Ok(format!("relay:{relay_id}")),
+        Err(denial) => {
+            denial.log_internal();
+            Err("tenant identity unavailable for socket join")
+        }
+    }
 }
 
 fn public_api_auth_failure(message: &str) -> bool {

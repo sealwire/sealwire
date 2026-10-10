@@ -1,3 +1,4 @@
+mod credential_refresh;
 mod credentials;
 mod relay_proofs;
 pub(crate) use credentials::{CredentialAdmission, CredentialSubject};
@@ -1965,14 +1966,39 @@ impl PublicControlPlane {
             )
             .map_err(|_| "credential refresh is invalid".to_string())?;
 
+        if matches!(
+            self.inner.persistence,
+            PublicControlPersistence::Postgres { .. }
+        ) {
+            return self
+                .refresh_postgres_credentials(&challenge, &pending.client_verify_key, now)
+                .await;
+        }
         let mut store = self.lock_state().await?;
         // Check live authorization after the signature, so a pending challenge cannot undo a revoke.
         if self.miss_may_be_stale() {
             *store = self.load_full_state().await?;
         }
+        let result = self.rotate_signed_credentials(
+            &mut store,
+            &challenge,
+            &pending.client_verify_key,
+            now,
+        )?;
+        self.persist(&mut store).await?;
+        Ok(result)
+    }
+
+    fn rotate_signed_credentials(
+        &self,
+        store: &mut PublicControlStateStore,
+        challenge: &CredentialRefreshChallengeResponse,
+        client_verify_key: &str,
+        now: u64,
+    ) -> Result<(CredentialRefreshResponse, String, Option<String>), String> {
         let client = store
             .client_identity_for_id(&challenge.client_id)
-            .filter(|client| client.client_verify_key == pending.client_verify_key)
+            .filter(|client| client.client_verify_key == client_verify_key)
             .ok_or_else(|| "credential refresh is invalid".to_string())?;
         let device = challenge
             .broker_room_id
@@ -2016,7 +2042,6 @@ impl PublicControlPlane {
         } else {
             (None, None)
         };
-        self.persist(&mut store).await?;
         Ok((
             CredentialRefreshResponse {
                 client_id: client.client_id,

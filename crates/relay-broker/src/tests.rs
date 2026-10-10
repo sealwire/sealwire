@@ -5783,6 +5783,134 @@ async fn websocket_connection_limit_is_enforced_per_ip() {
 /// Per-address limits cannot bound the total, so past the cap new joins from any address
 /// are refused, and a closed socket frees its slot.
 #[tokio::test]
+async fn tenant_connections_are_capped_across_ips_and_relay_capacity_is_reserved() {
+    let guard = BanGuard {
+        blocklist: Blocklist::disabled(),
+        trusted_ip_header: Some("x-forwarded-for".parse().unwrap()),
+    };
+    let address = spawn_app_with_guard_and_hardening(
+        guard,
+        BrokerHardeningConfig {
+            max_surface_connections_per_tenant: 1,
+            ..BrokerHardeningConfig::default()
+        },
+    )
+    .await;
+    let join = |room: &str, client: u8| {
+        let url = websocket_url(
+            address,
+            room,
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::pairing_surface_join(room, &format!("pair-{client}"), u64::MAX),
+        );
+        let mut request = url.into_client_request().unwrap();
+        request.headers_mut().insert(
+            "x-forwarded-for",
+            format!("203.0.113.{client}").parse().unwrap(),
+        );
+        async move {
+            let (mut socket, _) = connect_async(request).await.unwrap();
+            let reply = next_server_message(&mut socket).await;
+            (socket, reply)
+        }
+    };
+    let (mut first, welcome) = join("room-a", 1).await;
+    assert!(matches!(welcome, ServerMessage::Welcome { .. }));
+    let (_excess, reply) = join("room-a", 2).await;
+    assert!(
+        matches!(reply, ServerMessage::Error { code, message } if code == "rate_limited" && message.contains("tenant"))
+    );
+    let (_other, welcome) = join("room-b", 3).await;
+    assert!(matches!(welcome, ServerMessage::Welcome { .. }));
+    let key = signing_key_for_seed_label("tenant-relay");
+    remember_relay_signing_key("tenant-relay", &key);
+    let verify_key = STANDARD.encode(key.verifying_key().to_bytes());
+    let url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Relay,
+        Some("relay-a"),
+        JoinTicketClaims::relay_join("room-a", "relay-a", &verify_key),
+    );
+    let (mut relay, _) = connect_async(url).await.unwrap();
+    assert!(matches!(
+        next_server_message(&mut relay).await,
+        ServerMessage::Welcome { .. }
+    ));
+    first.close(None).await.unwrap();
+    let mut joined = false;
+    for attempt in 0..40 {
+        let (_socket, reply) = join("room-a", 10 + attempt).await;
+        if matches!(reply, ServerMessage::Welcome { .. }) {
+            joined = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(joined, "closing a surface releases its tenant slot");
+}
+
+#[tokio::test]
+async fn tenant_quota_uses_the_access_account_across_rooms() {
+    let access = ScriptedAccessStrategy {
+        quota_key: Some("license-account-a".into()),
+        ..ScriptedAccessStrategy::allow()
+    };
+    let address = serve_router(app_with_access_strategy_parts(
+        BrokerState::default(),
+        test_web_root(),
+        BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
+        BrokerHardeningConfig {
+            max_surface_connections_per_tenant: 1,
+            ..BrokerHardeningConfig::default()
+        },
+        SecurityHeadersConfig::default(),
+        Arc::new(access),
+        None,
+        OriginGuard::disabled(),
+    ))
+    .await;
+    let url = |room| {
+        websocket_url(
+            address,
+            room,
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::pairing_surface_join(room, "pair-account-test", u64::MAX),
+        )
+    };
+    let (mut first, _) = connect_async(url("room-a")).await.unwrap();
+    assert!(matches!(
+        next_server_message(&mut first).await,
+        ServerMessage::Welcome { .. }
+    ));
+    let (mut second, _) = connect_async(url("room-b")).await.unwrap();
+    assert!(
+        matches!(next_server_message(&mut second).await, ServerMessage::Error { code, message } if code == "rate_limited" && message.contains("tenant"))
+    );
+}
+
+#[test]
+fn tenant_permits_bound_relay_overlap_and_remove_idle_tenants() {
+    let tracker = TenantConnectionTracker::default();
+    let surface = tracker
+        .try_acquire("account-a".into(), protocol::PeerRole::Surface, 1)
+        .unwrap();
+    let relay = tracker
+        .try_acquire("account-a".into(), protocol::PeerRole::Relay, 1)
+        .unwrap();
+    let replacement = tracker
+        .try_acquire("account-a".into(), protocol::PeerRole::Relay, 1)
+        .unwrap();
+    assert!(tracker
+        .try_acquire("account-a".into(), protocol::PeerRole::Relay, 1)
+        .is_err());
+    drop((surface, relay, replacement));
+    assert!(tracker.counts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn open_sockets_are_capped_across_addresses() {
     let guard = BanGuard {
         blocklist: Blocklist::disabled(),
@@ -9845,12 +9973,7 @@ async fn serve_router(app: Router) -> SocketAddr {
         .expect("listener should bind");
     let address = listener.local_addr().expect("listener should have address");
     tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .expect("broker should serve");
+        serve(listener, app).await.expect("broker should serve");
     });
     address
 }

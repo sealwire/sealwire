@@ -6,6 +6,7 @@ use tracing::{error, info};
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
+        .json()
         .with_env_filter(
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "relay_broker=debug,tower_http=info".into()),
@@ -36,10 +37,7 @@ async fn main() {
         host, port, host, port
     );
     let app = relay_broker::app(relay_broker::BrokerState::from_env().await).await;
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .expect("relay-broker exited unexpectedly");
+    relay_broker::serve(listener, app)
+        .await
+        .expect("relay-broker exited unexpectedly");
 }

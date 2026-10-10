@@ -775,8 +775,8 @@ async fn postgres_signed_refresh_probes_client_id_and_persists_credentials() {
     let peer = postgres_plane(pool.clone(), false);
     let origin = "https://broker.test";
     let mut request = CredentialRefreshChallengeRequest {
-        client_id: client.client_id,
-        broker_room_id: Some(relay.broker_room_id),
+        client_id: client.client_id.clone(),
+        broker_room_id: Some(relay.broker_room_id.clone()),
         device_id: Some("signed-phone".into()),
         nonce: "postgres-refresh-init".into(),
         signature: String::new(),
@@ -791,7 +791,82 @@ async fn postgres_signed_refresh_probes_client_id_and_persists_credentials() {
         .unwrap();
     assert_eq!(peer.inner.probe_count.load(Ordering::SeqCst), 1);
     assert_eq!(peer.inner.full_load_count.load(Ordering::SeqCst), 1);
-    let (response, client_token, device_token) = peer
+    let mut locked = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM public_client_identities WHERE client_id = $1 FOR UPDATE")
+        .bind(&client.client_id)
+        .fetch_one(&mut *locked)
+        .await
+        .unwrap();
+    let refreshing = {
+        let peer = peer.clone();
+        let challenge = challenge.clone();
+        let key = key.clone();
+        tokio::spawn(async move {
+            peer.refresh_credentials(
+                CredentialRefreshRequest {
+                    challenge_id: challenge.challenge_id.clone(),
+                    signature: STANDARD.encode(
+                        key.sign(credential_refresh_message(&challenge).as_bytes())
+                            .to_bytes(),
+                    ),
+                },
+                origin,
+            )
+            .await
+        })
+    };
+    let mut waiting = false;
+    for _ in 0..100 {
+        waiting = sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT * FROM public_client_identities%')")
+            .fetch_one(&pool).await.unwrap();
+        if waiting {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(waiting, "refresh must reach the locked identity row");
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        peer.issue_client_session(&client.client_refresh_token),
+    )
+    .await
+    .expect("waiting for a row must not hold the global state lock")
+    .unwrap();
+    locked.rollback().await.unwrap();
+    let (response, client_token, device_token) = refreshing.await.unwrap().unwrap();
+    assert_eq!(
+        peer.inner.full_load_count.load(Ordering::SeqCst),
+        1,
+        "signed refresh must not reload all tenants"
+    );
+    assert_eq!(response.device.as_ref().unwrap().device_id, "signed-phone");
+    let restarted = postgres_plane(pool.clone(), false);
+    restarted
+        .issue_client_session(&client_token)
+        .await
+        .expect("client token survives database reload");
+    restarted
+        .issue_device_ws_token(&device_token.unwrap())
+        .await
+        .expect("device token survives database reload");
+    let reloading = postgres_plane(pool.clone(), true);
+    let mut request = CredentialRefreshChallengeRequest {
+        client_id: client.client_id.clone(),
+        broker_room_id: None,
+        device_id: None,
+        nonce: "postgres-reload-mode-refresh".into(),
+        signature: String::new(),
+    };
+    request.signature = STANDARD.encode(
+        key.sign(credential_refresh_init_message(&request, origin).as_bytes())
+            .to_bytes(),
+    );
+    let challenge = reloading
+        .create_credential_refresh_challenge(request, origin)
+        .await
+        .unwrap();
+    let loads = reloading.inner.full_load_count.load(Ordering::SeqCst);
+    reloading
         .refresh_credentials(
             CredentialRefreshRequest {
                 challenge_id: challenge.challenge_id.clone(),
@@ -804,16 +879,89 @@ async fn postgres_signed_refresh_probes_client_id_and_persists_credentials() {
         )
         .await
         .unwrap();
-    assert_eq!(response.device.as_ref().unwrap().device_id, "signed-phone");
-    let restarted = postgres_plane(pool.clone(), false);
-    restarted
-        .issue_client_session(&client_token)
+    assert_eq!(
+        reloading.inner.full_load_count.load(Ordering::SeqCst),
+        loads,
+        "refresh is scoped even with reload-before-use enabled"
+    );
+    let mut request = CredentialRefreshChallengeRequest {
+        client_id: client.client_id.clone(),
+        broker_room_id: Some(relay.broker_room_id.clone()),
+        device_id: Some("signed-phone".into()),
+        nonce: "postgres-revoked-grant".into(),
+        signature: String::new(),
+    };
+    request.signature = STANDARD.encode(
+        key.sign(credential_refresh_init_message(&request, origin).as_bytes())
+            .to_bytes(),
+    );
+    let challenge = peer
+        .create_credential_refresh_challenge(request, origin)
         .await
-        .expect("client token survives database reload");
-    restarted
-        .issue_device_ws_token(&device_token.unwrap())
+        .unwrap();
+    sqlx::query("DELETE FROM public_client_relay_grants WHERE client_id = $1")
+        .bind(&client.client_id)
+        .execute(&pool)
         .await
-        .expect("device token survives database reload");
+        .unwrap();
+    let error = peer
+        .refresh_credentials(
+            CredentialRefreshRequest {
+                challenge_id: challenge.challenge_id.clone(),
+                signature: STANDARD.encode(
+                    key.sign(credential_refresh_message(&challenge).as_bytes())
+                        .to_bytes(),
+                ),
+            },
+            origin,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, "credential refresh is invalid");
+    assert!(load_public_control_postgres(&pool)
+        .await
+        .unwrap()
+        .client_relay_grants_by_key
+        .is_empty());
+    let mut request = CredentialRefreshChallengeRequest {
+        client_id: client.client_id.clone(),
+        broker_room_id: None,
+        device_id: None,
+        nonce: "postgres-revoked-client".into(),
+        signature: String::new(),
+    };
+    request.signature = STANDARD.encode(
+        key.sign(credential_refresh_init_message(&request, origin).as_bytes())
+            .to_bytes(),
+    );
+    let challenge = peer
+        .create_credential_refresh_challenge(request, origin)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM public_client_identities WHERE client_id = $1")
+        .bind(&client.client_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let error = peer
+        .refresh_credentials(
+            CredentialRefreshRequest {
+                challenge_id: challenge.challenge_id.clone(),
+                signature: STANDARD.encode(
+                    key.sign(credential_refresh_message(&challenge).as_bytes())
+                        .to_bytes(),
+                ),
+            },
+            origin,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, "credential refresh is invalid");
+    assert!(load_public_control_postgres(&pool)
+        .await
+        .unwrap()
+        .client_registrations_by_hash
+        .is_empty());
     truncate_all(&pool).await;
 }
 
