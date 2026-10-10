@@ -110,7 +110,6 @@ function buildController({ draft = defaultDraft(), respond, runViewTransition = 
     readSessionDraft: () => draft,
     focusWorkspaceField: () => focused.push("workspace"),
     setSelectedCwd: (cwd) => selectedCwds.push(cwd),
-    canCurrentDeviceWrite: () => false,
     seedDefaults: () => {},
     setThreadRoute: () => {},
     renderSession: () => {},

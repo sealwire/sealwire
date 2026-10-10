@@ -35,6 +35,7 @@ function installBrowserStubs() {
 installBrowserStubs();
 
 const {
+  ControlBanner,
   MissingCredentialsState,
   RelayDirectoryList,
   RelayHomeState,
@@ -274,4 +275,21 @@ test("SessionPanel does not offer an attachment mount, which a paired device can
 
   assert.doesNotMatch(markup, /composer-attachments/);
   assert.doesNotMatch(markup, /Paste an image/);
+});
+
+test("ControlBanner never renders a take-over button", () => {
+  const markup = renderToStaticMarkup(
+    h(ControlBanner, {
+      model: {
+        hidden: false,
+        hint: "This session is being reviewed; it unlocks when the review finishes.",
+        repair: null,
+        summary: "Review in progress",
+        summaryTitle: "",
+      },
+    })
+  );
+
+  assert.match(markup, /Review in progress/);
+  assert.doesNotMatch(markup, /remote-take-over-button|Take over/);
 });

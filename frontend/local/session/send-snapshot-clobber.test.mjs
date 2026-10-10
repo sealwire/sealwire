@@ -170,7 +170,6 @@ function buildController({
         renderSession(state.session);
       }
     }),
-    canCurrentDeviceWrite: () => true,
     seedDefaults: () => {},
     setSelectedCwd: () => {},
     setThreadRoute: () => {},

@@ -1338,62 +1338,6 @@ marking idle locally."
         relay.refresh_controller_lease(&device_id, unix_now());
         Ok(relay.snapshot())
     }
-
-    pub async fn take_over_control(&self, input: TakeOverInput) -> Result<SessionSnapshot, String> {
-        let device_id = require_device_id(input.device_id)?;
-        let thread_id =
-            non_empty(Some(input.thread_id)).ok_or_else(|| "thread_id is required".to_string())?;
-        let thread_id = self.canonical_session_id(&thread_id).await?;
-        let _slot = self.acquire_session_slot()?;
-        self.expire_stale_controller_if_needed().await;
-        self.ensure_thread_runtime_loaded(&thread_id, &device_id)
-            .await?;
-
-        // Taking over a thread makes it active, so the snapshot's provider and
-        // model catalog must follow the OPENED thread's provider — otherwise
-        // opening a Codex thread while Claude was active leaves the session
-        // showing Claude's provider and model picker. Resolve both BEFORE the
-        // write lock (find_thread_provider / load_provider_model_catalog read the
-        // relay), mirroring resume_session.
-        let provider_models = match self.find_thread_provider(&thread_id).await {
-            Ok((provider_name, bridge)) => {
-                let models = self
-                    .load_provider_model_catalog(provider_name, bridge)
-                    .await;
-                Some((provider_name.to_string(), models))
-            }
-            Err(_) => None,
-        };
-
-        let mut relay = self.relay.write().await;
-        // A review owns the reviewed thread's turn sequence; don't let a take-over
-        // reassign control of THAT thread mid-review. Taking over any other active
-        // thread is fine — the review runs in the background and is unaffected.
-        if relay.is_thread_review_locked(&thread_id) {
-            return Err(REVIEW_LOCKED_THREAD_MSG.to_string());
-        }
-        if relay.is_thread_or_cwd_workflow_locked(&thread_id) {
-            return Err(WORKFLOW_LOCKED_THREAD_MSG.to_string());
-        }
-
-        relay.focus_thread_runtime(&thread_id, &device_id);
-        if let Some((provider_name, models)) = provider_models {
-            relay.set_provider_name(provider_name);
-            if let Some(models) = models {
-                relay.set_available_models(models);
-            }
-        }
-        relay.push_log(
-            "info",
-            format!(
-                "Control of thread {thread_id} moved to {}.",
-                short_device_id(&device_id)
-            ),
-        );
-        relay.notify();
-
-        Ok(relay.snapshot())
-    }
 }
 
 /// True when a provider interrupt/stop failure means the turn/session is already

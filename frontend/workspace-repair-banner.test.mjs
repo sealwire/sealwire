@@ -22,15 +22,11 @@ const FOLDER_PLAN = {
   repo_root: null,
 };
 
-// A thread whose take-over banner would otherwise claim the slot: another device
-// holds control and the thread is working.
-function takeOverInputs(extra = {}) {
+// A thread whose review lock would otherwise claim the slot.
+function reviewLockedInputs(extra = {}) {
   return {
-    controllerName: "iPhone",
     hasActiveThread: true,
-    hasController: true,
-    isController: false,
-    sessionWorking: true,
+    lockedByAgent: true,
     viewingConversation: true,
     ...extra,
   };
@@ -48,7 +44,6 @@ test("a missing worktree names the directory and offers to re-create it on its b
     model.summary.includes(WORKTREE_PLAN.recorded_cwd),
     `summary must name the missing directory, got: ${model.summary}`
   );
-  assert.equal(model.showTakeOver, false);
   assert.ok(model.repair, "a missing workspace must offer a repair action");
   assert.ok(
     /re-create/i.test(model.repair.label),
@@ -73,70 +68,33 @@ test("a missing plain folder offers to create the folder", () => {
     `summary must name the missing directory, got: ${model.summary}`
   );
   assert.equal(model.repair.label, "Create folder");
-  assert.equal(model.showTakeOver, false);
 });
 
-test("the repair banner outranks the take-over banner: there is nothing to take over into", () => {
-  const takeOver = selectControlBannerModel(takeOverInputs());
-  assert.equal(takeOver.hidden, false);
-  assert.equal(takeOver.showTakeOver, true);
-  assert.equal(takeOver.repair, null);
+test("the repair banner outranks the review lock: a send would die before the review matters", () => {
+  const locked = selectControlBannerModel(reviewLockedInputs());
+  assert.equal(locked.hidden, false);
+  assert.equal(locked.repair, null);
 
   const repairing = selectControlBannerModel(
-    takeOverInputs({ workspaceMissing: WORKTREE_PLAN })
+    reviewLockedInputs({ workspaceMissing: WORKTREE_PLAN })
   );
   assert.equal(repairing.hidden, false);
   assert.ok(repairing.repair, "the repair action must win the single banner slot");
-  assert.equal(repairing.showTakeOver, false);
   assert.ok(repairing.summary.includes(WORKTREE_PLAN.recorded_cwd));
-});
-
-test("the repair banner outranks the running-background-session banner too", () => {
-  const background = selectControlBannerModel({
-    hasActiveThread: true,
-    sessionWorking: true,
-    viewOnly: true,
-    viewingConversation: true,
-  });
-  assert.equal(background.summary, "Background session is running");
-  assert.equal(background.showTakeOver, true);
-
-  const repairing = selectControlBannerModel({
-    hasActiveThread: true,
-    sessionWorking: true,
-    viewOnly: true,
-    viewingConversation: true,
-    workspaceMissing: FOLDER_PLAN,
-  });
-  assert.ok(repairing.repair, "the repair action must win the single banner slot");
-  assert.equal(repairing.showTakeOver, false);
 });
 
 test("no workspace_missing leaves the ordinary banner behaviour untouched", () => {
   const idle = selectControlBannerModel({
     hasActiveThread: true,
-    hasController: true,
-    sessionWorking: false,
     viewingConversation: true,
     workspaceMissing: null,
   });
   assert.equal(idle.hidden, true);
   assert.equal(idle.repair, null);
 
-  const takeOver = selectControlBannerModel(takeOverInputs({ workspaceMissing: null }));
-  assert.equal(takeOver.showTakeOver, true);
-  assert.equal(takeOver.repair, null);
-  assert.ok(takeOver.summary.includes("iPhone"));
-
-  const background = selectControlBannerModel({
-    hasActiveThread: true,
-    sessionWorking: true,
-    viewOnly: true,
-    viewingConversation: true,
-    workspaceMissing: null,
-  });
-  assert.equal(background.summary, "Background session is running");
-  assert.equal(background.repair, null);
+  const locked = selectControlBannerModel(reviewLockedInputs({ workspaceMissing: null }));
+  assert.equal(locked.hidden, false);
+  assert.equal(locked.repair, null);
 });
 
 test("a repair banner never appears outside a conversation view", () => {
@@ -197,7 +155,7 @@ test("a malformed workspace_missing is treated as no workspace problem at all", 
   assert.equal(unknownKind.repair.label, "Create folder");
 });
 
-test("the banner component renders the repair action, not take over", () => {
+test("the banner component renders the repair action", () => {
   const model = selectControlBannerModel({
     hasActiveThread: true,
     repairError: "git worktree add failed",
@@ -208,7 +166,6 @@ test("the banner component renders the repair action, not take over", () => {
     React.createElement(ControlBannerContent, {
       hint: model.hint,
       repair: model.repair,
-      showTakeOver: model.showTakeOver,
       summary: model.summary,
       summaryTitle: model.summaryTitle,
     })
@@ -239,7 +196,6 @@ test("a pending repair renders a disabled button so it cannot be double-fired", 
   const markup = renderToStaticMarkup(
     React.createElement(ControlBannerContent, {
       repair: model.repair,
-      showTakeOver: model.showTakeOver,
       summary: model.summary,
     })
   );

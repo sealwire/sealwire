@@ -25,14 +25,13 @@ test("selectSessionRenderModel allows direct send to an idle thread held by anot
     previousSession: {
       active_thread_id: "thread-0",
     },
-    hasControllerLease: false,
   });
 
   assert.equal(model.approval?.request_id, "approval-1");
   assert.equal(model.currentApprovalId, "approval-1");
   assert.equal(model.hasActiveSession, true);
   assert.equal(model.canCompose, true);
-  assert.equal(model.canWrite, false);
+  assert.equal(model.canWrite, true);
   assert.equal(model.composerDisabled, false);
   assert.equal(model.messagePlaceholder, "Message Codex remotely...");
   assert.deepEqual(model.scrollDebug, {
@@ -42,26 +41,6 @@ test("selectSessionRenderModel allows direct send to an idle thread held by anot
     truncated: "1",
     status: "idle",
   });
-});
-
-test("selectSessionRenderModel keeps a running thread read-only for another device", () => {
-  const model = selectSessionRenderModel({
-    session: {
-      active_thread_id: "thread-1",
-      active_turn_id: "turn-1",
-      current_cwd: "/tmp",
-      current_status: "active",
-      pending_approvals: [],
-      transcript: [],
-    },
-    previousSession: null,
-    hasControllerLease: false,
-  });
-
-  assert.equal(model.canCompose, false);
-  assert.equal(model.canWrite, false);
-  assert.equal(model.composerDisabled, true);
-  assert.match(model.messagePlaceholder, /running on another device/i);
 });
 
 test("selectSessionRenderModel freezes the composer only when the active thread is reviewed", () => {
@@ -82,7 +61,6 @@ test("selectSessionRenderModel freezes the composer only when the active thread 
       ],
     },
     previousSession: null,
-    hasControllerLease: true,
   });
   assert.equal(usable.composerDisabled, false);
   assert.equal(usable.canCompose, true);
@@ -97,7 +75,6 @@ test("selectSessionRenderModel freezes the composer only when the active thread 
       ],
     },
     previousSession: null,
-    hasControllerLease: true,
   });
   assert.equal(frozen.composerDisabled, true);
   assert.equal(frozen.canCompose, false);
@@ -122,7 +99,6 @@ test("selectSessionRenderModel freezes the composer only when the active thread 
       ],
     },
     previousSession: null,
-    hasControllerLease: true,
   });
   assert.equal(usable.composerDisabled, false);
   assert.equal(usable.canCompose, true);
@@ -136,7 +112,6 @@ test("selectSessionRenderModel freezes the composer only when the active thread 
       ],
     },
     previousSession: null,
-    hasControllerLease: true,
   });
   assert.equal(frozen.activeThreadFrozen, true);
   assert.equal(frozen.activeThreadUnderWorkflow, true);
@@ -159,10 +134,8 @@ test("selectSessionRenderModel keeps a general view-only thread writable by targ
       view_only: true,
     },
     previousSession: null,
-    hasControllerLease: false,
   });
 
-  assert.equal(model.hasControllerLease, false);
   assert.equal(model.canCompose, true);
   assert.equal(model.canWrite, false);
   assert.equal(model.composerDisabled, false);
@@ -180,7 +153,6 @@ test("selectSessionRenderModel names the active thread's own provider in the com
       transcript: [],
     },
     previousSession: null,
-    hasControllerLease: true,
   });
   // A Claude thread must never read "Message Codex…" — that was the bug.
   assert.equal(claudeModel.messagePlaceholder, "Message Claude remotely...");
@@ -194,7 +166,6 @@ test("selectSessionRenderModel names the active thread's own provider in the com
       transcript: [],
     },
     previousSession: null,
-    hasControllerLease: true,
   });
   // No provider yet → a neutral placeholder, still not a hardcoded vendor.
   assert.equal(unknownProviderModel.messagePlaceholder, "Message remotely...");
@@ -219,7 +190,6 @@ test("selectSessionRenderModel keeps a reviewed view-only thread frozen", () => 
       view_only: true,
     },
     previousSession: null,
-    hasControllerLease: false,
   });
 
   assert.equal(model.canCompose, false);
@@ -304,7 +274,6 @@ test("selectSessionRenderModel freezes remote composer for workflow-locked same-
       transcript: [],
     },
     previousSession: null,
-    hasControllerLease: false,
   });
 
   assert.equal(model.canCompose, false);
@@ -567,4 +536,26 @@ test("visiblePendingAskUserQuestions keeps only the thread on screen", () => {
     ),
     ["req-mine"]
   );
+});
+
+test("another device's running turn leaves this phone's composer usable", () => {
+  const model = selectSessionRenderModel({
+    session: {
+      active_thread_id: "thread-1",
+      active_turn_id: "turn-1",
+      active_controller_device_id: "device-2",
+      current_cwd: "/tmp",
+      current_status: "active",
+      provider: "codex",
+      pending_approvals: [],
+      transcript: [],
+    },
+    previousSession: null,
+  });
+
+  assert.equal(model.canCompose, true);
+  assert.equal(model.composerDisabled, false);
+  assert.equal(model.canWrite, true);
+  assert.equal("hasControllerLease" in model, false);
+  assert.equal(model.messagePlaceholder, "Message Codex remotely...");
 });

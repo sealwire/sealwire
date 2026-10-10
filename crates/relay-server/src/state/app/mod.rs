@@ -25,7 +25,7 @@ use crate::{
         ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput, ResolvedWorkspace,
         ResumeSessionInput, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
         SessionSnapshotCompactProfile, SetThreadFlagInput, StartSessionInput, StopTurnInput,
-        SubmitAskUserAnswerInput, TakeOverInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
+        SubmitAskUserAnswerInput, ThreadArchiveReceipt, ThreadDeleteReceipt,
         ThreadEntryDetailResponse, ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView,
         ThreadStateView, ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsResponse,
         ToolCallView, UpdateSessionSettingsInput, WatchThreadsInput, WorkspaceDiffResponse,

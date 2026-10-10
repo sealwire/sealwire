@@ -171,7 +171,6 @@ export function createLifecycleController(ctx) {
     seedDefaults,
     setSelectedCwd,
     setThreadRoute,
-    canCurrentDeviceWrite,
     renderSession,
     renderOverviewState,
     renderSessionUnavailable,
@@ -375,9 +374,7 @@ export function createLifecycleController(ctx) {
           seedDefaults(payload.data);
           applySessionSnapshot(payload.data);
         });
-        if (canCurrentDeviceWrite(payload.data)) {
-          messageInput.focus();
-        }
+        messageInput.focus();
         await loadThreads("post-start refresh");
       } catch (error) {
         logLine(`Session started, but opening it failed: ${error.message}`);
@@ -416,9 +413,7 @@ export function createLifecycleController(ctx) {
         seedDefaults(payload.data);
         applySessionSnapshot(payload.data);
       });
-      if (canCurrentDeviceWrite(payload.data)) {
-        messageInput.focus();
-      }
+      messageInput.focus();
       logLine(`Resumed session ${threadId}`);
       return true;
     } catch (error) {
@@ -487,9 +482,7 @@ export function createLifecycleController(ctx) {
         seedDefaults(snapshot);
         applySessionSnapshot(snapshot);
       });
-      if (canCurrentDeviceWrite(snapshot)) {
-        messageInput.focus();
-      }
+      messageInput.focus();
     } catch (error) {
       logLine(`Fork succeeded, but opening it failed: ${error.message}`);
     }

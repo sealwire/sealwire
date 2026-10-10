@@ -6,7 +6,9 @@ import { getFreePort } from "./e2e/harness/ports.mjs";
 import { spawnManagedProcess, stopManagedProcess, waitForHealth } from "./e2e/harness/process.mjs";
 
 const cwd = process.cwd();
-const generation = "take-over-transcript-e2e";
+// A send into a background thread makes it the relay's current one; the history
+// already on screen and the reading position must survive that switch.
+const generation = "background-becomes-current-e2e";
 const entries = Array.from({ length: 54 }, (_, index) => ({
   row_id: `a-${index}`,
   item_id: `a-${index}`,
@@ -15,19 +17,19 @@ const entries = Array.from({ length: 54 }, (_, index) => ({
   content_state: "full",
   turn_id: `turn-${Math.min(20, Math.floor(index / 2))}`,
   order_seq: index * 1048576,
-  text: `${index < 42 ? "Retained" : "Server-only"} message ${index}\n\n${"History must survive taking control of this session. ".repeat(5)}`,
+  text: `${index < 42 ? "Retained" : "Server-only"} message ${index}\n\n${"History must survive this session becoming the current one. ".repeat(5)}`,
 }));
 const initialEntries = entries.slice(0, 42);
 const thread = id => ({
-  id, name: `Take-over ${id}`, cwd, status: id === "a" ? "active" : "idle",
+  id, name: `Thread ${id}`, cwd, status: id === "a" ? "active" : "idle",
   provider: "codex", source: "codex", updated_at: 1,
 });
-const artifactDir = path.join(cwd, "artifacts/e2e/take-over-transcript");
+const artifactDir = path.join(cwd, "artifacts/e2e/background-becomes-current");
 
 async function main() {
   const port = await getFreePort();
   const unusedRelayPort = await getFreePort();
-  const server = spawnManagedProcess("take-over-test-vite", process.execPath, ["node_modules/vite/bin/vite.js", "--strictPort"], {
+  const server = spawnManagedProcess("background-becomes-current-vite", process.execPath, ["node_modules/vite/bin/vite.js", "--strictPort"], {
     RELAY_DEV_VITE_PORT: String(port), RELAY_DEV_SERVER_PORT: String(unusedRelayPort),
   });
   let browser;
@@ -44,14 +46,14 @@ async function main() {
     const olderReads = [];
     let activeTailReads = 0;
     let holdActiveTail = true;
-    let takeOvers = 0;
+    let sends = 0;
     let snapshot = {
       provider: "codex", provider_connected: true, transcript_generation: generation,
       active_thread_id: "other", active_turn_id: null, current_cwd: cwd, current_status: "idle",
       transcript: [], transcript_revision: 1, transcript_truncated: false,
       model: "test-model", reasoning_effort: "medium", approval_policy: "never", sandbox: "workspace-write",
       available_models: [], pending_approvals: [], pending_ask_user_questions: [],
-      thread_activity: [{ thread_id: "a", phase: "thinking" }],
+      thread_activity: [],
     };
     page.on("pageerror", error => errors.push(error.message));
     // Every API response is a fixture, so this browser cannot alter a live relay.
@@ -60,10 +62,10 @@ async function main() {
       let data = {};
       if (url.pathname === "/api/stream") return route.abort();
       if (url.pathname === "/api/session" || url.pathname === "/api/session/heartbeat") data = snapshot;
-      else if (url.pathname === "/api/session/take-over") {
+      else if (url.pathname === "/api/session/message") {
         const input = route.request().postDataJSON();
         assert.equal(input.thread_id, "a");
-        takeOvers++;
+        sends++;
         snapshot = {
           ...snapshot, active_thread_id: "a", active_controller_device_id: input.device_id,
           active_turn_id: "turn-20", current_status: "active", transcript_revision: 2,
@@ -91,7 +93,9 @@ async function main() {
           entries: history.slice(start, end),
           prev_cursor: start ? `before-${start}` : null,
           thread_state: {
-            provider: "codex", current_cwd: cwd, current_status: "active", active_turn_id: "turn-20",
+            provider: "codex", current_cwd: cwd,
+            current_status: snapshot.active_thread_id === "a" ? "active" : "idle",
+            active_turn_id: snapshot.active_thread_id === "a" ? "turn-20" : null,
             model: "test-model", available_models: [],
           },
         };
@@ -114,17 +118,18 @@ async function main() {
     const before = await measureTranscript(page);
     assert.ok(before.visible.some(row => Number(row.id.split("-")[1]) < 22));
     await fs.mkdir(artifactDir, { recursive: true });
-    await page.screenshot({ path: path.join(artifactDir, "before-take-over.png") });
+    await page.screenshot({ path: path.join(artifactDir, "before-send.png") });
 
-    await page.locator("#take-over-button").click();
-    await page.locator("#take-over-button").waitFor({ state: "hidden" });
+    await page.locator("#message-input").fill("continue");
+    await page.locator("#send-button").click();
+    await page.locator("#stop-button").waitFor({ state: "visible" });
     await page.waitForTimeout(300);
     const after = await measureTranscript(page);
-    assert.equal(takeOvers, 1);
+    assert.equal(sends, 1);
     assert.ok(after.scrollHeight >= before.scrollHeight * 0.9, JSON.stringify({ before, after }));
     assertReadingPosition(before, after);
-    await page.screenshot({ path: path.join(artifactDir, "after-take-over.png") });
-    assert.equal(activeTailReads, 1, "take-over must read a fresh tail even without a delta gap");
+    await page.screenshot({ path: path.join(artifactDir, "after-send.png") });
+    assert.equal(activeTailReads, 1, "becoming current must read a fresh tail even without a delta gap");
     const freshResponse = page.waitForResponse(response => response.url().endsWith("/threads/a/transcript"));
     holdActiveTail = false;
     releaseTail();
@@ -146,7 +151,7 @@ async function main() {
     assert.equal(activeTailReads, 1);
     assert.deepEqual(olderReads, ["before-22", "before-48", "before-42"]);
     assert.deepEqual(errors, []);
-    const report = JSON.stringify({ before, after, refreshed, repaired, takeOvers, activeTailReads, olderReads, artifactDir }, null, 2);
+    const report = JSON.stringify({ before, after, refreshed, repaired, sends, activeTailReads, olderReads, artifactDir }, null, 2);
     await fs.writeFile(path.join(artifactDir, "result.json"), `${report}\n`);
     console.log(report);
   } catch (error) {

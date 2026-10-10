@@ -62,7 +62,7 @@ test("deriveSessionRuntime returns runtime state from the session view", () => {
   const sessionView = {
     composerDisabled: true,
     currentApprovalId: "approval-1",
-    messagePlaceholder: "Another device has control. Take over to reply.",
+    messagePlaceholder: "This session is being reviewed…",
   };
 
   const runtime = deriveSessionRuntime({ session, sessionView });
@@ -83,7 +83,7 @@ test("deriveSessionRuntime returns runtime state from the session view", () => {
       { label: "Medium", value: "medium" },
       { label: "Extra high", value: "xhigh" },
     ],
-    messagePlaceholder: "Another device has control. Take over to reply.",
+    messagePlaceholder: "This session is being reviewed…",
     models: [{
       default_reasoning_effort: "medium",
       display_name: "GPT-5.5",
@@ -383,4 +383,47 @@ test("deriveSessionRuntime only paints Stopping… for the thread that is pendin
     sessionView,
   });
   assert.equal(backOnA.stopPending, true, "returning to A still shows Stopping…");
+});
+
+test("Stop shows on a phone that did not start the running turn", async () => {
+  const { selectSessionRenderModel } = await import("../view-model.js");
+  const session = {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-1",
+    active_controller_device_id: "device-2",
+    current_status: "active",
+    pending_approvals: [],
+    transcript: [],
+  };
+
+  const runtime = deriveSessionRuntime({
+    session,
+    sessionView: selectSessionRenderModel({ session, previousSession: null }),
+  });
+
+  assert.equal(runtime.composerDisabled, false);
+  assert.equal(runtime.stopVisible, true);
+});
+
+// Same rule as the desktop composer: never offer to stop a review's or Code Flow's own turn.
+test("Stop stays hidden on a background thread locked by a review, as on desktop", async () => {
+  const { selectSessionRenderModel } = await import("../view-model.js");
+  const session = {
+    active_thread_id: "thread-1",
+    active_turn_id: "view:thread-1",
+    current_status: "active",
+    view_only: true,
+    active_review_jobs: [
+      { id: "review-1", status: "waiting_for_reviewer", parent_thread_id: "thread-1" },
+    ],
+    pending_approvals: [],
+    transcript: [],
+  };
+
+  const runtime = deriveSessionRuntime({
+    session,
+    sessionView: selectSessionRenderModel({ session, previousSession: null }),
+  });
+
+  assert.equal(runtime.stopVisible, false);
 });

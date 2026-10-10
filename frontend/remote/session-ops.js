@@ -2233,23 +2233,6 @@ export async function stopActiveTurn() {
   }
 }
 
-export async function takeOverControl() {
-  const threadId = state.session?.active_thread_id || null;
-  if (!threadId) {
-    renderLog("There is no session to take over.");
-    return false;
-  }
-  try {
-    await dispatchOrRecover("take_over", {
-      input: { thread_id: threadId },
-    });
-    return true;
-  } catch (error) {
-    renderLog(`Take over failed: ${error.message}`);
-    return false;
-  }
-}
-
 export async function submitDecision(decision, scope) {
   if (!state.currentApprovalId) {
     renderLog("No pending approval to submit.");

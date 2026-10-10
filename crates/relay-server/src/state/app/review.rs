@@ -363,14 +363,6 @@ starting a review"
                         .to_string(),
                 );
             }
-            // A review is a BACKGROUND action on a specific thread — it does NOT require
-            // controlling the active session (that lease governs who DRIVES the active
-            // thread's input, which is orthogonal to spawning a background reviewer). So we
-            // deliberately do NOT call `ensure_device_can_send_message` here. Authorization
-            // is workspace path-scope (enforced below against the reviewed thread's cwd),
-            // and the reviewed thread must be idle. This lets you review an idle thread
-            // while another session/device holds the active slot.
-            //
             // Review the thread the request NAMES, falling back to the active thread when
             // none is given; error only if there is no thread to review at all.
             let parent_thread_id = requested_parent_thread_id
@@ -750,9 +742,6 @@ to this thread."
     ) -> Result<ReviewDeleteReceipt, String> {
         // Delete is cleanup of an already-finished review: the workspace is
         // unlocked and no turn is running, so any authenticated device may do it.
-        // We deliberately do NOT call `ensure_device_can_send_message` here
-        // (unlike `request_review`/`resolve_blocked_review`, which mutate a live
-        // session) — clearing a completed review card is not controller-gated.
         let _device_id = require_device_id(device_id)?;
         let (is_terminal, reviewer_thread_id) = {
             let relay = self.relay.read().await;

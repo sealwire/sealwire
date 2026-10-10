@@ -232,14 +232,12 @@ export function DeviceMetaPanel({ model }) {
   );
 }
 
-export function ControlBanner({ model, onRepairWorkspace = null, onTakeOver = null }) {
+export function ControlBanner({ model, onRepairWorkspace = null }) {
   if (model.hidden) {
     return null;
   }
 
-  // `{ label, pending, error, kind, threadId }` when the viewed thread's workspace is
-  // gone — see remote/workspace-repair.js. The banner is one slot, so this and Take over
-  // are mutually exclusive by construction: the model never offers both.
+  // `{ label, pending, error, kind, threadId }` when the viewed thread's workspace is gone.
   const repair = model.repair || null;
 
   return h(
@@ -254,19 +252,6 @@ export function ControlBanner({ model, onRepairWorkspace = null, onTakeOver = nu
         title: model.summaryTitle || undefined,
       },
       model.summary
-    ),
-    // Stays mounted (hidden) rather than swapped out, so nothing that resolves
-    // `#remote-take-over-button` loses its element when the repair banner takes over.
-    h(
-      "button",
-      {
-        className: "control-button",
-        hidden: model.takeOverHidden,
-        id: "remote-take-over-button",
-        onClick: onTakeOver,
-        type: "button",
-      },
-      "Take over"
     ),
     repair
       ? h(

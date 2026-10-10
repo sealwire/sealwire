@@ -79,11 +79,8 @@ export function SessionMetaPanel({ chips = [], emptyMessage = "" }) {
 
 export function ControlBannerContent({
   hint: _hint,
-  // `{ label, pending, error }` when the viewed thread's workspace is missing — see
-  // local/control-banner.js. The banner is one slot, so this and Take over are
-  // mutually exclusive by construction: the model never sets both.
+  // `{ label, pending, error }` when the viewed thread's workspace is missing.
   repair = null,
-  showTakeOver = false,
   summary,
   summaryTitle = "",
 }) {
@@ -100,19 +97,6 @@ export function ControlBannerContent({
         title: summaryTitle || undefined,
       },
       summary
-    ),
-    // The take-over button stays mounted (hidden) rather than swapped out: the
-    // click handler in app.js binds by id on the banner, and dom.js resolves
-    // `#take-over-button` once at boot.
-    h(
-      "button",
-      {
-        className: "control-button",
-        hidden: !showTakeOver,
-        id: "take-over-button",
-        type: "button",
-      },
-      "Take over"
     ),
     repair
       ? h(

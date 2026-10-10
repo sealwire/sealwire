@@ -128,7 +128,6 @@ async function main() {
     attachPageDebugLogging(remotePageA, "remote-a", {
       prefix: "public-multi-remote-follow-e2e",
     });
-    await installRemoteObserverHooks(remotePageA);
     await remotePageA.goto(pairingUrl, { waitUntil: "domcontentloaded" });
     logStep("remote A page loaded");
 
@@ -144,7 +143,6 @@ async function main() {
     attachPageDebugLogging(remotePageB, "remote-b", {
       prefix: "public-multi-remote-follow-e2e",
     });
-    await installRemoteObserverHooks(remotePageB);
     await remotePageB.goto(remoteOrigin, { waitUntil: "domcontentloaded" });
     await waitForPairedRemote(remotePageB, TIMEOUT_MS);
     logStep("remote B page loaded");
@@ -175,8 +173,6 @@ async function main() {
     const remoteBStatsBefore = await readRemoteObserverStats(remotePageB);
     logStep("remote observers attached", {
       threadId,
-      remoteATakeOverCount: remoteAStatsBefore.takeOverCount,
-      remoteBTakeOverCount: remoteBStatsBefore.takeOverCount,
       remoteATranscriptLength: remoteAStatsBefore.transcriptText.length,
       remoteBTranscriptLength: remoteBStatsBefore.transcriptText.length,
     });
@@ -202,16 +198,6 @@ async function main() {
     const remoteAStatsAfter = await readRemoteObserverStats(remotePageA);
     const remoteBStatsAfter = await readRemoteObserverStats(remotePageB);
 
-    assert.equal(
-      remoteAStatsAfter.takeOverCount,
-      remoteAStatsBefore.takeOverCount,
-      "remote A should not take over the session to receive updates"
-    );
-    assert.equal(
-      remoteBStatsAfter.takeOverCount,
-      remoteBStatsBefore.takeOverCount,
-      "remote B should not take over the session to receive updates"
-    );
     assert.ok(
       remoteAStatsAfter.transcriptText.length > remoteAStatsBefore.transcriptText.length,
       `remote A transcript should grow after the local Codex reply (before=${remoteAStatsBefore.transcriptText.length}, after=${remoteAStatsAfter.transcriptText.length})`
@@ -270,8 +256,6 @@ async function main() {
           activeThreadId: threadId,
           secondThreadId,
           remoteA: {
-            takeOverCountBeforeSend: remoteAStatsBefore.takeOverCount,
-            takeOverCountAfterSend: remoteAStatsAfter.takeOverCount,
             transcriptBeforeSendLength: remoteAStatsBefore.transcriptText.length,
             transcriptAfterSendLength: remoteAStatsAfter.transcriptText.length,
             historyBeforeSwitch: remoteAHistoryBeforeSwitch,
@@ -279,8 +263,6 @@ async function main() {
             clientLog: await safeText(remotePageA, "#remote-client-log"),
           },
           remoteB: {
-            takeOverCountBeforeSend: remoteBStatsBefore.takeOverCount,
-            takeOverCountAfterSend: remoteBStatsAfter.takeOverCount,
             transcriptBeforeSendLength: remoteBStatsBefore.transcriptText.length,
             transcriptAfterSendLength: remoteBStatsAfter.transcriptText.length,
             clientLog: await safeText(remotePageB, "#remote-client-log"),
@@ -379,7 +361,6 @@ async function waitForRemoteReply(page, expectedReply, label) {
 
 async function readRemoteObserverStats(page) {
   return page.evaluate(() => ({
-    takeOverCount: window.__agentRelayTakeOverCount || 0,
     transcriptText: document.querySelector("#remote-transcript")?.textContent || "",
   }));
 }
@@ -454,24 +435,6 @@ async function switchRemoteThread(page, threadId, label) {
   logStep(`remote ${label} switched thread`, { threadId });
 }
 
-async function installRemoteObserverHooks(page) {
-  await page.addInitScript(() => {
-    window.__agentRelayTakeOverCount = 0;
-    const NativeWebSocket = window.WebSocket;
-
-    class InstrumentedWebSocket extends NativeWebSocket {
-      send(data) {
-        if (typeof data === "string" && data.includes('"action_id":"take_over-')) {
-          window.__agentRelayTakeOverCount += 1;
-        }
-        return super.send(data);
-      }
-    }
-
-    window.WebSocket = InstrumentedWebSocket;
-  });
-}
-
 async function waitForActiveThread(relayPort, cwd, timeoutMs = TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -523,31 +486,12 @@ async function selectFirstRelayIfNeeded(page) {
 
 async function ensureLocalMessageInputEnabled(page) {
   const locator = page.locator("#message-input");
-  await assertEnabled(locator);
-  const disabled = await locator.evaluate((element) => element.disabled);
-  if (!disabled) {
-    return locator;
-  }
-
-  const canTakeOver = await page.evaluate(() => {
-    const button = document.querySelector("#take-over-button");
-    if (!button || button.hidden || button.disabled) {
-      return false;
-    }
-    const style = window.getComputedStyle(button);
-    return style.visibility !== "hidden" && style.display !== "none";
-  });
-  assert.equal(canTakeOver, true, "local page should offer control takeover when composer is read-only");
-  await page.click("#take-over-button");
+  await locator.waitFor({ state: "visible", timeout: TIMEOUT_MS });
   await page.waitForFunction(() => {
     const input = document.querySelector("#message-input");
     return Boolean(input && !input.disabled);
   }, null, { timeout: TIMEOUT_MS });
   return locator;
-}
-
-async function assertEnabled(locator) {
-  await locator.waitFor({ state: "visible", timeout: TIMEOUT_MS });
 }
 
 await main();

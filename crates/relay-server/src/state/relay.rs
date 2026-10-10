@@ -6874,31 +6874,6 @@ so {} never got it — hand over again when you are ready.",
         std::mem::take(&mut self.pending_broker_messages)
     }
 
-    #[allow(dead_code)]
-    pub fn can_device_send_message(&self, device_id: &str) -> bool {
-        if self.active_thread_id.is_none() {
-            return false;
-        }
-
-        match self.active_controller_device_id.as_deref() {
-            Some(active_device_id) => active_device_id == device_id,
-            None => true,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn ensure_device_can_send_message(&self, device_id: &str) -> Result<(), String> {
-        if self.active_thread_id.is_none() {
-            return Err("there is no active Codex thread to send to".to_string());
-        }
-
-        if self.can_device_send_message(device_id) {
-            Ok(())
-        } else {
-            Err("another device currently has control. Take over on this device before sending a message.".to_string())
-        }
-    }
-
     pub fn can_device_approve(&self, _device_id: &str) -> bool {
         self.active_thread_id.is_some()
     }

@@ -288,23 +288,14 @@ test("the Orchestrator's messages carry their provider's mark", () => {
 
 // ---- empty / ready / loading ----------------------------------------------
 
-// The bug this pins: `canWrite` was `!composerDisabled`, and composerDisabled is
-// true while the Orchestrator is still being opened. So on a perfectly normal
-// single-device relay the empty pane announced "Session active on another
-// device" / "another device has control" for the duration of the open. It also
-// read "Session ready", the conversation's heading, for a pane that is not a
-// session.
-test("an empty Orchestrator does not claim another device has control", () => {
-  const { host } = mount({ entries: [], composerDisabled: true, canWrite: true });
+// It once read "Session ready", the conversation's heading, for a pane that is not
+// a session.
+test("an empty Orchestrator reads as itself while it opens", () => {
+  const { host } = mount({ entries: [], composerDisabled: true });
   const html = host.innerHTML;
 
-  assert.doesNotMatch(html, /another device/i, "being mid-open is not being locked out");
+  assert.doesNotMatch(html, /another device/i);
   assert.doesNotMatch(html, /Session ready/, "this pane is not a session");
-});
-
-test("but a device that genuinely cannot write is still told so", () => {
-  const { host } = mount({ entries: [], composerDisabled: true, canWrite: false });
-  assert.match(host.innerHTML, /another device/i);
 });
 
 // The bug this pins: re-opening Tasks with an existing conversation refetches
@@ -360,31 +351,4 @@ test("an idle Orchestrator shows Send and no Stop", () => {
 test("Enter behaves the same in both composers on this surface", () => {
   const { host } = mount({ enterSubmits: true });
   assert.ok(host.querySelector("#task-orch-input"), "the composer is present to pin");
-});
-
-// The bug this pins, from review: `canWrite` reached the transcript's
-// empty/ready copy but not the composer. So the pane announced "another device
-// has control" above a live textarea whose Send silently TOOK control when
-// pressed — the announcement and the affordance disagreed.
-test("a device that cannot write cannot send either", () => {
-  const { host } = mount({ canWrite: false });
-
-  const input = host.querySelector("#task-orch-input");
-  const send = host.querySelector("#task-orch-send");
-  assert.ok(input?.disabled, "the composer must not invite a send it will not honour");
-  assert.ok(send?.disabled, "and Send must not be pressable");
-});
-
-test("a device that can write is unaffected", () => {
-  const { host } = mount({ canWrite: true });
-  assert.ok(!host.querySelector("#task-orch-input")?.disabled);
-});
-
-// Propose stages a card, which is also a write. It must follow the same rule.
-test("Propose is unavailable to a device that cannot write", () => {
-  const { host } = mount({ canWrite: false, onPropose: () => {} });
-  const propose = [...host.querySelectorAll("button")].find((node) =>
-    node.textContent.includes("Propose as task")
-  );
-  assert.ok(propose?.disabled);
 });

@@ -6,10 +6,7 @@ import { state } from "./state.js";
 import {
   applyRemoteSurfacePatch,
 } from "./surface-state.js";
-import {
-  canCurrentDeviceWrite as canRemoteDeviceWrite,
-  isCurrentDeviceActiveController as isRemoteController,
-} from "./chrome-view-model.js";
+import { isCurrentDeviceActiveController as isRemoteController } from "./chrome-view-model.js";
 import { pendingApprovalForThread } from "../shared/session-view-model.js";
 
 // `session` stays whole (approval events merge into it); only the Approve target
@@ -30,13 +27,6 @@ export { isVerboseBrokerLoggingEnabled };
 
 export function isCurrentDeviceActiveController(session) {
   return isRemoteController({
-    remoteAuth: state.remoteAuth,
-    session,
-  });
-}
-
-export function canCurrentDeviceWrite(session) {
-  return canRemoteDeviceWrite({
     remoteAuth: state.remoteAuth,
     session,
   });

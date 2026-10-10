@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { entry, baseSnapshot, createLifecycleHarness } from "./test-support/lifecycle-harness.mjs";
 
-const { createPairingController } = await import("./pairing.js");
 const { createViewOnlyRefreshOps } = await import("../view-only-refresh-ops.js");
 const { buildViewOnlyPin } = await import("../view-only-thread.js");
 const { hydrateLocalTranscript, loadOlderLocalTranscript } = await import("../transcript/hydration.js");
@@ -17,9 +16,9 @@ function numberedRows(start, end) {
   });
 }
 
-function createTakeOverHarness() {
+function createBackgroundThreadHarness() {
   const target = "background-thread";
-  const generation = "take-over-generation";
+  const generation = "relay-generation";
   let refresh;
   const h = createLifecycleHarness({
     onRender: (session) => refresh?.maybeRefreshViewOnly(session),
@@ -45,19 +44,16 @@ function createTakeOverHarness() {
     transcript_truncated: true,
     transcript: numberedRows(52, 60),
   });
-  h.ctx.applySessionSnapshot = h.lifecycle.applySessionSnapshot;
-  h.ctx.shortId = (id) => id;
-  h.ctx.apiFetch = async (url, options) => {
-    assert.equal(url, "/api/session/take-over");
-    assert.equal(JSON.parse(options.body).thread_id, target);
-    return { ok: true, json: async () => ({ ok: true, data: snapshot }) };
-  };
-  return { ...h, target, generation, snapshot, pairing: createPairingController(h.ctx) };
+  // A send into the background thread is what makes it current; its HTTP reply is
+  // applied exactly as lifecycle.sendMessage applies it.
+  const sendReplyLands = () =>
+    h.lifecycle.applySessionSnapshot(snapshot, { transcriptMayPredateWrite: true });
+  return { ...h, target, generation, snapshot, sendReplyLands };
 }
 
 for (const streamFirst of [false, true]) {
-  test(`take-over keeps viewed history and streamed text when ${streamFirst ? "SSE" : "HTTP"} lands first`, async () => {
-    const h = createTakeOverHarness();
+  test(`becoming current keeps viewed history and streamed text when ${streamFirst ? "SSE" : "HTTP"} lands first`, async () => {
+    const h = createBackgroundThreadHarness();
     h.stream.applyLocalTranscriptEntryDelta({
       thread_id: h.target,
       transcript_generation: h.generation,
@@ -67,18 +63,18 @@ for (const streamFirst of [false, true]) {
       turn_id: "turn-1",
       delta_kind: "agent_text",
       text_offset: "message 59".length,
-      delta: " streamed before take-over",
+      delta: " streamed before the send",
     });
     h.snapshot.transcript.at(-1).content_state = "preview";
     if (streamFirst) h.lifecycle.applySessionSnapshot(h.snapshot);
-    await h.pairing.takeOverControl();
+    h.sendReplyLands();
     if (!streamFirst) h.lifecycle.applySessionSnapshot(h.snapshot);
     h.clock.tick(100);
 
     assert.equal(h.state.viewOnlyThread, null);
     for (const painted of h.rendered.filter(session => session.active_thread_id === h.target)) {
       assert.deepEqual(painted.transcript.map(row => row.row_id), numberedRows(20, 60).map(row => row.row_id));
-      assert.equal(painted.transcript.at(-1).text, "message 59 streamed before take-over");
+      assert.equal(painted.transcript.at(-1).text, "message 59 streamed before the send");
     }
     assert.equal(h.state.transcriptHydrationOlderCursor, "before-20");
 
@@ -104,11 +100,11 @@ for (const streamFirst of [false, true]) {
       turn_id: "turn-1",
       delta_kind: "agent_text",
       text_offset: 0,
-      delta: "streamed after take-over",
+      delta: "streamed after the send",
     });
     h.clock.tick(100);
     assert.deepEqual(h.state.session.transcript.map(row => row.row_id), numberedRows(20, 61).map(row => row.row_id));
-    assert.equal(h.state.session.transcript.at(-1).text, "streamed after take-over");
+    assert.equal(h.state.session.transcript.at(-1).text, "streamed after the send");
     assert.equal(h.state.transcriptHydrationOlderCursor, "before-20");
     releaseTail({
       thread_id: h.target, transcript_generation: h.generation,
@@ -116,19 +112,19 @@ for (const streamFirst of [false, true]) {
     });
     await hydration;
     assert.deepEqual(h.state.session.transcript.map(row => row.row_id), numberedRows(20, 61).map(row => row.row_id));
-    assert.equal(h.state.session.transcript.find(row => row.row_id === "row-59").text, "message 59 streamed before take-over");
-    assert.equal(h.state.session.transcript.at(-1).text, "streamed after take-over");
+    assert.equal(h.state.session.transcript.find(row => row.row_id === "row-59").text, "message 59 streamed before the send");
+    assert.equal(h.state.session.transcript.at(-1).text, "streamed after the send");
     assert.equal(h.state.transcriptHydrationOlderCursor, "before-20");
     await hydrateLocalTranscript(h.state, h.state.session, {
-      fetchPage: async () => { throw new Error("a settled take-over must not reread the same tail"); },
+      fetchPage: async () => { throw new Error("a settled switch must not reread the same tail"); },
       onError: (error) => { throw error; },
     });
   });
 }
 
 for (const start of [0, 30]) {
-  test(`take-over combines restored and viewed history when the ${start ? "viewed" : "restored"} window is older`, async () => {
-    const h = createTakeOverHarness();
+  test(`becoming current combines restored and viewed history when the ${start ? "viewed" : "restored"} window is older`, async () => {
+    const h = createBackgroundThreadHarness();
     h.state.transcriptHydrationThreadCache = new Map([[h.target, {
       entries: new Map(numberedRows(start, 40).map(row => [row.row_id, row])),
       order: numberedRows(start, 40).map(row => row.row_id),
@@ -137,22 +133,22 @@ for (const start of [0, 30]) {
       tailReady: true,
       keyed: true,
     }]]);
-    await h.pairing.takeOverControl();
+    h.sendReplyLands();
     const earliest = Math.min(start, 20);
     assert.deepEqual(h.state.session.transcript.map(row => row.row_id), numberedRows(earliest, 60).map(row => row.row_id));
     assert.equal(h.state.transcriptHydrationOlderCursor, `before-${earliest}`);
   });
 }
 
-test("take-over retains messages while a background refresh is loading", async () => {
-  const h = createTakeOverHarness();
+test("becoming current retains messages while a background refresh is loading", async () => {
+  const h = createBackgroundThreadHarness();
   h.state.viewOnlyThread.loading = true;
-  await h.pairing.takeOverControl();
+  h.sendReplyLands();
   assert.deepEqual(h.state.session.transcript.map(row => row.row_id), numberedRows(20, 60).map(row => row.row_id));
 });
 
-test("take-over keeps a viewed delta newer than the restored window and the pin's last page read", async () => {
-  const h = createTakeOverHarness();
+test("becoming current keeps a viewed delta newer than the restored window and the pin's last page read", async () => {
+  const h = createBackgroundThreadHarness();
   h.state.transcriptHydrationThreadCache = new Map([[h.target, {
     entries: new Map(numberedRows(0, 60).map(row => [row.row_id, row])),
     order: numberedRows(0, 60).map(row => row.row_id),
@@ -177,13 +173,13 @@ test("take-over keeps a viewed delta newer than the restored window and the pin'
   });
   h.snapshot.transcript_revision = 13;
   h.snapshot.transcript.at(-1).content_state = "preview";
-  await h.pairing.takeOverControl();
+  h.sendReplyLands();
   assert.equal(h.state.session.transcript.at(-1).text, "message 59 latest streamed text");
   assert.equal(h.state.transcriptHydrationOlderCursor, null);
 });
 
-test("take-over carries a background delta gap into the active transcript repair", async () => {
-  const h = createTakeOverHarness();
+test("becoming current carries a background delta gap into the active transcript repair", async () => {
+  const h = createBackgroundThreadHarness();
   h.stream.applyLocalTranscriptEntryDelta({
     thread_id: h.target,
     transcript_generation: h.generation,
@@ -197,7 +193,7 @@ test("take-over carries a background delta gap into the active transcript repair
   });
   assert.equal(h.state.viewOnlyThread.tailGap, true);
   h.snapshot.transcript.at(-1).content_state = "preview";
-  await h.pairing.takeOverControl();
+  h.sendReplyLands();
   let reads = 0;
   await hydrateLocalTranscript(h.state, h.state.session, {
     fetchPage: async ({ threadId, before }) => {
@@ -222,8 +218,8 @@ test("take-over carries a background delta gap into the active transcript repair
   assert.equal(h.state.session.transcript.at(-1).text, "message 59 repaired");
 });
 
-test("take-over discards a restored window from an older relay generation", async () => {
-  const h = createTakeOverHarness();
+test("becoming current discards a restored window from an older relay generation", async () => {
+  const h = createBackgroundThreadHarness();
   h.state.transcriptHydrationThreadCache = new Map([[h.target, {
     entries: new Map(numberedRows(0, 20).map(row => [row.row_id, row])),
     order: numberedRows(0, 20).map(row => row.row_id),
@@ -232,21 +228,21 @@ test("take-over discards a restored window from an older relay generation", asyn
     tailReady: true,
     keyed: true,
   }]]);
-  await h.pairing.takeOverControl();
+  h.sendReplyLands();
   assert.deepEqual(h.state.session.transcript.map(row => row.row_id), numberedRows(20, 60).map(row => row.row_id));
   assert.equal(h.state.transcriptHydrationOlderCursor, "before-20");
 });
 
-test("take-over rejects viewed history from a previous relay generation", async () => {
-  const h = createTakeOverHarness();
+test("becoming current rejects viewed history from a previous relay generation", async () => {
+  const h = createBackgroundThreadHarness();
   h.state.viewOnlyThread.relayGeneration = "previous-run";
-  await h.pairing.takeOverControl();
+  h.sendReplyLands();
   assert.deepEqual(h.state.session.transcript.map(row => row.row_id), numberedRows(52, 60).map(row => row.row_id));
 });
 
 for (const loading of [false, true]) {
-  test(`take-over refreshes unstreamed tool rows and terminal states${loading ? " while the pin is loading" : ""}`, async () => {
-    const h = createTakeOverHarness();
+  test(`becoming current refreshes unstreamed tool rows and terminal states${loading ? " while the pin is loading" : ""}`, async () => {
+    const h = createBackgroundThreadHarness();
     h.state.viewOnlyThread.entries = numberedRows(20, 52);
     h.state.viewOnlyThread.loading = loading;
     if (loading) h.state.viewOnlyThread.resyncRevision = 12;
@@ -270,7 +266,7 @@ for (const loading of [false, true]) {
       active_turn_id: "turn-1", current_status: "active",
       transcript_revision: 12, transcript: fresh.slice(-8),
     });
-    await h.pairing.takeOverControl();
+    h.sendReplyLands();
     assert.equal(h.state.session.transcript.some(row => row.row_id === "row-53"), false);
     assert.equal(h.state.session.transcript.find(row => row.row_id === "row-52").status, "running");
     let reads = 0;
@@ -295,8 +291,8 @@ for (const loading of [false, true]) {
 }
 
 for (const [pageSize, streamDuringBridge] of [[20, false], [6, false], [20, true]]) {
-  test(`take-over repairs a streamed background interval across ${pageSize === 20 ? "three" : "more than three"} pages${streamDuringBridge ? " while newer snapshots arrive" : ""}`, async () => {
-    const h = createTakeOverHarness();
+  test(`becoming current repairs a streamed background interval across ${pageSize === 20 ? "three" : "more than three"} pages${streamDuringBridge ? " while newer snapshots arrive" : ""}`, async () => {
+    const h = createBackgroundThreadHarness();
     h.state.viewOnlyThread = buildViewOnlyPin({
       threadId: h.target, relayGeneration: h.generation, historyExtended: true,
       page: { entries: numberedRows(20, 52), prev_cursor: "before-20", revision: 10 },
@@ -315,7 +311,7 @@ for (const [pageSize, streamDuringBridge] of [[20, false], [6, false], [20, true
       active_turn_id: "turn-1", current_status: "active",
       transcript_revision: 12, transcript: fresh.slice(-8),
     });
-    await h.pairing.takeOverControl();
+    h.sendReplyLands();
     const reads = [];
     let partialPaints = 0;
     await hydrateLocalTranscript(h.state, h.state.session, {
@@ -370,10 +366,10 @@ for (const [pageSize, streamDuringBridge] of [[20, false], [6, false], [20, true
   });
 }
 
-test("take-over stops bridging when the reader leaves and finishes on return", async () => {
-  const h = createTakeOverHarness();
+test("becoming current stops bridging when the reader leaves and finishes on return", async () => {
+  const h = createBackgroundThreadHarness();
   h.snapshot.transcript = numberedRows(92, 100);
-  await h.pairing.takeOverControl();
+  h.sendReplyLands();
   const reads = [];
   const options = {
     fetchPage: async ({ before }) => {
@@ -401,9 +397,9 @@ test("take-over stops bridging when the reader leaves and finishes on return", a
 });
 
 test("a bridge from before an active A-B-A switch cannot settle the returning window's repair", async () => {
-  const h = createTakeOverHarness();
+  const h = createBackgroundThreadHarness();
   Object.assign(h.snapshot, { active_turn_id: "turn-1", current_status: "active", transcript: numberedRows(92, 100) });
-  await h.pairing.takeOverControl();
+  h.sendReplyLands();
   let releaseOlder;
   let olderStarted;
   const pendingOlder = new Promise(resolve => { olderStarted = resolve; });
@@ -451,8 +447,8 @@ test("a bridge from before an active A-B-A switch cannot settle the returning wi
 });
 
 for (const savedCursor of [null, "before-0"]) {
-  test(`take-over keeps a gap reachable when a disconnected retained window has cursor ${savedCursor}`, async () => {
-    const h = createTakeOverHarness();
+  test(`becoming current keeps a gap reachable when a disconnected retained window has cursor ${savedCursor}`, async () => {
+    const h = createBackgroundThreadHarness();
     h.state.transcriptHydrationThreadCache = new Map([[h.target, {
       entries: new Map(numberedRows(0, 10).map(row => [row.row_id, row])),
       order: numberedRows(0, 10).map(row => row.row_id),
@@ -461,7 +457,7 @@ for (const savedCursor of [null, "before-0"]) {
       tailReady: true,
       keyed: true,
     }]]);
-    await h.pairing.takeOverControl();
+    h.sendReplyLands();
     assert.equal(h.state.transcriptHydrationOlderCursor, "before-20");
     const reads = [];
     const options = {

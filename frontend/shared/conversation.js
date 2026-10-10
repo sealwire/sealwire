@@ -83,13 +83,10 @@ export function ConversationEmptyState({
 }
 
 export function ReadyConversationState({
-  canWrite,
   readyCopy = "Session is live. Send the first prompt below when you're ready.",
   readyTitle = "Session ready",
   session,
   shortId = fallbackShortId,
-  waitingCopy = "This session is open, but another device currently has control. Take over to send the first prompt from here.",
-  waitingTitle = "Session active on another device",
 }) {
   const detailParts = [];
 
@@ -101,11 +98,11 @@ export function ReadyConversationState({
   }
 
   return h(ConversationEmptyState, {
-    badge: canWrite ? "Ready" : "Waiting",
+    badge: "Ready",
     className: "thread-empty-ready",
-    copy: canWrite ? readyCopy : waitingCopy,
+    copy: readyCopy,
     details: detailParts,
-    title: canWrite ? readyTitle : waitingTitle,
+    title: readyTitle,
   });
 }
 

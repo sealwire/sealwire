@@ -4269,10 +4269,8 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
   }
 }
 
-/* CONTROL BANNER — compact bar that sits just above the composer when
- * another device has control. The composer's message input is already
- * disabled by the session renderer in that state, so the only path forward
- * is to tap "Take over". */
+/* CONTROL BANNER — compact bar just above the composer: a missing workspace's
+ * repair action, or a review / Code Flow lock on this session. */
 .control-banner {
   margin: 0;
   padding: 14px 24px;
@@ -8459,7 +8457,7 @@ body.is-resizing-panel {
 }
 
 /* Mobile composer chip — all styles scoped to <=960px since the chip itself
- * doesn't exist visually on desktop. Sits above the take-over banner and the
+ * doesn't exist visually on desktop. Sits above the control banner and the
  * composer. Right-aligned so it doesn't dominate the already-busy bottom
  * area. Tap opens the workspace-diff modal (file list with per-file expand
  * and per-line drill-down). */

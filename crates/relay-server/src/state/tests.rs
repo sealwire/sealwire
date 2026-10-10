@@ -580,8 +580,6 @@ fn activate_thread_sets_active_controller_on_start() {
         relay.active_controller_device_id.as_deref(),
         Some("device-a")
     );
-    assert!(relay.can_device_send_message("device-a"));
-    assert!(!relay.can_device_send_message("device-b"));
 }
 
 #[test]
@@ -1318,33 +1316,6 @@ fn snapshot_exposes_private_security_mode_defaults() {
 }
 
 #[test]
-fn passive_device_cannot_send_message_until_takeover() {
-    let mut relay = test_state();
-    relay.activate_thread(
-        test_thread("thread-1", "/tmp/project"),
-        "/tmp/project",
-        DEFAULT_MODEL,
-        DEFAULT_APPROVAL_POLICY,
-        DEFAULT_SANDBOX,
-        DEFAULT_EFFORT,
-        "device-a",
-    );
-
-    let error = relay
-        .ensure_device_can_send_message("device-b")
-        .expect_err("passive device should be blocked from sending");
-
-    assert!(error.contains("another device currently has control"));
-
-    assert!(relay.set_active_controller("device-b"));
-    assert_eq!(
-        relay.active_controller_device_id.as_deref(),
-        Some("device-b")
-    );
-    assert!(relay.ensure_device_can_send_message("device-b").is_ok());
-}
-
-#[test]
 fn approval_is_allowed_from_passive_owner_device() {
     let mut relay = test_state();
     relay.activate_thread(
@@ -1363,7 +1334,6 @@ fn approval_is_allowed_from_passive_owner_device() {
     assert!(relay.can_device_approve("device-a"));
     assert!(relay.can_device_approve("device-b"));
     assert!(relay.ensure_device_can_approve("device-b").is_ok());
-    assert!(!relay.can_device_send_message("device-b"));
 }
 
 #[test]
@@ -1776,7 +1746,6 @@ fn stale_controller_lease_expires_and_releases_session() {
     assert_eq!(expired.as_deref(), Some("device-a"));
     assert_eq!(relay.active_controller_device_id, None);
     assert_eq!(relay.active_controller_last_seen_at, None);
-    assert!(relay.can_device_send_message("device-b"));
 }
 
 #[test]

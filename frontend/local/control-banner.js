@@ -15,7 +15,6 @@ const HIDDEN = Object.freeze({
   hidden: true,
   hint: "",
   repair: null,
-  showTakeOver: false,
   summary: "",
   summaryTitle: "",
 });
@@ -45,36 +44,25 @@ export function workspaceRepairAction(plan, { pending = false, error = "" } = {}
   };
 }
 
-/**
- * Decide the banner from already-derived facts (never from a raw snapshot): the
- * caller owns "is this device the controller", "is the thread working", etc., and
- * passing them in keeps this pure and testable.
- *
- * Returns `{ hidden, summary, summaryTitle, hint, showTakeOver, repair }` where
- * `repair` is `null` or `{ label, pending, error, kind, recordedCwd }`.
- */
+// Takes derived facts rather than the raw snapshot, so the priority between claimants
+// can be tested without a renderer.
 export function selectControlBannerModel({
-  controllerName = "",
   hasActiveThread = false,
-  hasController = false,
-  isController = false,
   lockedByAgent = false,
   lockedByWorkflow = false,
   repairError = "",
   repairPending = false,
-  sessionWorking = false,
   viewingConversation = false,
-  viewOnly = false,
   workspaceMissing = null,
 } = {}) {
-  const plan = normalizeWorkspaceRepairPlan(workspaceMissing);
+  if (!hasActiveThread || !viewingConversation) {
+    return HIDDEN;
+  }
 
-  // FIRST, ahead of every control-related claimant. Take-over — and the background
-  // session's "stop it or take over" — both offer to move this device into the
-  // session, and there is nothing to move into: the directory the thread records is
-  // gone, so a send dies before it reaches the provider. Offering "Take over" here
-  // hands the user a button that cannot help and hides the one that can.
-  if (plan && hasActiveThread && viewingConversation) {
+  // Ahead of the lock: the directory the thread records is gone, so a send dies
+  // before it reaches the provider and the repair is the only action that helps.
+  const plan = normalizeWorkspaceRepairPlan(workspaceMissing);
+  if (plan) {
     const noun = plan.kind === "worktree" ? "worktree" : "folder";
     return {
       hidden: false,
@@ -82,47 +70,24 @@ export function selectControlBannerModel({
         ? `Re-creating it checks ${plan.branch} back out at that path.`
         : "Re-creating it lets this session run there again.",
       repair: workspaceRepairAction(plan, { error: repairError, pending: repairPending }),
-      showTakeOver: false,
-      // Names the directory, because that is the whole point: the user has just
-      // watched sends vanish, and the only fact that explains it is which path is
-      // missing.
+      // Names the directory: the user has just watched sends vanish, and which path
+      // is missing is the only fact that explains it.
       summary: `This session's ${noun} is gone: ${plan.recordedCwd}`,
       summaryTitle: plan.recordedCwd,
     };
   }
 
-  if (viewOnly && sessionWorking && !lockedByAgent) {
-    return {
-      hidden: false,
-      hint: "This background session is still running. Stop it or take over to continue here.",
-      repair: null,
-      showTakeOver: true,
-      summary: "Background session is running",
-      summaryTitle: "",
-    };
-  }
-
-  if (
-    !hasActiveThread
-    || !viewingConversation
-    || !hasController
-    || isController
-    || (!sessionWorking && !lockedByAgent)
-  ) {
+  if (!lockedByAgent) {
     return HIDDEN;
   }
 
-  // Only the thread actually owned by review/workflow is off-limits for take-over.
   return {
     hidden: false,
-    hint: lockedByAgent
-      ? lockedByWorkflow
-        ? "This session is locked by Code Flow; it unlocks when the workflow finishes."
-        : "This session is being reviewed; it unlocks when the review finishes."
-      : "You can still approve from this device. Take over when you want to type or continue the session.",
+    hint: lockedByWorkflow
+      ? "This session is locked by Code Flow; it unlocks when the workflow finishes."
+      : "This session is being reviewed; it unlocks when the review finishes.",
     repair: null,
-    showTakeOver: !lockedByAgent,
-    summary: `Another device has control (${controllerName})`,
+    summary: lockedByWorkflow ? "Code Flow in progress" : "Review in progress",
     summaryTitle: "",
   };
 }

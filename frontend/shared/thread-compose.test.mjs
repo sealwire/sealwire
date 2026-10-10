@@ -6,41 +6,36 @@ import { canComposeThread, composerButtonState } from "./thread-compose.js";
 test("any client can compose on an idle thread", () => {
   assert.equal(
     canComposeThread({
-      activeTurnId: null,
       hasActiveSession: true,
-      hasControllerLease: false,
       reviewLocked: false,
     }),
     true
   );
 });
 
-test("only the controller can compose while a turn is running", () => {
-  const input = {
-    activeTurnId: "turn-1",
-    hasActiveSession: true,
-    reviewLocked: false,
-  };
-
-  assert.equal(canComposeThread({ ...input, hasControllerLease: false }), false);
-  assert.equal(canComposeThread({ ...input, hasControllerLease: true }), true);
+test("any device can type while a turn runs, whichever device started it", () => {
+  // Typing ahead cannot interleave turns: the relay refuses a second send into a
+  // thread that is still running, and the composer keeps the draft.
+  assert.equal(
+    canComposeThread({
+      hasActiveSession: true,
+      reviewLocked: false,
+    }),
+    true
+  );
 });
 
 test("missing and review-locked threads cannot compose", () => {
   assert.equal(
     canComposeThread({
-      activeTurnId: null,
       hasActiveSession: false,
-      hasControllerLease: false,
       reviewLocked: false,
     }),
     false
   );
   assert.equal(
     canComposeThread({
-      activeTurnId: null,
       hasActiveSession: true,
-      hasControllerLease: true,
       reviewLocked: true,
     }),
     false
@@ -52,17 +47,13 @@ test("missing and review-locked threads cannot compose", () => {
 // There is no pending-message queue: a running turn means Stop, not Send.
 // ---------------------------------------------------------------------------
 
-test("REGRESSION: view-only observer of a running background thread shows Stop and hides Send", () => {
-  // Viewing a thread that is running on another device: no controller lease, so
-  // the composer can't compose, but the turn IS running. Before the fix Send
-  // stayed visible (greyed) alongside Stop — two buttons at once.
+test("REGRESSION: a running turn shows Stop and hides Send, even when the composer is not ready", () => {
+  // Send used to stay visible (greyed) alongside Stop — two buttons at once.
   const state = composerButtonState({
-    composerReady: false, // no controller lease → cannot compose
+    composerReady: false,
     turnRunning: true,
     threadWorking: true,
     activeThreadFrozen: false,
-    canWrite: false,
-    viewOnly: true,
     submitInFlight: false,
   });
   assert.equal(state.stopHidden, false, "Stop must show while the background turn runs");
@@ -74,14 +65,12 @@ test("REGRESSION: view-only observer of a running background thread shows Stop a
   );
 });
 
-test("controller running its own turn shows Stop and hides Send", () => {
+test("a running turn shows Stop and hides Send", () => {
   const state = composerButtonState({
     composerReady: true,
     turnRunning: true,
     threadWorking: true,
     activeThreadFrozen: false,
-    canWrite: true,
-    viewOnly: false,
     submitInFlight: false,
   });
   assert.equal(state.stopHidden, false);
@@ -97,8 +86,6 @@ test("a thread working without a turn id yet still shows Stop, not Send", () => 
     turnRunning: false,
     threadWorking: true,
     activeThreadFrozen: false,
-    canWrite: true,
-    viewOnly: false,
     submitInFlight: false,
   });
   assert.equal(state.stopHidden, false);
@@ -111,8 +98,6 @@ test("idle composable thread shows Send and hides Stop", () => {
     turnRunning: false,
     threadWorking: false,
     activeThreadFrozen: false,
-    canWrite: true,
-    viewOnly: false,
     submitInFlight: false,
   });
   assert.equal(state.sendHidden, false);
@@ -127,8 +112,6 @@ test("a thread frozen under review hides Stop and keeps Send visible-but-disable
     turnRunning: true,
     threadWorking: true,
     activeThreadFrozen: true,
-    canWrite: true,
-    viewOnly: false,
     submitInFlight: false,
   });
   assert.equal(state.stopHidden, true, "never offer to stop the review's own turn");
@@ -144,8 +127,6 @@ test("a pending stop keeps Stop visible and disabled while the turn is still wor
     turnRunning: true,
     threadWorking: true,
     activeThreadFrozen: false,
-    canWrite: true,
-    viewOnly: false,
     submitInFlight: false,
     stopPending: true,
   });

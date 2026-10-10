@@ -8,7 +8,6 @@ const h = React.createElement;
 
 export function ConversationPanel({
   approval = null,
-  canWrite = false,
   emptyContent = null,
   entries = [],
   hydrationLoading = false,
@@ -22,10 +21,7 @@ export function ConversationPanel({
   }
 
   if (!entries.length && !approval && readyState) {
-    return h(ReadyConversationState, {
-      ...readyState,
-      canWrite,
-    });
+    return h(ReadyConversationState, readyState);
   }
 
   return h(TranscriptState, {

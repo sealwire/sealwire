@@ -1,5 +1,3 @@
-import { messageInput, takeOverButton } from "../dom.js";
-
 export function createPairingController(ctx) {
   const {
     state,
@@ -8,7 +6,6 @@ export function createPairingController(ctx) {
     logLine,
     renderSession,
   } = ctx;
-  const applySessionSnapshot = (...args) => ctx.applySessionSnapshot(...args);
   const loadSession = (...args) => ctx.loadSession(...args);
 
   /**
@@ -189,43 +186,6 @@ export function createPairingController(ctx) {
     }
   }
 
-  async function takeOverControl() {
-    const threadId = state.viewOnlyThread?.threadId || state.session?.active_thread_id;
-    if (!threadId) {
-      logLine("There is no active session to take over.");
-      return;
-    }
-
-    takeOverButton.disabled = true;
-    logLine(`Taking control from device ${shortId(state.deviceId)}`);
-
-    try {
-      const response = await apiFetch("/api/session/take-over", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          device_id: state.deviceId,
-          thread_id: threadId,
-        }),
-      });
-      const payload = await response.json();
-
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to take control");
-      }
-
-      applySessionSnapshot(payload.data);
-      messageInput.focus();
-      logLine("This device now has control.");
-    } catch (error) {
-      logLine(`Take over failed: ${error.message}`);
-    } finally {
-      takeOverButton.disabled = false;
-    }
-  }
-
   /**
    * @param {string} decision
    * @param {string} scope
@@ -322,7 +282,6 @@ export function createPairingController(ctx) {
     revokeOtherDevices,
     clearDeviceHistory,
     decidePairingRequest,
-    takeOverControl,
     submitDecision,
     submitAskUserQuestionAnswer,
   };

@@ -3507,13 +3507,6 @@ pub struct ReviewActionInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TakeOverInput {
-    pub device_id: Option<String>,
-    /// Explicit operation target.
-    pub thread_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatInput {
     pub device_id: Option<String>,
 }

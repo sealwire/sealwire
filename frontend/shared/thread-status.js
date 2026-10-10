@@ -13,7 +13,7 @@
 //   • Codex passes through its own `status.type`: `notLoaded` for a saved
 //     thread the app-server has not opened, and a `thread/list` summary with no
 //     live status parses to `unknown`, and `systemError` once a turn died on an error
-// Classifying any of those as working freezes UI affordances (Stop / Take-over /
+// Classifying any of those as working freezes UI affordances (Stop /
 // Request review / Fork) that the backend then rejects.
 //
 // The BACKEND is authoritative; this gate only governs affordances. A mismatch

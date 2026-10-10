@@ -12,7 +12,6 @@ import {
   isProgressStalled,
   progressPhaseLabel,
 } from "../progress-verbs.js";
-import { sessionIsWorking } from "../shared/thread-attention.js";
 import { describeSessionStatus } from "../shared/session-status.js";
 import {
   normalizeWorkspaceRepairPlan,
@@ -30,7 +29,6 @@ const NO_CONTROL_BANNER = Object.freeze({
   repair: null,
   summary: "",
   summaryTitle: "",
-  takeOverHidden: true,
 });
 
 function isSessionOffline(currentState, session) {
@@ -48,14 +46,6 @@ export function isCurrentDeviceActiveController({ remoteAuth, session }) {
       session.active_controller_device_id &&
       session.active_controller_device_id === remoteAuth?.deviceId
   );
-}
-
-export function canCurrentDeviceWrite({ remoteAuth, session }) {
-  if (!session?.active_thread_id) {
-    return false;
-  }
-
-  return !session.active_controller_device_id || session.active_controller_device_id === remoteAuth?.deviceId;
 }
 
 export function selectSessionChromeRenderModel(currentState, session) {
@@ -306,16 +296,6 @@ function selectSessionMetaRenderModel(currentState, session) {
       ...(session.provider ? [{ label: "Provider", value: providerLabel(session.provider) }] : []),
       ...(session.model ? [{ label: "Model", value: session.model }] : []),
       ...(session.reasoning_effort ? [{ label: "Effort", value: session.reasoning_effort }] : []),
-      {
-        label: "Control",
-        value: session.view_only
-          ? "View only"
-          : !session.active_turn_id
-          ? "Available"
-          : session.active_controller_device_id
-          ? controllerLabel(currentState, session.active_controller_device_id)
-          : "Unclaimed",
-      },
       ...(session.active_thread_id
         ? [{ label: "Session", value: shortId(session.active_thread_id) }]
         : []),
@@ -324,61 +304,32 @@ function selectSessionMetaRenderModel(currentState, session) {
   };
 }
 
-/**
- * The banner slot has several claimants and exactly one button, so the priority lives
- * HERE — one ordered function — rather than spread across the renderer.
- *
- * The missing workspace is FIRST, ahead of every control-related claimant. Take-over
- * and the background session's "stop it or take over" both offer to move this device
- * into the session, and there is nothing to move into: the directory the thread records
- * is gone, so a send dies before it reaches the provider. Offering "Take over" there
- * hands the user a button that cannot help and hides the one that can.
- */
+// The missing workspace outranks the lock: until the directory is back, nothing sent
+// to this thread can reach the provider, and the repair button is the only way forward.
 function selectControlBannerRenderModel(currentState, session) {
   const repairBanner = selectWorkspaceRepairBanner(currentState, session);
   if (repairBanner) {
     return repairBanner;
   }
 
-  const activeUnderReview = isReviewInProgressForThread(session, session.active_thread_id);
-  const activeUnderWorkflow = isWorkflowInProgressForThread(session, session.active_thread_id);
-  const activeLockedByAgent = activeUnderReview || activeUnderWorkflow;
-  const sessionWorking = sessionIsWorking(session);
-  if (session.view_only && sessionWorking && !activeLockedByAgent) {
+  const threadId = session.active_thread_id;
+  if (isWorkflowInProgressForThread(session, threadId)) {
     return {
+      ...NO_CONTROL_BANNER,
       hidden: false,
-      hint: "This background session is still running. Stop it or take over to continue here.",
-      repair: null,
-      summary: "Background session is running",
-      summaryTitle: "",
-      takeOverHidden: false,
+      hint: "This session is locked by Code Flow; it unlocks when the workflow finishes.",
+      summary: "Code Flow in progress",
     };
   }
-  if (
-    !session.active_thread_id
-    || !session.active_controller_device_id
-    || (!sessionWorking && !activeLockedByAgent)
-  ) {
-    return { ...NO_CONTROL_BANNER };
+  if (isReviewInProgressForThread(session, threadId)) {
+    return {
+      ...NO_CONTROL_BANNER,
+      hidden: false,
+      hint: "This session is being reviewed; it unlocks when the review finishes.",
+      summary: "Review in progress",
+    };
   }
-
-  if (isCurrentDeviceActiveController({ remoteAuth: currentState.remoteAuth, session })) {
-    return { ...NO_CONTROL_BANNER };
-  }
-
-  // Only the thread actually owned by review/workflow is off-limits for take-over.
-  return {
-    hidden: false,
-    hint: activeLockedByAgent
-      ? activeUnderWorkflow
-        ? "This session is locked by Code Flow; it unlocks when the workflow finishes."
-        : "This session is being reviewed; it unlocks when the review finishes."
-      : "Read-only for sending until you take over. Approvals can still be handled here.",
-    repair: null,
-    summary: `Controlled by ${controllerLabel(currentState, session.active_controller_device_id)}`,
-    summaryTitle: "",
-    takeOverHidden: activeLockedByAgent,
-  };
+  return { ...NO_CONTROL_BANNER };
 }
 
 /**
@@ -413,8 +364,6 @@ function selectWorkspaceRepairBanner(currentState, session) {
     }),
     summary,
     summaryTitle,
-    // There is nothing to take over into until the directory exists again.
-    takeOverHidden: true,
   };
 }
 
@@ -438,18 +387,6 @@ function brokerStatusLabel(currentState, session) {
     : `${brokerState} · ${channel}`;
 }
 
-function controllerLabel(currentState, deviceId) {
-  if (!deviceId) {
-    return "Unclaimed";
-  }
-
-  if (deviceId === currentState.remoteAuth?.deviceId) {
-    return `This device (${shortId(deviceId)})`;
-  }
-
-  return shortId(deviceId);
-}
-
 function remoteAccessLabel(currentState) {
   if (!currentState.remoteAuth) {
     return "Unpaired";
@@ -463,23 +400,15 @@ function remoteAccessLabel(currentState) {
     return "Standby until you start or open a session";
   }
 
-  if (!currentState.session.active_controller_device_id) {
-    return "Standby until you send the first message";
+  if (!currentState.remoteAuth.sessionClaim) {
+    return "Ready here; access refreshes automatically when you type";
   }
 
-  if (currentState.session.active_controller_device_id === currentState.remoteAuth.deviceId) {
-    if (!currentState.remoteAuth.sessionClaim) {
-      return "Ready here; control refresh happens automatically when you type";
-    }
-
-    if (!currentState.remoteAuth.sessionClaimExpiresAt) {
-      return "Ready to type from this browser";
-    }
-
-    return `Ready here until ${formatTimestamp(currentState.remoteAuth.sessionClaimExpiresAt)}`;
+  if (!currentState.remoteAuth.sessionClaimExpiresAt) {
+    return "Ready to type from this browser";
   }
 
-  return `Viewing while ${controllerLabel(currentState, currentState.session.active_controller_device_id)} has control. Approvals can still be handled here.`;
+  return `Ready here until ${formatTimestamp(currentState.remoteAuth.sessionClaimExpiresAt)}`;
 }
 
 function remoteAccessStatusText(currentState) {
@@ -495,15 +424,7 @@ function remoteAccessStatusText(currentState) {
     return "Standby";
   }
 
-  if (!currentState.session.active_controller_device_id) {
-    return "Auto-control";
-  }
-
-  if (currentState.session.active_controller_device_id === currentState.remoteAuth.deviceId) {
-    return "Ready";
-  }
-
-  return "View only";
+  return "Ready";
 }
 
 function remoteAccessBadgeTone(currentState) {
@@ -512,14 +433,6 @@ function remoteAccessBadgeTone(currentState) {
   }
 
   if (selectedRelayNeedsRepair(currentState)) {
-    return "alert";
-  }
-
-  if (
-    currentState.session?.active_thread_id &&
-    currentState.session.active_controller_device_id &&
-    currentState.session.active_controller_device_id !== currentState.remoteAuth.deviceId
-  ) {
     return "alert";
   }
 

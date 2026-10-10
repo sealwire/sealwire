@@ -8646,57 +8646,10 @@ tree; got {}",
         );
     }
 
-    #[tokio::test]
-    async fn explicit_take_over_targets_a_non_active_thread_without_starting_a_turn() {
-        let project = TempDir::new().expect("project tempdir");
-        let cwd = project.path().to_str().unwrap();
-        let (app, codex, _claude) = build_recording_provider_app(cwd).await;
-        pair_device(&app, "device-a", Vec::new()).await;
-        pair_device(&app, "device-b", Vec::new()).await;
-
-        let thread_a = codex.thread_summary("codex-thread-a", cwd);
-        let thread_b = codex.thread_summary("codex-thread-b", cwd);
-        {
-            let mut threads = codex.threads.lock().await;
-            threads.insert(thread_a.id.clone(), thread_a.clone());
-            threads.insert(thread_b.id.clone(), thread_b.clone());
-        }
-        {
-            let mut relay = app.relay.write().await;
-            relay.set_provider_name("codex".to_string());
-            relay.active_thread_id = Some(thread_a.id.clone());
-            relay.threads = vec![thread_a, thread_b.clone()];
-            relay.assign_active_controller("device-a", unix_now());
-        }
-
-        let snapshot = app
-            .take_over_control(crate::protocol::TakeOverInput {
-                device_id: Some("device-b".to_string()),
-                thread_id: thread_b.id.clone(),
-            })
-            .await
-            .expect("take-over should target the viewed background thread");
-
-        assert_eq!(
-            snapshot.active_thread_id.as_deref(),
-            Some(thread_b.id.as_str())
-        );
-        assert_eq!(
-            snapshot.active_controller_device_id.as_deref(),
-            Some("device-b")
-        );
-        assert!(
-            codex.turn_thread_ids.lock().await.is_empty(),
-            "take-over changes control focus but must not start a turn"
-        );
-    }
-
     // Repro for: "opening an existing Codex thread still shows Claude's provider /
-    // models." Taking over a thread makes it active, so the snapshot's provider
-    // and model catalog must follow the OPENED thread's provider — not stay on
-    // whatever provider was active before.
+    // models." Sending is what makes a background thread current now.
     #[tokio::test]
-    async fn take_over_a_codex_thread_switches_provider_and_model_catalog() {
+    async fn send_into_a_codex_thread_switches_provider_and_model_catalog() {
         let project = TempDir::new().expect("project tempdir");
         let cwd = project.path().to_str().unwrap();
         let (app, codex, claude) = build_recording_provider_app(cwd).await;
@@ -8714,8 +8667,6 @@ tree; got {}",
             .lock()
             .await
             .insert(codex_thread.id.clone(), codex_thread.clone());
-
-        // Claude is the active session: its provider + catalog are in the snapshot.
         {
             let mut relay = app.relay.write().await;
             relay.set_provider_name("claude_code".to_string());
@@ -8734,31 +8685,29 @@ tree; got {}",
             }]);
         }
 
-        // Open (take over) the existing Codex thread.
         let snapshot = app
-            .take_over_control(crate::protocol::TakeOverInput {
+            .send_message(SendMessageInput {
+                text: "continue".to_string(),
+                model: None,
+                effort: None,
                 device_id: Some("device-a".to_string()),
                 thread_id: codex_thread.id.clone(),
             })
             .await
-            .expect("take-over of the codex thread should succeed");
+            .expect("send into the codex thread");
 
         assert_eq!(
             snapshot.active_thread_id.as_deref(),
             Some(codex_thread.id.as_str())
         );
-        // The session must now reflect the CODEX provider + catalog, not Claude's.
-        assert_eq!(
-            snapshot.provider, "codex",
-            "opening a codex thread must switch the session provider to codex"
-        );
+        assert_eq!(snapshot.provider, "codex");
         assert!(
             !snapshot.available_models.is_empty()
                 && snapshot
                     .available_models
                     .iter()
                     .all(|m| m.provider == "codex"),
-            "opening a codex thread must show codex models, got: {:?}",
+            "a send into a codex thread must show codex models, got: {:?}",
             snapshot
                 .available_models
                 .iter()
@@ -16923,8 +16872,8 @@ mod review_tests {
     use super::require_live_test_cwd;
     use crate::protocol::{
         ModelOptionView, RequestReviewInput, SendMessageInput, StartWorkflowInput, StopTurnInput,
-        TakeOverInput, ThreadSummaryView, TranscriptEntryKind, TranscriptEntryView,
-        UpdateSessionSettingsInput, WorkflowActionInput,
+        ThreadSummaryView, TranscriptEntryKind, TranscriptEntryView, UpdateSessionSettingsInput,
+        WorkflowActionInput,
     };
     use crate::state::security::SecurityProfile;
     use crate::state::TurnFailureKind;
@@ -22366,6 +22315,31 @@ one that was dirty going in"
     }
 
     #[tokio::test]
+    async fn start_code_workflow_from_a_device_that_did_not_send_last() {
+        let dir = TempDir::new().expect("tmpdir");
+        let cwd = dir.path().to_str().unwrap();
+        let (app, providers) = build_review_app(cwd, &["codex"]).await;
+        let parent = start_parent(&app, cwd, "codex").await;
+        queue_verdicts(providers.get("codex").unwrap(), &["APPROVE"]).await;
+
+        let receipt = app
+            .start_code_workflow(StartWorkflowInput {
+                workflow_id: Some("code_flow".to_string()),
+                task_prompt: "do it".to_string(),
+                reviewer_provider: "codex".to_string(),
+                reviewer_model: None,
+                reviewer_instructions: None,
+                max_rounds: Some(1),
+                anchor_item_id: None,
+                parent_thread_id: Some(parent.id.clone()),
+                device_id: Some("device-2".to_string()),
+            })
+            .await
+            .expect("any device may start Code Flow, not only the one that sent last");
+        assert_eq!(receipt.parent_thread_id, parent.id);
+    }
+
+    #[tokio::test]
     async fn start_code_workflow_honors_parent_thread_id() {
         // Code Flow must run on the NAMED author thread (mirroring how Request review
         // targets the viewed thread), not silently on the active thread. A bogus id is
@@ -23081,12 +23055,10 @@ settings update: {error}"
         let (app, providers) = build_review_app(cwd, &["codex"]).await;
         let parent = start_parent(&app, cwd, "codex").await;
         let sibling = start_parent(&app, cwd, "codex").await;
-        app.take_over_control(TakeOverInput {
-            device_id: Some("device-1".to_string()),
-            thread_id: parent.id.clone(),
-        })
-        .await
-        .expect("return control to parent before workflow");
+        app.relay
+            .write()
+            .await
+            .focus_thread_runtime(&parent.id, "device-1");
 
         let provider = providers.get("codex").unwrap();
         provider.complete_delay_ms.store(250, Ordering::Relaxed);
@@ -23148,15 +23120,6 @@ settings update: {error}"
             .await
             .expect_err("user stop must be locked while workflow owns the thread");
         assert!(stop_err.contains("workflow"), "{stop_err}");
-
-        let takeover_err = app
-            .take_over_control(TakeOverInput {
-                device_id: Some("device-1".to_string()),
-                thread_id: sibling.id.clone(),
-            })
-            .await
-            .expect_err("same-cwd takeover must be locked while workflow runs");
-        assert!(takeover_err.contains("workflow"), "{takeover_err}");
 
         let delete_err = app
             .delete_thread_permanently(&parent.id, None)
@@ -27532,38 +27495,6 @@ turn) must allow a review: {error:?}"
                 job.error
             );
         }
-    }
-
-    #[tokio::test]
-    async fn take_over_control_is_blocked_during_review() {
-        let dir = TempDir::new().expect("tmpdir");
-        let cwd = dir.path().to_str().unwrap();
-        let (app, providers) = build_review_app(cwd, &["codex"]).await;
-        providers
-            .get("codex")
-            .unwrap()
-            .complete_turns
-            .store(false, Ordering::Relaxed);
-        start_parent(&app, cwd, "codex").await;
-        app.request_review(review_input("codex"))
-            .await
-            .expect("review should start and hold the guard");
-
-        let reviewed_thread_id = app
-            .relay
-            .read()
-            .await
-            .active_thread_id
-            .clone()
-            .expect("active thread");
-        let error = app
-            .take_over_control(crate::protocol::TakeOverInput {
-                device_id: Some("other-device".to_string()),
-                thread_id: reviewed_thread_id,
-            })
-            .await
-            .expect_err("take-over of the reviewed thread must be blocked during a review");
-        assert!(error.contains("being reviewed"), "got: {error}");
     }
 
     #[tokio::test]
@@ -35256,13 +35187,6 @@ mod delegate_card_tests {
             })
             .await
             .unwrap_err();
-        let takeover = app
-            .take_over_control(crate::protocol::TakeOverInput {
-                thread_id: peer.clone(),
-                device_id: Some("phone".into()),
-            })
-            .await
-            .unwrap_err();
         let settings = app
             .update_session_settings(crate::protocol::UpdateSessionSettingsInput {
                 thread_id: peer.clone(),
@@ -35274,7 +35198,7 @@ mod delegate_card_tests {
             })
             .await
             .unwrap_err();
-        for error in [send, takeover, settings] {
+        for error in [send, settings] {
             assert!(
                 error.contains("allowed roots") || error.contains("no longer exists"),
                 "{error}"

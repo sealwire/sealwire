@@ -655,7 +655,6 @@ async fn a_broker_with_the_payload_secret_cannot_forge_a_request() {
     let forged_requests = [
         relay.start_session(),
         serde_json::json!({"type": "send_message", "input": {"text": "rm -rf", "thread_id": "t1"}}),
-        serde_json::json!({"type": "take_over", "input": {"thread_id": "t1"}}),
         serde_json::json!({"type": "decide_approval", "request_id": "r1", "input": {"decision": "approve"}}),
         serde_json::json!({"type": "watch_threads", "input": {"thread_ids": ["t1"]}}),
         serde_json::json!({"type": "heartbeat", "input": {}}),

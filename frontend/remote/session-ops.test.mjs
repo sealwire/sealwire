@@ -760,12 +760,11 @@ test("a background session's approval never becomes the live session's Approve t
   assert.equal(state.currentApprovalId, null);
 });
 
-test("remote view of an idle saved Codex thread stays composable despite stale activity", async () => {
+test("remote view of an idle saved Codex thread does not read as working despite stale activity", async () => {
   activeBrowser = installBrowserStubs();
 
   const { state, saveRemoteAuth } = await import("./state.js");
   const { handleRemoteBrokerPayload } = await import("./actions.js");
-  const { canComposeThread } = await import("../shared/thread-compose.js");
   const { sessionIsWorking } = await import("../shared/thread-attention.js");
   const {
     applySessionSnapshot,
@@ -851,15 +850,6 @@ test("remote view of an idle saved Codex thread stays composable despite stale a
   assert.equal(state.session.current_tool, null);
   assert.equal(state.session.view_last_refresh_server_time, 101);
   assert.equal(sessionIsWorking(state.session), false);
-  assert.equal(
-    canComposeThread({
-      activeTurnId: state.session.active_turn_id,
-      hasActiveSession: Boolean(state.session.active_thread_id),
-      hasControllerLease: false,
-      reviewLocked: false,
-    }),
-    true
-  );
 
   applySessionSnapshot(staleLiveSnapshot);
   assert.equal(state.session.active_turn_id, null);

@@ -5,7 +5,6 @@ const h = React.createElement;
 
 export function TranscriptPane({
   approval = null,
-  canWrite = false,
   emptyContent = null,
   entries = [],
   hydrationLoading = false,
@@ -15,7 +14,6 @@ export function TranscriptPane({
 }) {
   return h(ConversationPanel, {
     approval,
-    canWrite,
     emptyContent,
     entries,
     hydrationLoading,

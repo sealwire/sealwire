@@ -178,11 +178,8 @@ test("view-only idle saved Codex session remains composable", () => {
       settingsWritable: true,
     }),
   });
-  const canWrite = projected.active_controller_device_id !== "__view_only__";
   const canCompose = canComposeThread({
-    activeTurnId: projected.active_turn_id,
     hasActiveSession: Boolean(projected.active_thread_id),
-    hasControllerLease: canWrite,
     reviewLocked: false,
   });
   const buttons = composerButtonState({
@@ -193,8 +190,6 @@ test("view-only idle saved Codex session remains composable", () => {
     turnRunning: Boolean(projected.active_turn_id),
     threadWorking: sessionIsWorking(projected),
     activeThreadFrozen: false,
-    canWrite,
-    viewOnly: projected.view_only,
     submitInFlight: false,
   });
 
@@ -235,9 +230,7 @@ test("view-only workflow-locked same-cwd session is not composable", () => {
   });
   const activeThreadFrozen = isWorkflowInProgressForThread(projected, projected.active_thread_id);
   const canCompose = canComposeThread({
-    activeTurnId: projected.active_turn_id,
     hasActiveSession: Boolean(projected.active_thread_id),
-    hasControllerLease: projected.active_controller_device_id !== "__view_only__",
     reviewLocked: activeThreadFrozen,
   });
 
@@ -268,9 +261,7 @@ test("view-only different-cwd session stays composable during unrelated workflow
   });
   const activeThreadFrozen = isWorkflowInProgressForThread(projected, projected.active_thread_id);
   const canCompose = canComposeThread({
-    activeTurnId: projected.active_turn_id,
     hasActiveSession: Boolean(projected.active_thread_id),
-    hasControllerLease: projected.active_controller_device_id !== "__view_only__",
     reviewLocked: activeThreadFrozen,
   });
 
@@ -299,8 +290,6 @@ test("a newer snapshot activity row keeps a viewed thread working", () => {
     turnRunning: Boolean(projected.active_turn_id),
     threadWorking: sessionIsWorking(projected),
     activeThreadFrozen: false,
-    canWrite: false,
-    viewOnly: projected.view_only,
     submitInFlight: false,
   });
 

@@ -8,7 +8,7 @@ import { mountIosInstallHint } from "./ios-install.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
 import { sidebarGestureDebugEnabled } from "./sidebar-debug-flag.js";
-import { acceptRemoteReview, actOnRemoteGoalCard, applyFileChange, applySessionSnapshot, recheckRemoteSignedOutProviders, applyTranscriptDelta, applyTranscriptEvent, cancelRemoteThreadSearch, cancelRemoteThreadsPoll, clearSessionRuntime, decideRemoteModelRequest, delegateRemote, deleteRemoteReview, fetchAskDetail, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, forkRemoteSession, handoverOutcomes, handoverRemote, probeRemoteThreadsExist, refreshRemoteThreads, repairRemoteWorkspace, requestRemoteReview, resolveRemoteReview, resolveRemoteWorkflow, resetDeclaredWatchedThreads, resumeRemoteSession, sendMessage, beginGoalActionOn, clearGoalErrorOn, setComposerError, setComposerHeld, setGoalError, setRemoteGoal, startRemoteSession, startRemoteWorkflow, stopActiveTurn, stopRemoteGoal, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, takeOverControl, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
+import { acceptRemoteReview, actOnRemoteGoalCard, applyFileChange, applySessionSnapshot, recheckRemoteSignedOutProviders, applyTranscriptDelta, applyTranscriptEvent, cancelRemoteThreadSearch, cancelRemoteThreadsPoll, clearSessionRuntime, decideRemoteModelRequest, delegateRemote, deleteRemoteReview, fetchAskDetail, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, forkRemoteSession, handoverOutcomes, handoverRemote, probeRemoteThreadsExist, refreshRemoteThreads, repairRemoteWorkspace, requestRemoteReview, resolveRemoteReview, resolveRemoteWorkflow, resetDeclaredWatchedThreads, resumeRemoteSession, sendMessage, beginGoalActionOn, clearGoalErrorOn, setComposerError, setComposerHeld, setGoalError, setRemoteGoal, startRemoteSession, startRemoteWorkflow, stopActiveTurn, stopRemoteGoal, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hasActivePairing, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
 import { applyRemoteSurfacePatch, createResetRemoteSurfaceStatePatch } from "./surface-state.js";
 
@@ -321,9 +321,6 @@ export function createRemoteAppHandlers() {
     },
     onApplyFileChange(itemId, direction) {
       return applyFileChange(itemId, direction);
-    },
-    onTakeOver() {
-      return takeOverControl();
     },
     onRepairWorkspace(threadId) {
       return repairRemoteWorkspace(threadId);

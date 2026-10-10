@@ -79,7 +79,6 @@ function baseProps(overrides = {}) {
     approval: null,
     buildTranscriptOptions: () => ({}),
     entries: [],
-    entriesCanWrite: true,
     getStandbyEmptyContent: () => h("div", { className: "standby-empty-marker" }, "Standby"),
     hydrationLoading: false,
     onLoadOlderTranscript: () => {},
@@ -89,7 +88,6 @@ function baseProps(overrides = {}) {
     scrollElement: null,
     session: { active_thread_id: null },
     shortId: (value) => (value ? String(value).slice(0, 8) : "unknown"),
-    standbyCanWrite: true,
     viewOnly: false,
     viewOnlyReviewView: false,
     viewedThreadLocked: false,
@@ -268,7 +266,6 @@ test("branch 5: empty + no approval renders the standby thunk only when there is
       approval: null,
       activeThreadId: "thread-1",
       readyCopy: "Ready copy marker",
-      standbyCanWrite: true,
       getStandbyEmptyContent: () => {
         standbyCalls += 1;
         return h("div", null, "should not render");

@@ -28,7 +28,6 @@ function controllerForTest() {
     seedDefaults: noop,
     setSelectedCwd: noop,
     setThreadRoute: noop,
-    canCurrentDeviceWrite: () => true,
     renderSession: noop,
     renderOverviewState: noop,
     renderSessionUnavailable: noop,

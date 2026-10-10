@@ -154,7 +154,6 @@ async function main() {
 
     remotePage = await context.newPage();
     attachPageDebugLogging(remotePage, "remote", { prefix: "public-remote-follow-e2e" });
-    await installRemoteObserverHooks(remotePage);
     await remotePage.goto(pairingUrl, { waitUntil: "domcontentloaded" });
     logStep("remote page loaded");
 
@@ -237,12 +236,8 @@ async function main() {
       { timeout: TIMEOUT_MS }
     );
 
-    const remoteTakeOverCountBeforeSend = await remotePage.evaluate(
-      () => window.__agentRelayTakeOverCount || 0
-    );
     const remoteTranscriptBeforeSend = await safeText(remotePage, "#remote-transcript");
     logStep("remote observer attached", {
-      remoteTakeOverCountBeforeSend,
       remoteTranscriptBeforeSendLength: remoteTranscriptBeforeSend.length,
     });
 
@@ -272,15 +267,9 @@ async function main() {
     logStep("remote observed assistant reply");
 
     const remoteStats = await remotePage.evaluate(() => ({
-      takeOverCount: window.__agentRelayTakeOverCount || 0,
       transcriptText: document.querySelector("#remote-transcript")?.textContent || "",
     }));
 
-    assert.equal(
-      remoteStats.takeOverCount,
-      remoteTakeOverCountBeforeSend,
-      "remote observer should not take over the session to receive updates"
-    );
     assert.ok(
       remoteStats.transcriptText.includes(EXPECTED_REPLY),
       "remote transcript should include the local Codex reply"
@@ -453,8 +442,6 @@ async function main() {
           pairingOrigin: new URL(pairingUrl).origin,
           workspaceDir,
           activeThreadId: threadId,
-          remoteTakeOverCountBeforeSend,
-          remoteTakeOverCountAfterSend: remoteStats.takeOverCount,
           remoteTranscriptBeforeSendLength: remoteTranscriptBeforeSend.length,
           remoteTranscriptAfterSendLength: remoteStats.transcriptText.length,
           remoteClientLog: await safeText(remotePage, "#remote-client-log"),
@@ -501,27 +488,6 @@ async function main() {
     await fs.rm(workspaceDir, { recursive: true, force: true }).catch(() => {});
     logStep("cleanup finished");
   }
-}
-
-async function installRemoteObserverHooks(page) {
-  await page.addInitScript(() => {
-    window.__transcriptDeltaCount = 0;
-    window.__agentRelayTakeOverCount = 0;
-    const NativeWebSocket = window.WebSocket;
-
-    class InstrumentedWebSocket extends NativeWebSocket {
-      send(data) {
-        if (typeof data === "string") {
-          if (data.includes('"action_id":"take_over-')) {
-            window.__agentRelayTakeOverCount += 1;
-          }
-        }
-        return super.send(data);
-      }
-    }
-
-    window.WebSocket = InstrumentedWebSocket;
-  });
 }
 
 async function waitForTurnSettled(relayPort, timeoutMs = TIMEOUT_MS) {
@@ -578,31 +544,12 @@ async function selectFirstRelayIfNeeded(page) {
 
 async function ensureLocalMessageInputEnabled(page) {
   const locator = page.locator("#message-input");
-  await assertEnabled(locator);
-  const disabled = await locator.evaluate((element) => element.disabled);
-  if (!disabled) {
-    return locator;
-  }
-
-  const canTakeOver = await page.evaluate(() => {
-    const button = document.querySelector("#take-over-button");
-    if (!button || button.hidden || button.disabled) {
-      return false;
-    }
-    const style = window.getComputedStyle(button);
-    return style.visibility !== "hidden" && style.display !== "none";
-  });
-  assert.equal(canTakeOver, true, "local page should offer control takeover when composer is read-only");
-  await page.click("#take-over-button");
+  await locator.waitFor({ state: "visible", timeout: TIMEOUT_MS });
   await page.waitForFunction(() => {
     const input = document.querySelector("#message-input");
     return Boolean(input && !input.disabled);
   }, null, { timeout: TIMEOUT_MS });
   return locator;
-}
-
-async function assertEnabled(locator) {
-  await locator.waitFor({ state: "visible", timeout: TIMEOUT_MS });
 }
 
 main().catch((error) => {

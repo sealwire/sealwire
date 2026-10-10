@@ -23,12 +23,10 @@ const liveSession = (patch = {}) => ({
   ...patch,
 });
 
-test("a task reviewer cannot compose even holding the controller lease and no live turn", () => {
+test("a task reviewer cannot compose", () => {
   assert.equal(
     canComposeThread({
-      activeTurnId: null,
       hasActiveSession: true,
-      hasControllerLease: true,
       reviewLocked: false,
       taskReviewer: true,
     }),
@@ -36,9 +34,7 @@ test("a task reviewer cannot compose even holding the controller lease and no li
   );
   assert.equal(
     canComposeThread({
-      activeTurnId: null,
       hasActiveSession: true,
-      hasControllerLease: true,
       reviewLocked: false,
       taskReviewer: false,
     }),
@@ -50,7 +46,6 @@ test("the remote composer is disabled and says why for a task reviewer", () => {
   const model = selectSessionRenderModel({
     session: liveSession({ active_thread_task_reviewer: true }),
     previousSession: null,
-    hasControllerLease: true,
   });
   assert.equal(model.composerDisabled, true);
   assert.match(model.messagePlaceholder, /review/i);
@@ -60,7 +55,6 @@ test("an ordinary session is unaffected", () => {
   const model = selectSessionRenderModel({
     session: liveSession(),
     previousSession: null,
-    hasControllerLease: true,
   });
   assert.equal(model.composerDisabled, false);
 });

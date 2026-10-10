@@ -168,7 +168,6 @@ export function createLifecycleHarness({ apiFetch, onThreadsUpdated, onRender } 
     onThreadsUpdated,
     logLine: () => {},
     renderSession: renderSessionAndClearPendingFlush,
-    canCurrentDeviceWrite: () => true,
     seedDefaults: () => {},
     setSelectedCwd: () => {},
     setThreadRoute: () => {},

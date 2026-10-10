@@ -468,16 +468,7 @@ function ComposerShell() {
     h(
       "section",
       { className: "control-banner control-banner-compact", hidden: true, id: "control-banner" },
-      h("span", { className: "control-summary", id: "control-summary" }, "Another device has control"),
-      h(
-        "button",
-        {
-          className: "control-button",
-          id: "take-over-button",
-          type: "button",
-        },
-        "Take over"
-      )
+      h("span", { className: "control-summary", id: "control-summary" })
     ),
     h(
       "form",

@@ -1,6 +1,5 @@
 // Regression: the transcript paints rows ON TOP of each other while this device
-// is view-only — the state where another device holds the controller lease, the
-// "Background session is running" banner is up and the composer is disabled.
+// views a background thread that is still running and another device sent last.
 //
 // Rows are absolutely positioned by the virtualizer (`.transcript-virtual-row`,
 // conversation.css), so a row whose measured height is smaller than what it
@@ -117,7 +116,6 @@ function sessionPayload() {
     transcript_generation: GENERATION,
     active_thread_id: ACTIVE_THREAD_ID,
     active_turn_id: "turn-live",
-    // Another device holds the lease, so this one cannot write.
     active_controller_device_id: OTHER_DEVICE,
     current_cwd: ROOT,
     current_status: "working",
@@ -243,8 +241,6 @@ async function loadTranscript(page, base, mode) {
             thread_id: THREAD_ID,
             provider: "codex",
             current_cwd: ROOT,
-            // Working, and owned by another device: that pair is what puts the
-            // "Background session is running" banner up.
             current_status: "active",
             active_turn_id: "turn-live",
             current_phase: "thinking",
@@ -317,7 +313,7 @@ async function main() {
           hidden: element ? element.hidden : null,
           summary: document.querySelector("#control-summary")?.textContent || "",
           composerDisabled: document.querySelector("#message-input")?.disabled === true,
-          composerPlaceholder: document.querySelector("#message-input")?.placeholder || "",
+          stopVisible: document.querySelector("#stop-button")?.hidden === false,
         };
       });
       results[mode] = {
@@ -330,20 +326,17 @@ async function main() {
 
     console.log(JSON.stringify(results, null, 2));
 
-    // The projection has to actually be the view-only one, or the overlap numbers
-    // below are measuring the wrong screen.
+    // Stop proves the screen is the running background thread the overlap numbers
+    // are about; nothing on it may ask this device to take over first.
     for (const [label, result] of Object.entries(results)) {
-      if (result.banner.hidden !== false) {
-        throw new Error(`${label}: the control banner never came up: ${JSON.stringify(result.banner)}`);
+      if (!result.banner.stopVisible) {
+        throw new Error(`${label}: the thread never read as running: ${JSON.stringify(result.banner)}`);
       }
-      if (result.banner.summary !== "Background session is running") {
-        throw new Error(`${label}: wrong banner copy: ${JSON.stringify(result.banner)}`);
+      if (result.banner.hidden !== true) {
+        throw new Error(`${label}: a control banner came up: ${JSON.stringify(result.banner)}`);
       }
-      if (result.banner.composerDisabled !== true) {
-        throw new Error(`${label}: the composer stayed writable: ${JSON.stringify(result.banner)}`);
-      }
-      if (result.banner.composerPlaceholder !== "This session is currently running on another device.") {
-        throw new Error(`${label}: wrong composer copy: ${JSON.stringify(result.banner)}`);
+      if (result.banner.composerDisabled !== false) {
+        throw new Error(`${label}: the composer was locked: ${JSON.stringify(result.banner)}`);
       }
       if (!result.rowCount) {
         throw new Error(`${label}: no virtualized rows were rendered`);

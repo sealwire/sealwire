@@ -734,13 +734,8 @@ function RemoteApp() {
     remoteUiStore.setState({ stopPendingByThread: reconciledStopPending });
   }, [reconciledStopPending, remoteUiStore]);
   const previousSession = previousSessionRef.current;
-  const hasControllerLease = !session?.view_only && (
-    !session?.active_controller_device_id
-    || session.active_controller_device_id === currentState.remoteAuth?.deviceId
-  );
   const sessionView = session
     ? selectSessionRenderModel({
-        hasControllerLease,
         previousSession,
         session,
       })
@@ -1617,7 +1612,7 @@ function RemoteApp() {
         remoteWorkspaceCwd
       ),
       canRequest: canRequestReview(session, remoteDeviceId, remoteViewedThreadId),
-      canStartWorkflow: hasControllerLease && canStartWorkflow(session, remoteViewedThreadId),
+      canStartWorkflow: !session?.view_only && canStartWorkflow(session, remoteViewedThreadId),
       blocked:
         isReviewBlocked(session) || isWorkflowBlocked(session),
       goalError: goalErrorFrom(remoteGoalErrors, remoteViewedThreadId),
@@ -1634,7 +1629,6 @@ function RemoteApp() {
     remoteUi.providerModelsStatus,
     remoteDeviceId,
     remoteWorkspaceCwd,
-    hasControllerLease,
   ]);
 
   // Built once per render and shared by the sidebar's group roll-up, its per-row dots,
@@ -2579,9 +2573,6 @@ function RemoteApp() {
           onApplyFileChange(itemId, direction) {
             void handlers.onApplyFileChange?.(itemId, direction);
           },
-          onTakeOver() {
-            void handlers.onTakeOver();
-          },
           // The banner passes the thread it is describing, not "the current one": a
           // repair must target the session whose path the user just read.
           onRepairWorkspace(threadId) {
@@ -3424,7 +3415,6 @@ function RemoteThreadPanel({
   onSubmitAskUserAnswers,
   onRetryAskUserDetail,
   onRepairWorkspace,
-  onTakeOver,
   onUpdateSessionSettings,
   pendingAskUserQuestions,
   composerCommandsModel,
@@ -3576,7 +3566,6 @@ function RemoteThreadPanel({
       h(ControlBanner, {
         model: controlBannerModel,
         onRepairWorkspace,
-        onTakeOver,
       })
     ),
     reviewNudgeModel?.canRequest

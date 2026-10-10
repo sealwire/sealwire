@@ -77,9 +77,7 @@ export function deriveSessionRuntime({
     sendPending,
     session,
     stopPending: stopping,
-    stopVisible: Boolean(
-      (working || stopping)
-      && (!sessionView.composerDisabled || session?.view_only)
-    ),
+    // As on desktop: only a review or Code Flow turn is unstoppable here; a task reviewer can stop.
+    stopVisible: Boolean((working || stopping) && !sessionView.activeThreadFrozen),
   };
 }

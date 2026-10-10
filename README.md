@@ -135,7 +135,7 @@ and what the agents you brought in came back with.
 When an agent wants to run a command or change something important, you see
 exactly what it's asking for and approve or deny it right there. Push
 notifications tell you when a session needs you, finishes, or runs into trouble,
-and **Take over** moves control to the device in your hand.
+and any session picks up from whichever device is in your hand.
 
 ## And a lot more
 

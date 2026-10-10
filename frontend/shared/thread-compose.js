@@ -1,22 +1,10 @@
 import { isReviewInProgressForThread } from "./review-state.js";
 import { isWorkflowInProgressForThread } from "./workflow-state.js";
 
-// `taskReviewer` is unlike the other gates here: it never lifts. The seat is a
-// record of what the reviewer judged, so the relay refuses user turns into it for
-// as long as it exists (TASK_REVIEWER_READ_ONLY_MSG).
-export function canComposeThread({
-  activeTurnId,
-  hasActiveSession,
-  hasControllerLease,
-  reviewLocked,
-  taskReviewer,
-}) {
-  return Boolean(
-    hasActiveSession
-    && !reviewLocked
-    && !taskReviewer
-    && (hasControllerLease || !activeTurnId)
-  );
+// A running turn does not lock the box: the relay refuses a second send into a busy
+// thread and the draft stays. A task reviewer's seat never takes user turns.
+export function canComposeThread({ hasActiveSession, reviewLocked, taskReviewer }) {
+  return Boolean(hasActiveSession && !reviewLocked && !taskReviewer);
 }
 
 /// Ask only puts a quote above the box, so it is offered wherever the thread takes
@@ -34,16 +22,12 @@ export function canAskInThread(session) {
 // Decide the visible/enabled state of the composer's Send and Stop buttons.
 //
 // Send and Stop are mutually exclusive: there is no pending-message queue yet,
-// so while a turn is running the composer shows Stop and never Send. A view-only
-// observer of a background thread still gets Stop, so Send must hide for them
-// too — not only for the controller running its own turn.
+// so while a turn is running the composer shows Stop and never Send.
 export function composerButtonState({
   composerReady,
   turnRunning,
   threadWorking,
   activeThreadFrozen,
-  canWrite,
-  viewOnly,
   submitInFlight,
   stopPending = false,
 }) {
@@ -54,7 +38,7 @@ export function composerButtonState({
   // actually idles — otherwise the button flickers enabled and invites mashing.
   const pending = Boolean(stopPending);
   const stopVisible = Boolean(
-    (threadWorking || pending) && !activeThreadFrozen && (canWrite || viewOnly)
+    (threadWorking || pending) && !activeThreadFrozen
   );
   return {
     // Send hides exactly when Stop shows — the two buttons never coexist.

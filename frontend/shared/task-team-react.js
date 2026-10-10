@@ -256,10 +256,6 @@ export function OrchestratorPane({
   transcriptLoading = false,
   onTranscriptInteract = null,
   transcriptOptions = null,
-  // Whether this DEVICE may write, which is not the same question as whether
-  // the composer is currently usable. Conflating them made a pane that was
-  // merely still opening announce that another device had control.
-  canWrite = true,
   approval = null,
   composerDisabled = false,
   composerBusy = false,
@@ -316,10 +312,7 @@ export function OrchestratorPane({
         className: "task-orch-transcript chat-thread",
         "aria-label": "Orchestrator conversation",
       },
-      // The first-run welcome leads with a New task button. Offering that to a
-      // device that cannot write is worse than saying why, so a locked-out
-      // device falls through to the ready/waiting state instead.
-      emptyTranscript && !transcriptLoading && canWrite
+      emptyTranscript && !transcriptLoading
         ? h(TaskWelcome, { runs, loading, error, onStartTask, orchReady: true })
         : h(TranscriptPane, {
             // Never null: ConversationPanel reads `entries.length`, and the
@@ -338,20 +331,16 @@ export function OrchestratorPane({
             // Orchestrator looked merely finished.
             transcriptOptions,
             approval,
-            canWrite,
             // Withheld while loading. ConversationPanel checks `readyState`
             // BEFORE it reaches the skeleton, so leaving it set means
             // `hydrationLoading` can never render anything and an empty pane
             // claims to be ready before its history has arrived.
             readyState: transcriptLoading ? null : {
-              // Titles too, not only the copy: the defaults are "Session ready"
-              // and "Session active on another device", and this pane is not a
-              // session.
+              // The title too, not only the copy: the default is "Session ready",
+              // and this pane is not a session.
               readyTitle: "Ask the Orchestrator",
               readyCopy:
                 "Ask about a task, or describe a new one. The Orchestrator will propose before it starts anything.",
-              waitingTitle: "Another device has control",
-              waitingCopy: "The Orchestrator is open, but another device has control.",
             },
           })
     );
@@ -422,10 +411,7 @@ export function OrchestratorPane({
     // conversation puts it.
     h(OrchestratorWorkingIndicator, { activity }),
     h(OrchestratorComposer, {
-      // `canWrite` too, not only for the transcript's copy: announcing that
-      // another device has control above a live textarea whose Send silently
-      // takes it back is the announcement disagreeing with the affordance.
-      disabled: composerDisabled || !onSend || !canWrite,
+      disabled: composerDisabled || !onSend,
       busy: composerBusy,
       threadWorking: Boolean(activity?.phase),
       stopPending,
@@ -729,8 +715,6 @@ function OrchestratorComposer({
     turnRunning: threadWorking,
     threadWorking: threadWorking && Boolean(onStop),
     activeThreadFrozen: false,
-    canWrite: true,
-    viewOnly: false,
     submitInFlight: busy,
     stopPending,
   });
@@ -1633,7 +1617,6 @@ export function TaskTeamScreen({
       onTranscriptInteract: orchestrator?.onTranscriptInteract || null,
       transcriptOptions: orchestrator?.transcriptOptions || null,
       approval: orchestrator?.approval || null,
-      canWrite: orchestrator?.canWrite !== false,
       composerDisabled: Boolean(orchestrator?.composerDisabled),
       composerBusy: Boolean(orchestrator?.composerBusy),
       composerError: orchestrator?.composerError || null,

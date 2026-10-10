@@ -60,14 +60,14 @@ use protocol::{
     RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile,
     SetThreadFlagInput, SkillInvocationInput, StartSessionInput, StartTeamInput, StartTeamReceipt,
     StartWorkflowInput, StartWorkflowReceipt, StopTurnInput, SubmitAskUserAnswerInput,
-    TakeOverInput, TeamActionInput, TeamActionReceipt, TeamFileResponse, TeamMarkInput,
-    TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
-    ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView, ThreadSkillsView,
-    ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery, ThreadsResponse,
-    TickReviewFileInput, TranscriptCursorToken, TranscriptDeltaEvent, TranscriptResyncEvent,
-    UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt,
-    WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput,
-    WorkspaceTrustReceipt, TRANSCRIPT_RESYNC_EVENT_KIND, TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
+    TeamActionInput, TeamActionReceipt, TeamFileResponse, TeamMarkInput, TeamsResponse,
+    ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse, ThreadFlagReceipt,
+    ThreadRenameReceipt, ThreadSettingsView, ThreadSkillsView, ThreadTranscriptResponse,
+    ThreadWorkspaceInput, ThreadsQuery, ThreadsResponse, TickReviewFileInput,
+    TranscriptCursorToken, TranscriptDeltaEvent, TranscriptResyncEvent, UpdateSessionSettingsInput,
+    WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt, WorkflowsResponse,
+    WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput, WorkspaceTrustReceipt,
+    TRANSCRIPT_RESYNC_EVENT_KIND, TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
 };
 use provider::ProviderImage;
 use relay_http::{
@@ -482,7 +482,6 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/settings", post(update_session_settings))
         .route("/api/session/heartbeat", post(session_heartbeat))
         .route("/api/session/watch-threads", post(session_watch_threads))
-        .route("/api/session/take-over", post(take_over_session))
         .route(
             "/api/session/message",
             post(send_message).layer(DefaultBodyLimit::max(MAX_LOCAL_MESSAGE_BODY_BYTES)),
@@ -2148,18 +2147,6 @@ async fn session_watch_threads(
         .set_watched_threads(input)
         .await
         .map(|()| Json(ApiEnvelope::ok(())))
-        .map_err(bad_request)
-}
-
-async fn take_over_session(
-    State(context): State<AppContext>,
-    Json(input): Json<TakeOverInput>,
-) -> Result<Json<ApiEnvelope<SessionSnapshot>>, (StatusCode, Json<ApiError>)> {
-    context
-        .app
-        .take_over_control(input)
-        .await
-        .map(|snapshot| Json(ApiEnvelope::ok(compact_local_snapshot(snapshot))))
         .map_err(bad_request)
 }
 

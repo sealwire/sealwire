@@ -100,6 +100,53 @@ test("selectDeviceChromeRenderModel exposes re-pair state for expired device ses
   assert.match(model.deviceMeta.cards[0].metaLines[2], /pair it again/i);
 });
 
+// The relay does not gate this phone on which device sent last, so the panel must not
+// say it is only watching.
+test("the device card reads ready while another device's turn runs", () => {
+  const model = selectDeviceChromeRenderModel({
+    clientAuth: { clientId: "client-1", brokerControlUrl: "https://broker.example.test" },
+    pairingError: null,
+    pairingPhase: null,
+    pairingTicket: null,
+    relayDirectory: [],
+    remoteAuth: {
+      relayId: "relay-1",
+      relayLabel: "Work Mac",
+      brokerChannelId: "room-a",
+      relayPeerId: "relay-peer-1",
+      securityMode: "private",
+      deviceId: "device-1",
+      deviceLabel: "Primary Phone",
+      payloadSecret: "payload-secret-1",
+    },
+    session: {
+      active_thread_id: "thread-1",
+      active_turn_id: "turn-1",
+      active_controller_device_id: "desktop-browser",
+    },
+  });
+
+  const card = model.deviceMeta.cards[0];
+  const access = card.badges[2];
+  assert.equal(access.label, "Ready");
+  assert.equal(access.tone, "ready");
+  assert.doesNotMatch(card.metaLines.join("\n"), /has control|view only/i);
+});
+
+test("session details carry no Control chip", () => {
+  const model = selectSessionChromeRenderModel(
+    { remoteAuth: { deviceId: "device-1" }, socketConnected: true },
+    {
+      active_thread_id: "thread-1",
+      active_turn_id: "turn-1",
+      active_controller_device_id: "desktop-browser",
+      pending_approvals: [],
+      provider_connected: true,
+    }
+  );
+  assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Control"), undefined);
+});
+
 test("selectSessionChromeRenderModel prioritizes re-pair over offline for expired device sessions", () => {
   const state = {
     remoteAuth: {
@@ -172,39 +219,16 @@ test("selectSessionChromeRenderModel derives header, status, and control banner"
   assert.equal(model.statusBadge.headerVisible, false);
   assert.equal(model.agentWorkingIndicator.hidden, true);
   assert.equal(model.controlBanner.hidden, true);
-  assert.equal(model.controlBanner.takeOverHidden, true);
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Session").value, "thread-1");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Provider").value, "Codex");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Model").value, "gpt-5.4");
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Effort").value, "medium");
-  assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Control").value, "Available");
   // The details "Status" chip speaks the same task language as the header badge / local
   // overview (Idle here), not a raw provider word ("idle").
   assert.equal(model.sessionMeta.chips.find((chip) => chip.label === "Status").value, "Idle");
 });
 
-test("remote control banner remains visible while another device is running the thread", () => {
-  const state = {
-    remoteAuth: { deviceId: "device-1" },
-    socketConnected: true,
-  };
-  const session = {
-    active_thread_id: "thread-1",
-    active_turn_id: "turn-1",
-    active_controller_device_id: "device-2",
-    current_status: "active",
-    pending_approvals: [],
-    provider_connected: true,
-  };
-
-  const model = selectSessionChromeRenderModel(state, session);
-
-  assert.equal(model.controlBanner.hidden, false);
-  assert.equal(model.controlBanner.takeOverHidden, false);
-  assert.match(model.controlBanner.hint, /read-only/i);
-});
-
-test("remote control banner hides take over while the active thread is being reviewed", () => {
+test("the review lock banner shows when another device holds control", () => {
   const state = {
     remoteAuth: { deviceId: "device-1" },
     socketConnected: true,
@@ -223,34 +247,8 @@ test("remote control banner hides take over while the active thread is being rev
   const model = selectSessionChromeRenderModel(state, session);
 
   assert.equal(model.controlBanner.hidden, false);
-  assert.equal(model.controlBanner.takeOverHidden, true);
+  assert.equal(model.controlBanner.summary, "Review in progress");
   assert.match(model.controlBanner.hint, /being reviewed/i);
-});
-
-test("remote view-only busy projection exposes targeted take over", () => {
-  const state = {
-    remoteAuth: { deviceId: "device-1" },
-    socketConnected: true,
-  };
-  const session = {
-    active_thread_id: "thread-viewed",
-    active_turn_id: "view:thread-viewed",
-    active_controller_device_id: "__view_only__",
-    current_cwd: "/tmp/viewed",
-    current_status: "active",
-    pending_approvals: [],
-    provider_connected: true,
-    view_only: true,
-  };
-
-  const model = selectSessionChromeRenderModel(state, session);
-
-  assert.equal(model.controlBanner.hidden, false);
-  assert.equal(model.controlBanner.takeOverHidden, false);
-  assert.equal(
-    model.sessionMeta.chips.find((chip) => chip.label === "Control").value,
-    "View only"
-  );
 });
 
 test("remote status badge surfaces 'Review in progress' when the active thread is under review", () => {
@@ -336,7 +334,7 @@ test("remote status badge reads 'No active task' with no active thread (task sub
   assert.equal(model.statusBadge.headerVisible, false);
 });
 
-test("remote control banner allows take over when the review is on another thread", () => {
+test("a review on another thread puts no lock banner on this one", () => {
   const state = {
     remoteAuth: { deviceId: "device-1" },
     socketConnected: true,
@@ -345,7 +343,6 @@ test("remote control banner allows take over when the review is on another threa
     active_thread_id: "thread-2",
     active_turn_id: "turn-2",
     active_controller_device_id: "device-2",
-    // A background review owns a DIFFERENT thread — take-over stays allowed.
     active_review_jobs: [
       { id: "review-1", status: "waiting_for_reviewer", parent_thread_id: "thread-1" },
     ],
@@ -355,11 +352,10 @@ test("remote control banner allows take over when the review is on another threa
 
   const model = selectSessionChromeRenderModel(state, session);
 
-  assert.equal(model.controlBanner.hidden, false);
-  assert.equal(model.controlBanner.takeOverHidden, false);
+  assert.equal(model.controlBanner.hidden, true);
 });
 
-test("remote control banner hides take over while the active thread is owned by Code Flow", () => {
+test("the Code Flow lock banner shows when another device holds control", () => {
   const state = {
     remoteAuth: { deviceId: "device-1" },
     socketConnected: true,
@@ -380,27 +376,8 @@ test("remote control banner hides take over while the active thread is owned by 
   assert.equal(model.statusBadge.label, "Code Flow in progress");
   assert.equal(model.statusBadge.headerVisible, true);
   assert.equal(model.controlBanner.hidden, false);
-  assert.equal(model.controlBanner.takeOverHidden, true);
+  assert.equal(model.controlBanner.summary, "Code Flow in progress");
   assert.match(model.controlBanner.hint, /Code Flow/);
-});
-
-test("remote view-only stale working status exposes targeted take over", () => {
-  const model = selectSessionChromeRenderModel({
-    remoteAuth: { deviceId: "device-1" },
-    socketConnected: true,
-  }, {
-    active_thread_id: "thread-2",
-    active_turn_id: null,
-    active_controller_device_id: "__view_only__",
-    active_review_jobs: [],
-    current_status: "active",
-    pending_approvals: [],
-    provider_connected: true,
-    view_only: true,
-  });
-
-  assert.equal(model.controlBanner.hidden, false);
-  assert.equal(model.controlBanner.takeOverHidden, false);
 });
 
 test("selectStatusBadgeRenderModel falls back to home and pairing states without a session", () => {
@@ -566,9 +543,9 @@ test("selectStatusBadgeRenderModel shows disconnected server state", () => {
 
 // The user-visible regression behind the `notLoaded` status bug: a saved Codex
 // thread (view-only, no turn in flight) read as "working", so the remote surface
-// claimed a background thread was running and offered Stop / Take-over that the
-// backend then rejects with "no running turn".
-test("a view-only Codex thread reported as notLoaded shows no running banner", () => {
+// claimed a background thread was running and offered a Stop the backend then
+// rejects with "no running turn".
+test("a view-only Codex thread reported as notLoaded shows no working indicator", () => {
   const state = {
     remoteAuth: { deviceId: "device-1" },
     socketConnected: true,
@@ -585,29 +562,7 @@ test("a view-only Codex thread reported as notLoaded shows no running banner", (
 
   const model = selectSessionChromeRenderModel(state, session);
 
-  assert.equal(model.controlBanner.summary === "Background session is running", false);
   assert.equal(model.agentWorkingIndicator.hidden, true, "no working indicator");
-});
-
-test("a view-only thread that IS running still shows the banner", () => {
-  const state = {
-    remoteAuth: { deviceId: "device-1" },
-    socketConnected: true,
-  };
-  const session = {
-    active_thread_id: "thread-bg",
-    active_turn_id: "turn-7",
-    active_controller_device_id: "__view_only__",
-    view_only: true,
-    current_status: "active",
-    pending_approvals: [],
-    provider_connected: true,
-  };
-
-  const model = selectSessionChromeRenderModel(state, session);
-
-  assert.equal(model.controlBanner.summary, "Background session is running");
-  assert.equal(model.controlBanner.hidden, false);
 });
 
 // The computer asks the operator to compare fingerprints before approving, so the phone
@@ -626,5 +581,84 @@ test("a phone waiting for approval shows its device fingerprint", () => {
   assert.ok(
     card.metaLines.includes("Fingerprint ae:21:6c:2e:f5:24:7a:37"),
     JSON.stringify(card.metaLines),
+  );
+});
+
+test("another device's running turn puts no banner on the phone", () => {
+  const model = selectSessionChromeRenderModel({
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  }, {
+    active_thread_id: "thread-1",
+    active_turn_id: "turn-1",
+    active_controller_device_id: "device-2",
+    current_status: "active",
+    pending_approvals: [],
+    provider_connected: true,
+  });
+
+  assert.equal(model.controlBanner.hidden, true);
+  assert.equal("takeOverHidden" in model.controlBanner, false);
+});
+
+test("a background thread that is running puts no banner on the phone", () => {
+  const model = selectSessionChromeRenderModel({
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  }, {
+    active_thread_id: "thread-bg",
+    active_turn_id: "turn-7",
+    active_controller_device_id: "__view_only__",
+    current_status: "active",
+    pending_approvals: [],
+    provider_connected: true,
+    view_only: true,
+  });
+
+  assert.equal(model.controlBanner.hidden, true);
+});
+
+test("the review lock banner shows even when this device holds control", () => {
+  const model = selectSessionChromeRenderModel({
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  }, {
+    active_thread_id: "thread-1",
+    active_controller_device_id: "device-1",
+    active_review_jobs: [
+      { id: "review-1", status: "waiting_for_reviewer", parent_thread_id: "thread-1" },
+    ],
+    pending_approvals: [],
+    provider_connected: true,
+  });
+
+  assert.equal(model.controlBanner.hidden, false);
+  assert.equal(model.controlBanner.summary, "Review in progress");
+  assert.equal(
+    model.controlBanner.hint,
+    "This session is being reviewed; it unlocks when the review finishes."
+  );
+});
+
+test("the Code Flow lock banner shows when no device holds control", () => {
+  const model = selectSessionChromeRenderModel({
+    remoteAuth: { deviceId: "device-1" },
+    socketConnected: true,
+  }, {
+    active_thread_id: "thread-1",
+    active_controller_device_id: null,
+    active_workflow_runs: [
+      { id: "workflow-1", status: "running", parent_thread_id: "thread-1" },
+    ],
+    current_status: "idle",
+    pending_approvals: [],
+    provider_connected: true,
+  });
+
+  assert.equal(model.controlBanner.hidden, false);
+  assert.equal(model.controlBanner.summary, "Code Flow in progress");
+  assert.equal(
+    model.controlBanner.hint,
+    "This session is locked by Code Flow; it unlocks when the workflow finishes."
   );
 });

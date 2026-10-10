@@ -233,7 +233,7 @@ async function main() {
 
     if (PROBE_MESSAGE_VISIBILITY) {
       // A person delegates from the active B into the background A. Sample the
-      // remote view before and after taking over and reloading.
+      // remote view live and again after a reload.
       const delegateResponse = await fetch(`http://127.0.0.1:${relayPort}/api/session/delegate`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Agent-Relay-CSRF": "1" },
@@ -260,24 +260,16 @@ async function main() {
           [...document.querySelectorAll("#remote-transcript .chat-message-user")]
             .some((node) => (node.textContent || "").includes(marker)), DELEGATE_QUESTION);
       };
-      const beforeTakeover = await questionVisible();
-      const canTakeOver = await remotePage.evaluate(() =>
-        Boolean(document.querySelector("#remote-take-over-button:not([disabled]):not([hidden])")));
-      let afterTakeover = null;
-      if (canTakeOver) {
-        await remotePage.click("#remote-take-over-button");
-        await remotePage.waitForTimeout(1000);
-        afterTakeover = await questionVisible();
-      }
+      const live = await questionVisible();
       const remoteUrl = remotePage.url();
       await remotePage.goto(remoteUrl, { waitUntil: "domcontentloaded" });
       await remotePage.waitForSelector("#remote-transcript", { timeout: TIMEOUT_MS });
       const afterRefresh = await questionVisible();
       console.log(JSON.stringify({
-        delegatedQuestion: { beforeTakeover, canTakeOver, afterTakeover, afterRefresh },
+        delegatedQuestion: { live, afterRefresh },
       }));
       assert.equal(afterRefresh, true, "a fresh remote page must show the delegated question");
-      assert.equal(beforeTakeover, true, "a remote observer should show the delegated question without refresh");
+      assert.equal(live, true, "a remote observer should show the delegated question without refresh");
     }
     assert.deepEqual(pageErrors, [], "the local + remote flow must not raise browser errors");
 

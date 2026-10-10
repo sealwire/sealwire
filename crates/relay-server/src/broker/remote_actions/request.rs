@@ -13,7 +13,7 @@ use crate::{
         ProjectActionInput, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
         RenameThreadInput, RepairWorkspaceInput, RequestReviewInput, ResumeSessionInput,
         SendMessageInput, SetThreadFlagInput, SkillInvocationInput, StartSessionInput,
-        StartWorkflowInput, StopTurnInput, SubmitAskUserAnswerInput, TakeOverInput, ThreadsQuery,
+        StartWorkflowInput, StopTurnInput, SubmitAskUserAnswerInput, ThreadsQuery,
         UpdateSessionSettingsInput, WatchThreadsInput,
     },
     state::{PushSubscriptionInput, RequestClass},
@@ -56,9 +56,6 @@ pub(in crate::broker) enum RemoteActionRequest {
     },
     StopTurn {
         input: StopTurnInput,
-    },
-    TakeOver {
-        input: TakeOverInput,
     },
     Heartbeat {
         input: HeartbeatInput,
@@ -305,7 +302,6 @@ impl RemoteActionRequest {
             Self::UpdateSessionSettings { .. } => RemoteActionKind::UpdateSessionSettings,
             Self::SendMessage { .. } => RemoteActionKind::SendMessage,
             Self::StopTurn { .. } => RemoteActionKind::StopTurn,
-            Self::TakeOver { .. } => RemoteActionKind::TakeOver,
             Self::Heartbeat { .. } => RemoteActionKind::Heartbeat,
             Self::WatchThreads { .. } => RemoteActionKind::WatchThreads,
             Self::ListProviders => RemoteActionKind::ListProviders,
@@ -392,10 +388,6 @@ impl RemoteActionRequest {
             Self::StopTurn { mut input } => {
                 input.device_id = Some(device_id);
                 Self::StopTurn { input }
-            }
-            Self::TakeOver { mut input } => {
-                input.device_id = Some(device_id);
-                Self::TakeOver { input }
             }
             Self::Heartbeat { mut input } => {
                 input.device_id = Some(device_id);
@@ -659,7 +651,6 @@ pub(in crate::broker) enum RemoteActionKind {
     UpdateSessionSettings,
     SendMessage,
     StopTurn,
-    TakeOver,
     Heartbeat,
     WatchThreads,
     ListProviders,
@@ -716,7 +707,6 @@ impl RemoteActionKind {
             Self::UpdateSessionSettings => "update_session_settings",
             Self::SendMessage => "send_message",
             Self::StopTurn => "stop_turn",
-            Self::TakeOver => "take_over",
             Self::Heartbeat => "heartbeat",
             Self::WatchThreads => "watch_threads",
             Self::ListProviders => "list_providers",

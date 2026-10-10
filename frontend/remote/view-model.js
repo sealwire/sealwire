@@ -49,7 +49,7 @@ export function visiblePendingAskUserQuestions(
   return requests.filter((request) => request?.thread_id === activeThreadId);
 }
 
-export function selectSessionRenderModel({ session, previousSession, hasControllerLease }) {
+export function selectSessionRenderModel({ session, previousSession }) {
   const approval = session.pending_approvals?.[0] || null;
   const hasActiveSession = Boolean(session.active_thread_id);
   // The active thread is frozen only when it is itself owned by review/workflow;
@@ -60,14 +60,10 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
     session.active_thread_id
   );
   const activeThreadFrozen = activeThreadUnderReview || activeThreadUnderWorkflow;
-  const canWrite = hasControllerLease && !activeThreadFrozen;
-  // Sending to an idle thread is itself the atomic claim. The relay serializes
-  // concurrent sends, so no separate take-over step is needed.
+  const canWrite = !session.view_only && !activeThreadFrozen;
   const taskReviewer = Boolean(session.active_thread_task_reviewer);
   const canCompose = canComposeThread({
-    activeTurnId: session.active_turn_id,
     hasActiveSession,
-    hasControllerLease,
     reviewLocked: activeThreadFrozen,
     taskReviewer,
   });
@@ -79,7 +75,6 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
     composerDisabled: !canCompose,
     currentApprovalId: approval?.request_id || null,
     hasActiveSession,
-    hasControllerLease,
     activeThreadFrozen,
     activeThreadUnderWorkflow,
     taskReviewer,
@@ -93,13 +88,11 @@ export function selectSessionRenderModel({ session, previousSession, hasControll
         : "This session is being reviewed…"
       : !hasActiveSession
       ? "Start a remote session first."
-      : canCompose
-        // Derive the agent name from the active thread's own provider — a Claude
-        // thread must read "Message Claude...", never a hardcoded "Codex".
-        ? (providerLabel(session.provider)
-          ? `Message ${providerLabel(session.provider)} remotely...`
-          : "Message remotely...")
-        : "This session is currently running on another device.",
+      // Derive the agent name from the active thread's own provider — a Claude
+      // thread must read "Message Claude...", never a hardcoded "Codex".
+      : providerLabel(session.provider)
+      ? `Message ${providerLabel(session.provider)} remotely...`
+      : "Message remotely...",
     scrollDebug: {
       thread: session.active_thread_id || "-",
       prevThread: previousSession?.active_thread_id || "-",

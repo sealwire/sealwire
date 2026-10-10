@@ -143,7 +143,6 @@ import { loadTaskViewMode, saveTaskViewMode } from "./task-view-prefs.js";
 import { tasksLocked, usageLocked } from "../shared/beta-gate.js";
 import { TaskSidebarList, TaskTeamScreen } from "../shared/task-team-react.js";
 import { createOrchestratorChatActions } from "../shared/orchestrator-chat.js";
-import { orchestratorCanWrite } from "../shared/orchestrator-write-gate.js";
 import { TaskDiffPane } from "../shared/task-diff-react.js";
 import { TaskReviewScreen } from "../shared/task-review-screen.js";
 import { TaskTicketScreen } from "../shared/task-ticket-screen.js";
@@ -300,10 +299,6 @@ export function createSessionRenderer({
   formatRelativeTime,
   shortId,
   workspaceBasename,
-  canCurrentDeviceWrite,
-  controllerLabel,
-  controllerStateLabel,
-  isCurrentDeviceActiveController,
   isViewingConversation,
   securityModeLabel,
   contentVisibilityLabel,
@@ -494,7 +489,6 @@ export function createSessionRenderer({
     const activeThread = resolveActiveThread(session.active_thread_id);
     const hasActiveSession = Boolean(session.active_thread_id);
     const viewingConversation = isViewingConversation(session);
-    const canWrite = canCurrentDeviceWrite(session);
     const turnRunning = Boolean(session.active_turn_id);
     const threadWorking = sessionIsWorking(session);
     const reviewBlocked = isReviewBlocked(session);
@@ -771,12 +765,8 @@ export function createSessionRenderer({
       goConsoleHomeButton.hidden = !viewingConversation;
     }
     messageForm.hidden = !viewingConversation;
-    // An idle thread is open to either local or remote. The targeted send is the
-    // atomic claim; only an already-running turn remains controller-gated.
     const canCompose = canComposeThread({
-      activeTurnId: session.active_turn_id,
       hasActiveSession,
-      hasControllerLease: canWrite,
       reviewLocked: activeThreadFrozen || Boolean(state.viewOnlyThread?.review),
       taskReviewer,
     });
@@ -787,15 +777,12 @@ export function createSessionRenderer({
     const stopPending = isStopPending(state.stopPendingByThread, viewedForComposer);
     const composerReady = hasActiveSession && canCompose && viewingConversation;
     // Send and Stop are mutually exclusive: a running turn shows Stop, never Send
-    // (no pending-message queue yet). The view-only observer of a background turn
-    // gets Stop too, so Send must hide for them — not only for the controller.
+    // (no pending-message queue yet).
     const buttons = composerButtonState({
       composerReady,
       turnRunning,
       threadWorking,
       activeThreadFrozen,
-      canWrite,
-      viewOnly: session.view_only,
       submitInFlight,
       stopPending,
     });
@@ -836,12 +823,10 @@ export function createSessionRenderer({
       ? "Start or open a session first."
       : !viewingConversation
         ? "Open the session page to send a message."
-        : canCompose
-          // Name the active thread's own provider — never a hardcoded "Codex".
-          ? (providerLabel(session?.provider)
-            ? `Message ${providerLabel(session.provider)}...`
-            : "Message...")
-          : "This session is currently running on another device.";
+        // Name the active thread's own provider — never a hardcoded "Codex".
+        : providerLabel(session?.provider)
+          ? `Message ${providerLabel(session.provider)}...`
+          : "Message...";
   }
 
   function renderSessionUnavailable(message) {
@@ -1030,7 +1015,6 @@ export function createSessionRenderer({
           metaChip("Model", session.model),
           metaChip("Permissions", session.approval_policy),
           metaChip("Effort", session.reasoning_effort),
-          metaChip("Control", controllerStateLabel(session)),
           metaChip("Session", shortId(session.active_thread_id)),
           ...reviewChips(session),
         ],
@@ -1137,7 +1121,7 @@ export function createSessionRenderer({
     const viewingWritableAuthor =
       typeof startWorkflow === "function" &&
       isViewingConversation(session) &&
-      canCurrentDeviceWrite(session);
+      !session.view_only;
     const panelSlice = agentsPanelSlice(reviewsData, viewedThreadId, state.threads);
     setReviewSlice({
       ...panelSlice,
@@ -1212,8 +1196,7 @@ export function createSessionRenderer({
     );
   }
 
-  // What the banner shows is decided in local/control-banner.js — including that a
-  // missing workspace outranks take-over. This function only paints it.
+  // What the banner shows is decided in local/control-banner.js; this only paints it.
   //
   // NOTE ON THE COMPOSER: it stays enabled while the workspace is missing, on
   // purpose. A send is harmless now (the relay keeps the message and appends a
@@ -1230,20 +1213,13 @@ export function createSessionRenderer({
     const activeLockedByAgent = activeUnderReview || activeUnderWorkflow;
     const repair = readWorkspaceRepair(state, session.active_thread_id);
     const model = selectControlBannerModel({
-      controllerName: session.active_controller_device_id
-        ? controllerLabel(session.active_controller_device_id)
-        : "",
       hasActiveThread: Boolean(session.active_thread_id),
-      hasController: Boolean(session.active_controller_device_id),
-      isController: isCurrentDeviceActiveController(session),
       // Review/workflow owns this turn sequence while non-terminal.
       lockedByAgent: activeLockedByAgent,
       lockedByWorkflow: activeUnderWorkflow,
       repairError: repair.error,
       repairPending: repair.pending,
-      sessionWorking: sessionIsWorking(session),
       viewingConversation: isViewingConversation(session),
-      viewOnly: Boolean(session.view_only),
       // Straight off the snapshot: the relay decides this on the paths that touch the
       // workspace and caches it on the thread runtime, so every render already has it.
       workspaceMissing: session.workspace_missing,
@@ -1260,7 +1236,6 @@ export function createSessionRenderer({
       h(ControlBannerContent, {
         hint: model.hint,
         repair: model.repair,
-        showTakeOver: model.showTakeOver,
         summary: model.summary,
         summaryTitle: model.summaryTitle,
       })
@@ -1441,14 +1416,6 @@ export function createSessionRenderer({
         approval,
         buildTranscriptOptions,
         entries,
-        entriesCanWrite: canComposeThread({
-          activeTurnId: session.active_turn_id,
-          hasActiveSession: Boolean(session.active_thread_id),
-          hasControllerLease: canCurrentDeviceWrite(session),
-          reviewLocked:
-            isReviewInProgressForThread(session, session.active_thread_id) ||
-            isWorkflowInProgressForThread(session, session.active_thread_id),
-        }),
         getStandbyEmptyContent: buildStandbyEmptyContent,
         hydrationLoading: shouldShowTranscriptLoading(session, state),
         onLoadOlderTranscript: loadOlderTranscript,
@@ -1458,7 +1425,6 @@ export function createSessionRenderer({
         scrollElement: transcript,
         session,
         shortId,
-        standbyCanWrite: canCurrentDeviceWrite(session),
         viewOnly: Boolean(session.view_only),
         viewOnlyLoaded:
           state.viewOnlyThread?.threadId === state.viewThreadId &&
@@ -2213,21 +2179,6 @@ export function createSessionRenderer({
                     });
                   }
                 },
-              }),
-              // The DEVICE's write right, not "is the composer usable right
-              // now". Passing `!composerDisabled` made a pane that was merely
-              // still opening announce that another device had control.
-              //
-              // Asked of the ORCHESTRATOR's thread, not the conversation's.
-              // `canCurrentDeviceWrite` opens with `if (!active_thread_id)
-              // return false`, so on a relay with no session open it locked
-              // this composer and captioned it "Another device has control" —
-              // with no other device and no active thread. See
-              // shared/orchestrator-write-gate.js.
-              canWrite: orchestratorCanWrite({
-                session,
-                orchestratorThreadId: orchId,
-                deviceId: state.deviceId,
               }),
               // Stop, so a turn started here can be interrupted here. The pane
               // is drawn beside the conversation, and the conversation's Stop

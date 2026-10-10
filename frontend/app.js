@@ -422,8 +422,7 @@ const state = {
   // Per-thread "your workspace is gone" state, keyed by thread id:
   // `{ workspaceMissing, pending, error }` (see local/workspace-repair.js). Written
   // from each transcript TAIL response — `workspace_missing` rides `thread_state`,
-  // which no session snapshot carries — and read by the control banner, which turns
-  // into the repair action instead of a take-over the user cannot use.
+  // which no session snapshot carries — and read by the control banner's repair action.
   workspaceRepairByThread: new Map(),
   // `composerSubmitInFlight` is NOT a field: it is defined below as a getter over the
   // submitting thread's own scope, so one session's send cannot freeze another's.
@@ -1149,11 +1148,6 @@ const renderer = createSessionRenderer({
   formatRelativeTime,
   shortId,
   workspaceBasename,
-  canCurrentDeviceWrite,
-  controllerLabel,
-  controllerStateLabel,
-  sessionControllerState,
-  isCurrentDeviceActiveController,
   isViewingConversation,
   approvedDeviceCount,
   securityModeLabel,
@@ -1562,7 +1556,6 @@ controller = createSessionController({
   seedDefaults,
   setSelectedCwd,
   setThreadRoute,
-  canCurrentDeviceWrite,
   renderSession: renderer.renderSession,
   renderOverviewState: renderer.renderOverviewState,
   renderSessionUnavailable: renderer.renderSessionUnavailable,
@@ -1623,7 +1616,6 @@ const {
   stopActiveTurn,
   startSession,
   submitDecision,
-  takeOverControl,
   repairWorkspace,
   toggleTranscriptEntry,
   toggleTranscriptExpandKey,
@@ -2672,18 +2664,10 @@ async function submitStartSession() {
 // membership change rides the snapshot's projects_revision bump (assign calls notify),
 // same as every other project mutation, so the sidebar/overview refresh on their own.
 
-// The banner is one slot with one button, but which button it is depends on why the
-// banner is up (see local/control-banner.js), so both are bound here by id.
 controlBanner?.addEventListener("click", (event) => {
   if (event.target.closest("#workspace-repair-button")) {
     void repairWorkspace();
-    return;
   }
-  if (!event.target.closest("#take-over-button")) {
-    return;
-  }
-
-  void takeOverControl();
 });
 
 function renderComposerImageAttachments() {
@@ -4978,65 +4962,6 @@ function formatRelativeTime(seconds) {
     return `${Math.floor(diffSeconds / 2592000)}mo`;
   }
   return `${Math.floor(diffSeconds / 31536000)}y`;
-}
-
-function isCurrentDeviceActiveController(session) {
-  if (!session?.active_thread_id || !session.active_controller_device_id) {
-    return false;
-  }
-
-  return session.active_controller_device_id === state.deviceId;
-}
-
-function canCurrentDeviceWrite(session) {
-  if (!session?.active_thread_id) {
-    return false;
-  }
-
-  return !session.active_controller_device_id || session.active_controller_device_id === state.deviceId;
-}
-
-function sessionControllerState(session) {
-  if (!session?.active_thread_id) {
-    return "none";
-  }
-
-  if (!session.active_controller_device_id) {
-    return "unclaimed";
-  }
-
-  return session.active_controller_device_id === state.deviceId ? "this_device" : "other_device";
-}
-
-function controllerLabel(deviceId) {
-  if (!deviceId) {
-    return "Unclaimed";
-  }
-
-  if (deviceId === state.deviceId) {
-    return `This device (${shortId(deviceId)})`;
-  }
-
-  return shortId(deviceId);
-}
-
-function controllerStateLabel(session) {
-  if (session?.view_only) {
-    return "View only";
-  }
-  if (session?.active_thread_id && !session.active_turn_id) {
-    return "Available";
-  }
-  switch (sessionControllerState(session)) {
-    case "this_device":
-      return "This device";
-    case "other_device":
-      return controllerLabel(session.active_controller_device_id);
-    case "unclaimed":
-      return "Unclaimed";
-    default:
-      return "None";
-  }
 }
 
 function readThreadIdFromUrl() {

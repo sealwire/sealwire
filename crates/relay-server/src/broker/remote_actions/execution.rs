@@ -268,10 +268,6 @@ pub(super) async fn execute_remote_action(
             .stop_active_turn(input)
             .await
             .map(|_| RemoteActionOutcome::default()),
-        RemoteActionRequest::TakeOver { input } => state
-            .take_over_control(input)
-            .await
-            .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::Heartbeat { input } => state
             .heartbeat_session(input)
             .await

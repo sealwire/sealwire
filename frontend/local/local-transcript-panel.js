@@ -18,7 +18,6 @@ export function LocalTranscriptPanel({
   approval,
   buildTranscriptOptions,
   entries: rawEntries,
-  entriesCanWrite,
   getStandbyEmptyContent,
   hydrationLoading,
   onLoadOlderTranscript,
@@ -28,7 +27,6 @@ export function LocalTranscriptPanel({
   scrollElement,
   session,
   shortId,
-  standbyCanWrite,
   viewOnly,
   viewOnlyLoaded = false,
   viewOnlyLoadError = null,
@@ -144,14 +142,12 @@ export function LocalTranscriptPanel({
 
   if (content === null && emptyReady) {
     content = h(TranscriptPane, {
-      canWrite: standbyCanWrite,
       emptyContent: activeThreadId ? null : getStandbyEmptyContent(),
       readyState: activeThreadId
         ? {
             readyCopy,
             session,
             shortId,
-            waitingCopy: "This session is open, but another device currently has control. Take over to send the first prompt from here.",
           }
         : null,
     });
@@ -162,7 +158,6 @@ export function LocalTranscriptPanel({
     );
     content = h(TranscriptPane, {
       approval,
-      canWrite: entriesCanWrite,
       entries,
       hydrationLoading,
       transcriptOptions: transcriptOptionsRef.current,

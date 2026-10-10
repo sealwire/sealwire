@@ -157,7 +157,6 @@ export function RemoteTranscriptPanel({
   } else {
     body = h(TranscriptPane, {
       approval,
-      canWrite: sessionView.canCompose,
       emptyContent: null,
       entries,
       hydrationLoading,
@@ -165,7 +164,6 @@ export function RemoteTranscriptPanel({
         readyCopy: "The remote session is live. Send the first prompt below when you're ready.",
         session,
         shortId,
-        waitingCopy: "This session is already open, but another device currently has control. You can still approve or decline requests here; take over only if you want to send messages from this device.",
       },
       transcriptOptions,
       // The same dispatcher the local surface uses. This chain had drifted from

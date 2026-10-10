@@ -1268,8 +1268,7 @@ pub(super) fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActio
         | RemoteActionKind::ClaimDevice
         | RemoteActionKind::Heartbeat
         | RemoteActionKind::WatchThreads
-        | RemoteActionKind::StopTurn
-        | RemoteActionKind::TakeOver => RemoteActionResultKind::RemoteControlResult,
+        | RemoteActionKind::StopTurn => RemoteActionResultKind::RemoteControlResult,
         RemoteActionKind::ListProviders
         | RemoteActionKind::ListThreads
         | RemoteActionKind::ListProviderModels => RemoteActionResultKind::RemoteThreadsResult,

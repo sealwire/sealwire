@@ -30,7 +30,7 @@ import { isWorkingThreadStatus } from "./thread-status.js";
 // these counts as "working". `completed`/`unknown` are settled vocabulary (a
 // saved-but-not-running Codex thread parses to `unknown`, Claude reports
 // `completed`); classifying them as working made saved threads look busy
-// forever and showed a Stop/Take-over the backend then rejects with "no running
+// forever and showed a Stop the backend then rejects with "no running
 // turn". The vocabulary itself lives in shared/thread-status.js so this cannot
 // drift from the backend (or from the other frontend predicates) again.
 export function statusIsWorking(status) {
@@ -43,7 +43,7 @@ export function statusIsWorking(status) {
 // descriptive label refreshed only for the active thread, so a thread that goes
 // background mid-turn can keep a stale phase forever. The backend never treats a
 // leftover phase as liveness, so neither must the UI: a phase-only "working"
-// shows Stop/Take-over that the backend can't honor (deadlock).
+// shows a Stop that the backend can't honor (deadlock).
 export function sessionIsWorking(session) {
   return (
     Boolean(session && session.active_turn_id != null) ||

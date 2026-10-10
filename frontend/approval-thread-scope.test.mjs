@@ -67,7 +67,6 @@ test("remote: Approve in session A has nothing to submit while only B waits", ()
   const model = selectSessionRenderModel({
     session: displayed([APPROVAL_B]),
     previousSession: null,
-    hasControllerLease: true,
   });
   assert.equal(model.approval, null);
   assert.equal(model.currentApprovalId, null);

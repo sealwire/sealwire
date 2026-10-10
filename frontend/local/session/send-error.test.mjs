@@ -91,7 +91,6 @@ function buildController({ respond }) {
     logLine: (line) => logged.push(line),
     renderSession: () => {},
     transcriptFlushScheduler: createSyncTranscriptFlushScheduler(() => {}),
-    canCurrentDeviceWrite: () => true,
     seedDefaults: () => {},
     setSelectedCwd: () => {},
     setThreadRoute: () => {},

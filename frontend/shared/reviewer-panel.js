@@ -663,7 +663,7 @@ function ReviewSlot({
                 label: "Re-review",
                 title: canRequest
                   ? "Re-review the current changes with this reviewer (reuse preselected)"
-                  : "Available when the agent is idle and no other device has control",
+                  : "Available when the agent is idle",
                 providerOptions: reviewModel.providerOptions || [],
                 models: reviewModel.models || [],
                 defaultProvider: reviewModel.defaultProvider || "",
@@ -1158,7 +1158,7 @@ export function ReviewerPanel({
             h(
               "p",
               { className: "reviewer-empty-copy" },
-              "Other agents working on this appear here — one you delegated to, one reviewing the current changes, or the session this was handed over to. Each runs in its own session you can open and take over."
+              "Other agents working on this appear here — one you delegated to, one reviewing the current changes, or the session this was handed over to. Each runs in its own session you can open and continue."
             ),
             !canRequest && !canStartWorkflow
               ? h(
@@ -1166,7 +1166,7 @@ export function ReviewerPanel({
                   { className: "reviewer-empty-hint" },
                   canLaunchWorkflow
                     ? "Available when the author session is idle and writable."
-                    : "Available when the agent is idle and no other device has control."
+                    : "Available when the agent is idle."
                 )
               : null
           )
@@ -1183,7 +1183,7 @@ export function ReviewerPanel({
                 label: "Request review",
                 title: canRequest
                   ? "Ask another agent to review the current changes"
-                  : "Available when the agent is idle and no other device has control",
+                  : "Available when the agent is idle",
                 providerOptions: reviewModel.providerOptions || [],
                 models: reviewModel.models || [],
                 defaultProvider: reviewModel.defaultProvider || "",

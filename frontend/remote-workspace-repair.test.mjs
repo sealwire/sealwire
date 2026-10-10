@@ -38,14 +38,14 @@ function remoteState(extra = {}) {
   };
 }
 
-// A thread whose take-over banner would otherwise own the slot: another device holds
-// control and the thread is working.
-function contestedSession(extra = {}) {
+// A thread whose review lock banner would otherwise own the slot.
+function reviewedSession(extra = {}) {
   return {
     active_thread_id: THREAD_ID,
-    active_turn_id: "turn-1",
-    active_controller_device_id: "device-2",
-    current_status: "active",
+    active_review_jobs: [
+      { id: "review-1", status: "waiting_for_reviewer", parent_thread_id: THREAD_ID },
+    ],
+    current_status: "idle",
     pending_approvals: [],
     provider_connected: true,
     ...extra,
@@ -102,7 +102,6 @@ test("a missing worktree claims the remote banner, names the path, and offers to
   ).controlBanner;
 
   assert.equal(model.hidden, false);
-  assert.equal(model.takeOverHidden, true, "there is nothing to take over into");
   assert.ok(model.repair, "expected a repair action on the banner");
   assert.equal(model.repair.kind, "worktree");
   assert.equal(model.repair.threadId, THREAD_ID);
@@ -123,7 +122,6 @@ test("a missing plain folder offers to create the folder, with no branch talk", 
   ).controlBanner;
 
   assert.equal(model.hidden, false);
-  assert.equal(model.takeOverHidden, true);
   assert.equal(model.repair.kind, "folder");
   assert.match(model.repair.label, /create folder/i);
   assert.doesNotMatch(model.repair.label, /worktree/i);
@@ -162,40 +160,24 @@ test("workspace_missing: null leaves ordinary banner behaviour untouched", () =>
   assert.equal(idle.hidden, true);
   assert.equal(idle.repair, null);
 
-  const contested = selectSessionChromeRenderModel(
+  const reviewed = selectSessionChromeRenderModel(
     state,
-    contestedSession({ workspace_missing: null })
+    reviewedSession({ workspace_missing: null })
   ).controlBanner;
-  assert.equal(contested.hidden, false);
-  assert.equal(contested.takeOverHidden, false, "take over is still the offer");
-  assert.equal(contested.repair, null);
-  assert.match(contested.summary, /controlled by/i);
+  assert.equal(reviewed.hidden, false);
+  assert.equal(reviewed.repair, null);
+  assert.equal(reviewed.summary, "Review in progress");
 });
 
-test("the repair banner wins over take-over when both would apply", () => {
+test("the repair banner wins over the review lock when both would apply", () => {
   const model = selectSessionChromeRenderModel(
     stateWithRepairButton(),
-    contestedSession({ workspace_missing: WORKTREE_PLAN })
+    reviewedSession({ workspace_missing: WORKTREE_PLAN })
   ).controlBanner;
 
   assert.equal(model.hidden, false);
-  assert.ok(model.repair, "the missing workspace outranks the control hand-off");
-  assert.equal(model.takeOverHidden, true);
-  assert.doesNotMatch(model.summary, /controlled by/i);
-});
-
-test("the repair banner also outranks the background-session take-over offer", () => {
-  const model = selectSessionChromeRenderModel(
-    stateWithRepairButton(),
-    contestedSession({
-      active_controller_device_id: "__view_only__",
-      view_only: true,
-      workspace_missing: WORKTREE_PLAN,
-    })
-  ).controlBanner;
-
-  assert.ok(model.repair);
-  assert.equal(model.takeOverHidden, true);
+  assert.ok(model.repair, "the missing workspace outranks the review lock");
+  assert.doesNotMatch(model.summary, /review/i);
 });
 
 test("a pending repair says so on the button and keeps the banner up", () => {
@@ -288,7 +270,7 @@ test("dispatchWorkspaceRepair does not swallow the relay's failure", async () =>
   );
 });
 
-test("the remote banner renders the repair button, its error, and no take-over", () => {
+test("the remote banner renders the repair button and its error", () => {
   const model = selectSessionChromeRenderModel(
     stateWithRepairButton({ error: "nope" }),
     idleSession({ workspace_missing: WORKTREE_PLAN })
@@ -298,16 +280,11 @@ test("the remote banner renders the repair button, its error, and no take-over",
   const tree = ControlBanner({
     model,
     onRepairWorkspace: (threadId) => pressed.push(threadId),
-    onTakeOver: () => pressed.push("take-over"),
   });
 
   const summary = findElement(tree, (node) => node.props?.className === "control-summary");
   assert.ok(summary);
   assert.equal(summary.props.title, WORKTREE_PLAN.recorded_cwd);
-
-  const takeOver = findElement(tree, (node) => node.props?.id === "remote-take-over-button");
-  assert.ok(takeOver, "the take-over button stays mounted");
-  assert.equal(takeOver.props.hidden, true);
 
   const repairButton = findElement(
     tree,
@@ -324,13 +301,13 @@ test("the remote banner renders the repair button, its error, and no take-over",
   assert.equal(errorLine.props.children, "nope");
 });
 
-test("the remote banner leaves a plain take-over banner exactly as it was", () => {
+test("the review lock banner carries no repair button and no error line", () => {
   const model = selectSessionChromeRenderModel(
     stateWithRepairButton(),
-    contestedSession({ workspace_missing: null })
+    reviewedSession({ workspace_missing: null })
   ).controlBanner;
 
-  const tree = ControlBanner({ model, onTakeOver() {} });
+  const tree = ControlBanner({ model });
 
   assert.equal(
     findElement(tree, (node) => node.props?.id === "remote-workspace-repair-button"),
@@ -340,6 +317,6 @@ test("the remote banner leaves a plain take-over banner exactly as it was", () =
     findElement(tree, (node) => node.props?.className === "control-banner-error"),
     null
   );
-  const takeOver = findElement(tree, (node) => node.props?.id === "remote-take-over-button");
-  assert.equal(takeOver.props.hidden, false);
+  const summary = findElement(tree, (node) => node.props?.className === "control-summary");
+  assert.equal(summary.props.children, "Review in progress");
 });

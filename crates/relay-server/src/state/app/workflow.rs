@@ -274,8 +274,7 @@ and the author will revise until approved or the round budget runs out."
     }
 
     /// Authorize the caller and resolve the workflow's author thread + provider + cwd
-    /// ONCE. Ordering is load-bearing: device authorization
-    /// (`ensure_device_can_send_message`), path-scope, and the unknown-thread
+    /// ONCE. Ordering is load-bearing: path-scope and the unknown-thread
     /// rejection (`thread_cwd` returns `None`) all run BEFORE `find_thread_provider`,
     /// so a bogus or unauthorized request can never reach its cross-provider
     /// `list_threads` enumeration — which would otherwise be a cheap-DoS and a
@@ -315,8 +314,6 @@ starting a workflow"
                         .to_string(),
                 );
             }
-            // AUTHORIZE before touching the thread's provider.
-            relay.ensure_device_can_send_message(device_id)?;
             // An unknown thread is rejected HERE (cheap local lookup) — before the
             // provider probe below.
             let parent_cwd = relay
