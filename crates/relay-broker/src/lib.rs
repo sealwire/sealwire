@@ -3515,7 +3515,7 @@ async fn handle_socket(
             reject_socket(
                 &state.hardening.publish_metrics,
                 socket,
-                "rate_limited",
+                "tenant_connection_limit",
                 message,
             )
             .await;

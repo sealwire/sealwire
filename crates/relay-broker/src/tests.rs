@@ -6023,7 +6023,7 @@ async fn tenant_connections_are_capped_across_ips_and_relay_capacity_is_reserved
     assert!(matches!(welcome, ServerMessage::Welcome { .. }));
     let (_excess, reply) = join("room-a", 2).await;
     assert!(
-        matches!(reply, ServerMessage::Error { code, message } if code == "rate_limited" && message.contains("tenant"))
+        matches!(reply, ServerMessage::Error { code, message } if code == "tenant_connection_limit" && message.contains("tenant"))
     );
     let (_other, welcome) = join("room-b", 3).await;
     assert!(matches!(welcome, ServerMessage::Welcome { .. }));
@@ -6091,7 +6091,7 @@ async fn tenant_quota_uses_the_access_account_across_rooms() {
     ));
     let (mut second, _) = connect_async(url("room-b")).await.unwrap();
     assert!(
-        matches!(next_server_message(&mut second).await, ServerMessage::Error { code, message } if code == "rate_limited" && message.contains("tenant"))
+        matches!(next_server_message(&mut second).await, ServerMessage::Error { code, message } if code == "tenant_connection_limit" && message.contains("tenant"))
     );
 }
 
@@ -6135,7 +6135,7 @@ async fn tenant_surface_limit_follows_the_verified_device_allowance() {
         }
         let (mut excess, _) = connect_async(&url).await.unwrap();
         assert!(
-            matches!(next_server_message(&mut excess).await, ServerMessage::Error { code, message } if code == "rate_limited" && message.contains("tenant"))
+            matches!(next_server_message(&mut excess).await, ServerMessage::Error { code, message } if code == "tenant_connection_limit" && message.contains("tenant"))
         );
         for mut socket in sockets {
             socket.close(None).await.unwrap();

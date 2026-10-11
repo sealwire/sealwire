@@ -229,7 +229,7 @@ export function selectEmptyStateRenderModel({
       !pairingTicket
   );
   const showServerDisconnected = Boolean(
-    remoteAuth
+    (remoteAuth || pairingTicket)
       && !showMissingCredentials
       && (
         serverConnectionState === "disconnected"

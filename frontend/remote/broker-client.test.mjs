@@ -385,6 +385,60 @@ test("expired device broker access refreshes automatically during reconnect", as
   assert.equal(state.socketConnected, true);
 });
 
+test("connection limits remain visible through close and reconnect without expiring credentials", async () => {
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { configureBrokerClient, connectBroker, closeBrokerSocket } = await import("./broker-client.js");
+  const { selectEmptyStateRenderModel } = await import("./view-model.js");
+  configureBrokerClient({ onBrokerReady() {}, onBrokerDisconnect() {} });
+  for (const kind of ["device", "pairing"]) {
+    const browser = installBrowserStubs();
+    FakeWebSocket.instances = [];
+    seedRemoteAuth(state, saveRemoteAuth, {
+      relayId: "relay-limit", brokerUrl: "ws://broker.example.test",
+      brokerChannelId: "room-limit", relayPeerId: "relay-limit", deviceId: "device-limit",
+      payloadSecret: "payload-limit", deviceJoinTicket: "device-ticket",
+      deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 600,
+    });
+    seedPairingState(state);
+    seedSocketState(state);
+    if (kind === "pairing") {
+      state.remoteAuth = null;
+      seedPairingState(state, { pairingPhase: "connecting", pairingTicket: {
+        broker_url: "ws://broker.example.test", broker_channel_id: "room-limit",
+        relay_peer_id: "relay-limit", pairing_id: "pair-limit", pairing_join_ticket: "pair-ticket",
+        expires_at: Math.floor(Date.now() / 1000) + 600,
+      } });
+    }
+    await connectBroker("initial boot");
+    const socket = FakeWebSocket.instances.at(-1);
+    socket.emit("open");
+    socket.emit("message", { data: JSON.stringify({
+      type: "error", code: "tenant_connection_limit", message: "too many broker connections for this tenant",
+    }) });
+    const message = state.serverConnectionMessage;
+    assert.match(message, /Connection limit reached.*Close another Sealwire tab/);
+    socket.emit("error");
+    socket.emit("close", { code: 1000 });
+    assert.equal(state.serverConnectionMessage, message);
+    assert.equal(selectEmptyStateRenderModel(state).serverDisconnectedCopy, message);
+    assert.equal(selectEmptyStateRenderModel(state).showServerDisconnected, true);
+    assert.equal(browser.scheduledTimerDelays().length, 1);
+    assert.notEqual(state.remoteAuth?.deviceSessionExpired, true);
+    assert.equal(state.pairingRetired, false);
+    browser.runTimers();
+    const replacement = FakeWebSocket.instances.at(-1);
+    assert.notEqual(replacement, socket);
+    assert.equal(state.serverConnectionMessage, message);
+    replacement.emit("open");
+    assert.equal(state.serverConnectionMessage, message);
+    replacement.emit("message", { data: JSON.stringify({
+      type: "welcome", protocol_version: 2, channel_id: "room-limit", peer_id: "surface-limit", peers: [],
+    }) });
+    assert.equal(state.serverConnectionMessage, null);
+    closeBrokerSocket();
+  }
+});
+
 test("broker socket reconnect backs off with jitter and resets after a stable connection", async () => {
   const browser = installBrowserStubs();
   FakeWebSocket.instances = [];

@@ -30,6 +30,7 @@ const DEVICE_SESSION_ROOM_MAX_BYTES = 512;
 const SOCKET_RECONNECT_BASE_DELAY_MS = 1500;
 const SOCKET_RECONNECT_MAX_DELAY_MS = 60_000;
 const SOCKET_RECONNECT_STABLE_SESSION_MS = 60_000;
+const CONNECTION_LIMIT_MESSAGE = "Connection limit reached. Close another Sealwire tab or app to reconnect.";
 
 let onBrokerReady = () => {};
 let onBrokerPayload = async () => {};
@@ -292,6 +293,9 @@ export async function connectBroker(reason) {
     return;
   }
 
+  const reconnectMessage = reason === "reconnect" && state.serverConnectionMessage === CONNECTION_LIMIT_MESSAGE
+    ? CONNECTION_LIMIT_MESSAGE
+    : null;
   cancelSocketReconnect();
   closeBrokerSocket(false);
 
@@ -313,7 +317,7 @@ export async function connectBroker(reason) {
   applyRemoteSurfacePatch(createBrokerConnectionPatch({
     relayConnected: false,
     relayConnectionMessage: null,
-    serverConnectionMessage: null,
+    serverConnectionMessage: reconnectMessage,
     serverConnectionState: "connecting",
     socket,
     socketPeerId: null,
@@ -327,7 +331,7 @@ export async function connectBroker(reason) {
 
     socketOpenedAtMs = Date.now();
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
-      serverConnectionMessage: null,
+      serverConnectionMessage: reconnectMessage,
       serverConnectionState: "connected",
       socketConnected: true,
     }));
@@ -351,7 +355,7 @@ export async function connectBroker(reason) {
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
       relayConnected: false,
       relayConnectionMessage: "Relay server disconnected. Waiting for it to reconnect.",
-      serverConnectionMessage: "Server disconnected. Retrying connection.",
+      serverConnectionMessage: state.serverConnectionMessage || "Server disconnected. Retrying connection.",
       serverConnectionState: "disconnected",
       socket: null,
       socketConnected: false,
@@ -371,7 +375,7 @@ export async function connectBroker(reason) {
     }
 
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
-      serverConnectionMessage: "Server disconnected. Retrying connection.",
+      serverConnectionMessage: state.serverConnectionMessage || "Server disconnected. Retrying connection.",
       serverConnectionState: "disconnected",
     }));
     renderLog("Broker websocket hit an error.");
@@ -768,6 +772,7 @@ async function handleSocketMessage(rawData, connectReason, connection = currentC
       && frame.peers.some((peer) => peer?.role === "relay" && peer.peer_id === connection?.relayPeerId);
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
       relayConnected: relayPresent,
+      serverConnectionMessage: null,
       relayConnectionMessage: relayPresent
         ? null
         : "Relay server disconnected. Waiting for it to reconnect.",
@@ -811,6 +816,11 @@ async function handleSocketMessage(rawData, connectReason, connection = currentC
     if (pairingOutcome.terminal) {
       retirePairing(pairingOutcome.message, { attemptId: connection?.pairingAttemptId });
       return;
+    }
+    if (frame.code === "tenant_connection_limit") {
+      applyRemoteSurfacePatch(createBrokerConnectionPatch({
+        serverConnectionMessage: CONNECTION_LIMIT_MESSAGE,
+      }));
     }
     renderLog(`Broker error: ${frame.message}`);
     return;
