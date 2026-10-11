@@ -25,6 +25,9 @@ pub enum AccessOperation {
     RelaySocketJoin,
     /// Websocket join after a verified device/surface ticket tied to a relay room.
     DeviceSocketJoin,
+    /// Periodic re-check of a seated room's relay, so revoked or expired access
+    /// ends the live sockets too, not only the next join.
+    AccessRecheck,
 }
 
 /// Product-neutral request context for access decisions (abuse controls, audit).

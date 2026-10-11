@@ -33,7 +33,7 @@ pub use state::BrokerState;
 use std::path::PathBuf;
 use std::{
     collections::{HashMap, VecDeque},
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex as StdMutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -84,7 +84,7 @@ use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const DEFAULT_PUBLIC_API_RATE_LIMIT_PER_MINUTE: usize = 5;
@@ -220,6 +220,7 @@ const DEFAULT_MAX_TEXT_FRAME_BYTES: usize = 64 * 1024;
 /// `this_relays_frame_size_fits_the_brokers_guaranteed_minimum`).
 pub const MIN_MAX_TEXT_FRAME_BYTES: usize = 64 * 1024;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_ACCESS_RECHECK_INTERVAL_SECS: u64 = 60;
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEVICE_SESSION_COOKIE_NAME: &str = "agent_relay_device_session";
 const DEVICE_SCOPED_SESSION_COOKIE_PATH: &str = "/api/public/device";
@@ -244,6 +245,7 @@ const MAX_CONNECTIONS_PER_IP_ENV: &str = "RELAY_BROKER_MAX_CONNECTIONS_PER_IP";
 const MAX_TOTAL_CONNECTIONS_ENV: &str = "RELAY_BROKER_MAX_TOTAL_CONNECTIONS";
 const MAX_TEXT_FRAME_BYTES_ENV: &str = "RELAY_BROKER_MAX_TEXT_FRAME_BYTES";
 const IDLE_TIMEOUT_SECS_ENV: &str = "RELAY_BROKER_IDLE_TIMEOUT_SECS";
+const ACCESS_RECHECK_INTERVAL_SECS_ENV: &str = "RELAY_BROKER_ACCESS_RECHECK_INTERVAL_SECS";
 const CSP_CONNECT_SRC_ENV: &str = "RELAY_BROKER_CSP_CONNECT_SRC";
 const ENABLE_HSTS_ENV: &str = "RELAY_BROKER_ENABLE_HSTS";
 const HSTS_VALUE_ENV: &str = "RELAY_BROKER_HSTS_VALUE";
@@ -740,6 +742,7 @@ struct BrokerHardeningConfig {
     max_surface_connections_per_tenant: usize,
     max_text_frame_bytes: usize,
     idle_timeout: Duration,
+    access_recheck_interval: Duration,
 }
 
 /// A peer's byte allowance: a sustained rate plus an independent burst.
@@ -951,6 +954,7 @@ impl Default for BrokerHardeningConfig {
             max_surface_connections_per_tenant: 64,
             max_text_frame_bytes: DEFAULT_MAX_TEXT_FRAME_BYTES,
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
+            access_recheck_interval: Duration::from_secs(DEFAULT_ACCESS_RECHECK_INTERVAL_SECS),
         }
     }
 }
@@ -1027,6 +1031,18 @@ impl BrokerHardeningConfig {
                 IDLE_TIMEOUT_SECS_ENV,
                 DEFAULT_IDLE_TIMEOUT_SECS,
             )?),
+            access_recheck_interval: {
+                let secs = parse_u64_env(
+                    ACCESS_RECHECK_INTERVAL_SECS_ENV,
+                    DEFAULT_ACCESS_RECHECK_INTERVAL_SECS,
+                )?;
+                if secs == 0 {
+                    return Err(format!(
+                        "{ACCESS_RECHECK_INTERVAL_SECS_ENV} must be at least 1"
+                    ));
+                }
+                Duration::from_secs(secs)
+            },
         })
     }
 }
@@ -1682,6 +1698,12 @@ fn app_with_access_strategy_parts(
             warn!(%error, "broker websocket joins will be rejected");
         }
     }
+    spawn_access_recheck(
+        state.clone(),
+        Arc::clone(&access),
+        join_verifier.public_control_plane(),
+        hardening_config.access_recheck_interval,
+    );
     let mut router = Router::new()
         .route("/api/health", get(health))
         .route(
@@ -1841,6 +1863,87 @@ fn app_with_access_strategy_parts(
         ))
         .layer(middleware::from_fn(with_cache_headers))
         .layer(TraceLayer::new_for_http())
+}
+
+fn spawn_access_recheck(
+    broker: BrokerState,
+    access: Arc<dyn BrokerAccessStrategy>,
+    control_plane: Option<PublicControlPlane>,
+    every: Duration,
+) {
+    // Builders also run in synchronous tests; outside a runtime there is nothing to recheck.
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        let mut ticker = tokio::time::interval(every);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            recheck_room_access(&broker, access.as_ref(), control_plane.as_ref()).await;
+        }
+    });
+}
+
+/// A join checks access once; without this a revoked or expired relay keeps its
+/// live sockets until they happen to drop.
+pub async fn recheck_room_access(
+    broker: &BrokerState,
+    access: &dyn BrokerAccessStrategy,
+    control_plane: Option<&PublicControlPlane>,
+) -> usize {
+    let mut closed = 0;
+    for channel_id in broker.active_channel_ids().await {
+        let relay_id = match control_plane {
+            Some(plane) => match plane.relay_id_for_join(&channel_id, None).await {
+                Ok(relay_id) => relay_id,
+                // Also what a reload outage looks like, so it must not close anything.
+                Err(reason) => {
+                    warn!(
+                        channel_id,
+                        reason, "access recheck skipped a room without a registration"
+                    );
+                    continue;
+                }
+            },
+            None => channel_id.clone(),
+        };
+        let ctx = AccessRequestContext::new(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            AccessOperation::AccessRecheck,
+        );
+        let Err(denial) = access.authorize_relay(&ctx, &relay_id).await else {
+            continue;
+        };
+        denial.log_internal();
+        match denial.code() {
+            // No answer is not a revocation: an outage must not disconnect every tenant.
+            AccessDenialCode::Unavailable
+            | AccessDenialCode::Internal
+            | AccessDenialCode::RateLimited => {
+                warn!(
+                    channel_id,
+                    code = denial.public_error_code(),
+                    "access recheck could not verify a room; keeping it"
+                );
+            }
+            _ => {
+                let peers = broker
+                    .force_close_room(
+                        &channel_id,
+                        "access_revoked",
+                        "relay access is no longer authorized",
+                    )
+                    .await;
+                info!(
+                    channel_id,
+                    peers, "closed a room whose relay access was revoked"
+                );
+                closed += 1;
+            }
+        }
+    }
+    closed
 }
 
 /// Cache policy for the broker's HTTP surface (the remote/PWA UI plus the

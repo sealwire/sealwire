@@ -302,6 +302,10 @@ impl BrokerState {
         })
     }
 
+    pub async fn active_channel_ids(&self) -> Vec<String> {
+        self.inner.lock().await.rooms.keys().cloned().collect()
+    }
+
     /// Force-close every peer currently seated in `channel_id` (relay and
     /// surfaces). Always bumps the process-global access epoch (even when the
     /// room is empty) so in-flight joins that captured an older epoch cannot

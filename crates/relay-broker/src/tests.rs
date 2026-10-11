@@ -10757,3 +10757,165 @@ mod credential_admission_tests;
 
 #[path = "tests/rate_limit_isolation.rs"]
 mod rate_limit_isolation;
+
+struct RevocableAccessStrategy {
+    denied: std::sync::Mutex<std::collections::HashMap<String, AccessDenial>>,
+    seen: std::sync::Mutex<Vec<AccessOperation>>,
+}
+
+impl RevocableAccessStrategy {
+    fn new() -> Self {
+        Self {
+            denied: Default::default(),
+            seen: Default::default(),
+        }
+    }
+
+    fn deny(&self, relay_id: &str, denial: AccessDenial) {
+        self.denied
+            .lock()
+            .expect("denied lock")
+            .insert(relay_id.to_string(), denial);
+    }
+
+    fn seen(&self) -> Vec<AccessOperation> {
+        self.seen.lock().expect("seen lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl BrokerAccessStrategy for RevocableAccessStrategy {
+    async fn authorize_enrollment(
+        &self,
+        _ctx: &AccessRequestContext,
+        _enrollment_token: Option<&str>,
+        _existing_relay_id: Option<&str>,
+    ) -> Result<EnrollmentBindDecision, AccessDenial> {
+        Ok(EnrollmentBindDecision::Skip)
+    }
+
+    async fn bind_enrollment(
+        &self,
+        _ctx: &AccessRequestContext,
+        _enrollment_token: &str,
+        _relay_id: &str,
+        _existing_relay_id: Option<&str>,
+    ) -> Result<(), AccessDenial> {
+        Ok(())
+    }
+
+    async fn authorize_relay(
+        &self,
+        ctx: &AccessRequestContext,
+        relay_id: &str,
+    ) -> Result<(), AccessDenial> {
+        self.seen.lock().expect("seen lock").push(ctx.operation);
+        match self.denied.lock().expect("denied lock").get(relay_id) {
+            Some(denial) => Err(denial.clone()),
+            None => Ok(()),
+        }
+    }
+
+    async fn authorize_device(
+        &self,
+        _ctx: &AccessRequestContext,
+        _relay_id: &str,
+    ) -> Result<DeviceAccessDecision, AccessDenial> {
+        Ok(DeviceAccessDecision { device_limit: None })
+    }
+}
+
+async fn serve_self_hosted_with(access: Arc<RevocableAccessStrategy>) -> (BrokerState, SocketAddr) {
+    let broker = BrokerState::default();
+    let address = serve_router(app_with_access_strategy_parts(
+        broker.clone(),
+        test_web_root(),
+        BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+        access,
+        None,
+        OriginGuard::disabled(),
+    ))
+    .await;
+    (broker, address)
+}
+
+async fn seat_surface_in(address: SocketAddr, room: &str) -> TestSocket {
+    let (mut socket, _) = connect_async(websocket_url(
+        address,
+        room,
+        protocol::PeerRole::Surface,
+        None,
+        JoinTicketClaims::device_surface_join(room, "device-1", None),
+    ))
+    .await
+    .expect("surface should connect");
+    assert!(matches!(
+        next_server_message(&mut socket).await,
+        ServerMessage::Welcome { .. }
+    ));
+    socket
+}
+
+async fn expect_access_revoked_then_closed(socket: &mut TestSocket) {
+    assert!(matches!(
+        next_server_message(socket).await,
+        ServerMessage::Error { code, .. } if code == "access_revoked"
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match socket.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await
+    .expect("the revoked room's socket must end, not merely carry an error");
+}
+
+#[tokio::test]
+async fn access_recheck_closes_only_the_rooms_whose_relay_lost_access() {
+    let access = Arc::new(RevocableAccessStrategy::new());
+    let (broker, address) = serve_self_hosted_with(Arc::clone(&access)).await;
+    let mut revoked = seat_surface_in(address, "room-a").await;
+    let mut kept = seat_surface_in(address, "room-b").await;
+
+    assert_eq!(
+        recheck_room_access(&broker, access.as_ref(), None).await,
+        0,
+        "nothing has been revoked yet"
+    );
+    assert!(access.seen().contains(&AccessOperation::AccessRecheck));
+
+    // No registration table in self-hosted mode, so access is keyed by room id.
+    access.deny("room-a", AccessDenial::forbidden("license is not active"));
+    assert_eq!(recheck_room_access(&broker, access.as_ref(), None).await, 1);
+
+    expect_access_revoked_then_closed(&mut revoked).await;
+    assert_eq!(broker.room_peer_count("room-a").await, 0);
+    assert_eq!(broker.room_peer_count("room-b").await, 1);
+    kept.close(None).await.expect("kept socket closes cleanly");
+}
+
+#[tokio::test]
+async fn access_recheck_keeps_rooms_it_could_not_verify() {
+    let access = Arc::new(RevocableAccessStrategy::new());
+    let (broker, address) = serve_self_hosted_with(Arc::clone(&access)).await;
+    let mut seated = seat_surface_in(address, "room-a").await;
+
+    access.deny("room-a", AccessDenial::unavailable());
+    assert_eq!(
+        recheck_room_access(&broker, access.as_ref(), None).await,
+        0,
+        "an unreachable access service is not a revocation"
+    );
+    assert_eq!(broker.room_peer_count("room-a").await, 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), seated.next())
+            .await
+            .is_err(),
+        "the seated socket received nothing"
+    );
+}
