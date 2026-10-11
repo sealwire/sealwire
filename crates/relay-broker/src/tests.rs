@@ -6124,13 +6124,15 @@ async fn tenant_surface_limit_follows_the_verified_device_allowance() {
             None,
             JoinTicketClaims::device_surface_join("room-a", "device-a", None),
         );
+        let limit = (device_limit * 3).min(20);
         let mut sockets = Vec::new();
-        for _ in 0..device_limit * 2 {
+        for index in 0..limit {
             let (mut socket, _) = connect_async(&url).await.unwrap();
-            assert!(matches!(
-                next_server_message(&mut socket).await,
-                ServerMessage::Welcome { .. }
-            ));
+            let reply = next_server_message(&mut socket).await;
+            assert!(
+                matches!(reply, ServerMessage::Welcome { .. }),
+                "connection {index} of {limit}: {reply:?}"
+            );
             sockets.push(socket);
         }
         let (mut excess, _) = connect_async(&url).await.unwrap();

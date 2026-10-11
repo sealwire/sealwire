@@ -95,12 +95,22 @@ pub async fn serve(listener: TcpListener, app: Router, config: ServerConfig) -> 
             let connection = builder
                 .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service))
                 .with_upgrades();
-            match tokio::time::timeout(http_timeout, connection).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
+            tokio::pin!(connection);
+            // Dropping the connection cancels a handler mid-commit. A request in flight gets
+            // one more period to finish; a drip-fed body cannot hold the slot past that.
+            let outcome = tokio::select! {
+                result = connection.as_mut() => Some(result),
+                () = tokio::time::sleep(http_timeout) => {
+                    connection.as_mut().graceful_shutdown();
+                    tokio::time::timeout(http_timeout, connection.as_mut()).await.ok()
+                }
+            };
+            match outcome {
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
                     debug!(remote_ip = %remote_addr.ip(), %error, "broker HTTP connection ended")
                 }
-                Err(_) => {
+                None => {
                     debug!(remote_ip = %remote_addr.ip(), "broker HTTP connection deadline exceeded")
                 }
             }
@@ -135,6 +145,13 @@ mod tests {
                 }),
             )
             .route("/body", post(|body: String| async move { body }))
+            .route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    "done"
+                }),
+            )
             .route(
                 "/ws",
                 get(|ws: WebSocketUpgrade| async move {
@@ -197,6 +214,26 @@ mod tests {
                 "incomplete headers must close by the deadline"
             );
         }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_reused_connection_finishes_the_request_in_flight_at_its_deadline() {
+        let (address, server) = spawn(10, Duration::from_secs(2)).await;
+        let client = reqwest::Client::new();
+        let first = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first.text().await.unwrap(), "127.0.0.1");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let slow = client
+            .get(format!("http://{address}/slow"))
+            .send()
+            .await
+            .expect("the deadline must not reset a request it caught in flight");
+        assert_eq!(slow.text().await.unwrap(), "done");
         server.abort();
     }
 

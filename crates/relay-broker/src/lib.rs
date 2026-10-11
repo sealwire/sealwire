@@ -4484,9 +4484,11 @@ async fn authorize_verified_join_access(
             return Err("tenant identity unavailable for socket join");
         }
     };
+    // A network switch leaves the dead socket counted until the idle timeout; x2 left a
+    // phone plus one open tab refused on its third switch; 20 is room enough.
     let surface_limit = device_limit.map_or(
         state.hardening.config.max_surface_connections_per_tenant,
-        |limit| (limit as usize).saturating_mul(2),
+        |limit| (limit as usize).saturating_mul(3).min(20),
     );
     Ok((tenant_key, surface_limit))
 }
