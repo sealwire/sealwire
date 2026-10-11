@@ -1608,8 +1608,10 @@ test("reapplying the same compact snapshot while hydration is loading does not r
 
   const { state, saveRemoteAuth } = await import("./state.js");
   const { handleRemoteBrokerPayload } = await import("./actions.js");
-  const { applySessionSnapshot } = await import("./session-ops.js");
+  const { applySessionSnapshot, resetDeclaredWatchedThreads } = await import("./session-ops.js");
 
+  // Each case must tolerate the concurrent watch declaration, independent of test order.
+  resetDeclaredWatchedThreads();
   seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
@@ -1637,6 +1639,7 @@ test("reapplying the same compact snapshot while hydration is loading does not r
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
+      if (frame.payload.request?.type === "watch_threads") return;
       sentPayloads.push(frame.payload);
     },
   };
@@ -1722,6 +1725,9 @@ test("reapplying the same compact snapshot while hydration is loading does not r
       prev_cursor: null,
     },
   });
+  await waitFor(() => state.transcriptHydrationPromise === null);
+  assert.equal(state.session.transcript[0].text, "hello world");
+  assert.deepEqual(sentPayloads.map((payload) => payload.request?.type), ["fetch_thread_transcript"]);
 });
 
 test("hydration stops automatically once the tail entries are complete", async () => {
@@ -1731,8 +1737,9 @@ test("hydration stops automatically once the tail entries are complete", async (
 
   const { state, saveRemoteAuth } = await import("./state.js");
   const { handleRemoteBrokerPayload } = await import("./actions.js");
-  const { applySessionSnapshot } = await import("./session-ops.js");
+  const { applySessionSnapshot, resetDeclaredWatchedThreads } = await import("./session-ops.js");
 
+  resetDeclaredWatchedThreads();
   seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
@@ -1760,6 +1767,7 @@ test("hydration stops automatically once the tail entries are complete", async (
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
+      if (frame.payload.request?.type === "watch_threads") return;
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
         await deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
@@ -1907,10 +1915,12 @@ test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages",
   const { handleRemoteBrokerPayload } = await import("./actions.js");
   const {
     applySessionSnapshot,
+    resetDeclaredWatchedThreads,
     maybeLoadOlderTranscriptHistory,
   } = await import("./session-ops.js");
   const { setRemoteTranscriptElement } = await import("./ui-refs.js");
 
+  resetDeclaredWatchedThreads();
   seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
@@ -1940,6 +1950,7 @@ test("maybeLoadOlderTranscriptHistory prepends older complete transcript pages",
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
+      if (frame.payload.request?.type === "watch_threads") return;
       sentPayloads.push(frame.payload);
       setImmediate(async () => {
         fetchCount += 1;
@@ -2027,10 +2038,12 @@ test("maybeLoadOlderTranscriptHistory rebuilds the window when the relay rejects
   const { handleRemoteBrokerPayload } = await import("./actions.js");
   const {
     applySessionSnapshot,
+    resetDeclaredWatchedThreads,
     maybeLoadOlderTranscriptHistory,
   } = await import("./session-ops.js");
   const { setRemoteTranscriptElement } = await import("./ui-refs.js");
 
+  resetDeclaredWatchedThreads();
   seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
@@ -2073,6 +2086,7 @@ test("maybeLoadOlderTranscriptHistory rebuilds the window when the relay rejects
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
+      if (frame.payload.request?.type === "watch_threads") return;
       sentPayloads.push(frame.payload);
       const before = frame.payload.request?.input?.before ?? null;
       setImmediate(async () => {
@@ -2123,10 +2137,12 @@ test("maybeLoadOlderTranscriptHistory asks again, unprompted, while the relay is
   const { handleRemoteBrokerPayload } = await import("./actions.js");
   const {
     applySessionSnapshot,
+    resetDeclaredWatchedThreads,
     maybeLoadOlderTranscriptHistory,
   } = await import("./session-ops.js");
   const { setRemoteTranscriptElement } = await import("./ui-refs.js");
 
+  resetDeclaredWatchedThreads();
   seedRemoteAuth(state, saveRemoteAuth, {
     relayId: "relay-1",
     brokerUrl: "wss://broker.example.test",
@@ -2169,6 +2185,7 @@ test("maybeLoadOlderTranscriptHistory asks again, unprompted, while the relay is
     readyState: 1,
     send(frameText) {
       const frame = decodeActionFrame(frameText);
+      if (frame.payload.request?.type === "watch_threads") return;
       sentPayloads.push(frame.payload);
       const before = frame.payload.request?.input?.before ?? null;
       const olderRequests = sentPayloads.filter((payload) => payload.request?.input?.before);
