@@ -306,6 +306,7 @@ export function ReviewPanel({
     ...reusableForProvider.map((entry) => ({
       value: entry.reviewerThreadId,
       label: `Reuse: ${entry.label}`,
+      title: `Reuse: ${entry.label}`,
     })),
   ];
   const session = sessionOptions.find((option) => option.value === selectedReviewerThreadId);
@@ -431,12 +432,14 @@ export function ReviewPanel({
         value: shownEffort || (isReuse ? "current" : "default"),
       }),
       h(SettingPill, {
-        className: sessionAutoSwitched ? "reviewer-session-autoswitched" : "",
+        className: "reviewer-session-pill" + (sessionAutoSwitched ? " reviewer-session-autoswitched" : ""),
         id: `${id}-reviewer-session`,
         key: "session",
         label: "Session",
+        menuClassName: "reviewer-session-menu",
         onSelect: selectReviewerSession,
         options: markSelected(sessionOptions, selectedReviewerThreadId),
+        title: session?.label,
         value: session?.chip || session?.label,
       }),
       h(SettingPill, {

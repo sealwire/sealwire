@@ -10409,13 +10409,19 @@ button.team-role-name.is-link {
   gap: 8px;
 }
 
-.setting-pill { position: relative; }
+.setting-pill {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+}
 
 /* Square-cornered chips of one height: a pill read as a tag, not a control. */
 .setting-pill-trigger {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  min-width: 0;
+  max-width: 100%;
   height: 30px;
   padding: 0 10px;
   border: 1px solid var(--menu-border);
@@ -10450,7 +10456,10 @@ button.team-role-name.is-link {
   background: transparent;
 }
 
-.setting-pill-label { color: var(--menu-hint); }
+.setting-pill-label {
+  flex: 0 0 auto;
+  color: var(--menu-hint);
+}
 .setting-pill-value {
   min-width: 0;
   overflow: hidden;
@@ -10458,6 +10467,7 @@ button.team-role-name.is-link {
 }
 
 .setting-pill-tag {
+  flex: 0 0 auto;
   padding: 1px 6px;
   border-radius: var(--r-pill);
   background: var(--status-neutral-bg);
@@ -10529,6 +10539,14 @@ button.team-role-name.is-link {
   white-space: nowrap;
 }
 
+.reviewer-session-menu .setting-pill-option-label {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .setting-pill-option-subtitle {
   color: var(--text-faint);
   font-size: var(--text-xs);
@@ -10594,6 +10612,7 @@ button.team-role-name.is-link {
   color: var(--provider-claude-mark);
 }
 
+.setting-pill-caret,
 .model-picker-caret {
   flex: none;
   display: inline-flex;
@@ -10601,11 +10620,13 @@ button.team-role-name.is-link {
   transition: transform 120ms ease;
 }
 
+.setting-pill-caret svg,
 .model-picker-caret svg {
   width: 10px;
   height: 10px;
 }
 
+.setting-pill-trigger[aria-expanded="true"] .setting-pill-caret,
 .model-picker-trigger[aria-expanded="true"] .model-picker-caret {
   transform: rotate(180deg);
 }
@@ -10860,6 +10881,13 @@ button.team-role-name.is-link {
      entire body" and parked every one of them under the clip. Placement is
      measured in JS now — don't reintroduce a CSS-only anchor here. */
   .session-dialog-body { overflow-y: auto; }
+
+  .reviewer-session-pill { flex-basis: 100%; }
+  .reviewer-session-pill .setting-pill-trigger { width: 100%; }
+  .reviewer-session-pill .setting-pill-value {
+    flex: 1 1 auto;
+    text-align: left;
+  }
 
   .session-dialog-hint { order: 2; text-align: center; }
   .session-dialog-actions { order: 1; }

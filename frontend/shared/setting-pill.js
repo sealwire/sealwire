@@ -3,6 +3,8 @@
 
 import React, { useCallback, useId, useRef, useState } from "react";
 
+import { CHEVRON_DOWN_SVG } from "../svg.js";
+import { MenuGlyph } from "./context-menu-react.js";
 import { MenuPortal, useAnchoredMenu } from "./use-anchored-menu.js";
 import { useDismissableMenu } from "./use-dismissable-menu.js";
 
@@ -14,10 +16,12 @@ export function SettingPill({
   id = null,
   inherited = false,
   label,
+  menuClassName = "",
   onOpen = null,
   onSelect = null,
   options = null,
   tag = null,
+  title = undefined,
   value,
 }) {
   const [open, setOpen] = useState(false);
@@ -45,6 +49,7 @@ export function SettingPill({
         key: option.value,
         onClick: () => choose(option),
         role: "menuitemradio",
+        title: option.title,
         type: "button",
       },
       h(
@@ -80,12 +85,13 @@ export function SettingPill({
           setOpen((wasOpen) => !wasOpen);
         },
         ref: triggerRef,
+        title,
         type: "button",
       },
       h("span", { className: "setting-pill-label" }, label),
       h("span", { className: "setting-pill-value" }, value),
       tag ? h("span", { className: "setting-pill-tag" }, tag) : null,
-      h("span", { "aria-hidden": "true", className: "project-switcher-caret" })
+      h(MenuGlyph, { className: "setting-pill-caret", svg: CHEVRON_DOWN_SVG })
     ),
     // Portalled to <body>: see use-anchored-menu.js. The menu is placed in
     // viewport coordinates, which only means the viewport outside the dialog's
@@ -95,7 +101,12 @@ export function SettingPill({
       { anchorRef: triggerRef, open },
       h(
         "div",
-        { className: "setting-pill-menu", id: menuId, ref: assignMenuRef, role: "menu" },
+        {
+          className: "setting-pill-menu" + (menuClassName ? ` ${menuClassName}` : ""),
+          id: menuId,
+          ref: assignMenuRef,
+          role: "menu",
+        },
         (options || []).map(renderOption)
       )
     )

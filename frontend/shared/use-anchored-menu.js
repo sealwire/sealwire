@@ -180,13 +180,11 @@ export function useAnchoredMenu({ menuRef, open, triggerRef }) {
     delete menu.dataset.placed;
     menu.style.visibility = "hidden";
     menu.style.position = "fixed";
-    // Measure UNCONSTRAINED, or placement is computed for a size the menu will not
-    // keep. `none` rather than `""`: clearing the inline value only uncovers the
-    // stylesheet's own cap. `right`/`bottom` too, because a menu anchored the other
-    // way in CSS keeps that inset and, with both set, stretches instead of sizing
-    // to its content.
+    // Opposing CSS insets would stretch the fixed menu instead of sizing to its content.
     menu.style.right = "auto";
     menu.style.bottom = "auto";
+    // A keyboard or pinch zoom changes both the size and offset of the visible bounds.
+    const bounds = placementBounds(view, menu);
     // The cap the menu sets for ITSELF, read with the inline value cleared so the
     // stylesheet's own rule shows through. A panel that caps its height and scrolls
     // inside (the workspace picker is 420px over a scrolling row list) means it, so
@@ -197,25 +195,16 @@ export function useAnchoredMenu({ menuRef, open, triggerRef }) {
     const declaredMaxHeight = Number.parseFloat(view.getComputedStyle(menu).maxHeight);
     const selfCap = Number.isFinite(declaredMaxHeight) ? declaredMaxHeight : Infinity;
     menu.style.maxHeight = "none";
-    menu.style.maxWidth = "none";
+    // Measure height at the final width, or wrapping rows grow over an upward trigger.
+    menu.style.maxWidth = `${Math.round(bounds.width - CONTEXT_MENU_MARGIN_PX * 2)}px`;
     // Park at the containing block's origin. The rect this produces does double
-    // duty: its size is the menu's natural size, and its position IS the origin
+    // duty: its size is the menu's width-constrained size, and its position IS the origin
     // of whatever frame `fixed` resolves against here — (0,0) when that is the
     // viewport, the dialog's corner when a transform has intervened.
     menu.style.left = "0px";
     menu.style.top = "0px";
     const originBox = menu.getBoundingClientRect();
     const triggerBox = trigger.getBoundingClientRect();
-
-    // The visual viewport is the honest one on a phone: with a software keyboard
-    // up or a pinch zoom active, `innerHeight` still reports the full screen and
-    // the menu would be placed behind the keyboard.
-    //
-    // It is also OFFSET from the layout viewport, and `getBoundingClientRect` is
-    // in layout coordinates — so the two have to be reconciled rather than mixed.
-    // Placement runs in visual-viewport space and the result is converted back,
-    // because `position: fixed` resolves against the layout viewport.
-    const bounds = placementBounds(view, menu);
 
     const placement = placeAnchoredMenu({
       // Capped, so placement decides where a menu of the size it will ACTUALLY be
@@ -235,9 +224,6 @@ export function useAnchoredMenu({ menuRef, open, triggerRef }) {
     menu.style.left = `${Math.round(placement.left + bounds.left - originBox.left)}px`;
     menu.style.top = `${Math.round(placement.top + bounds.top - originBox.top)}px`;
     menu.style.maxHeight = `${Math.round(Math.min(placement.maxHeight, selfCap))}px`;
-    // A narrow screen is where the menu's own min-width would push it past the
-    // edge; cap it here rather than duplicating the margin in CSS.
-    menu.style.maxWidth = `${Math.round(bounds.width - CONTEXT_MENU_MARGIN_PX * 2)}px`;
     // Exposed so styling can point a caret the right way and so tests can assert
     // the flip without recomputing geometry.
     menu.dataset.placement = placement.placement;
