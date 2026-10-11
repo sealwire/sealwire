@@ -172,7 +172,7 @@ async fn postgres_credential_admission_migrates_old_tokens_and_recognizes_anothe
 }
 
 #[tokio::test]
-async fn postgres_rotation_cannot_restore_a_concurrently_revoked_device() {
+async fn postgres_rotation_cannot_restore_a_concurrently_revoked_credential() {
     assert_postgres_rotation_revoke_conflict(false).await;
 }
 
@@ -187,44 +187,70 @@ async fn assert_postgres_rotation_revoke_conflict(rotation_first: bool) {
     };
     let pool = connect_and_init(&url).await;
     truncate_all(&pool).await;
-    let original = store_from(
-        vec![relay_reg("race", None)],
-        vec![client_ident("race")],
-        vec![device_grant("race", None)],
-        vec![],
-    );
-    save_public_control_postgres(&pool, &PublicControlStateStore::default(), &original)
-        .await
-        .expect("seed originals");
-    let mut rotated = original.clone();
-    let mut grant = rotated.grants_by_hash.remove("race").unwrap();
-    grant.refresh_token_hash = "race-new".into();
-    rotated
-        .grants_by_hash
-        .insert(grant.refresh_token_hash.clone(), grant);
-    let mut revoked = original.clone();
-    revoked.grants_by_hash.clear();
-    let (first, second) = if rotation_first {
-        (&rotated, &revoked)
-    } else {
-        (&revoked, &rotated)
-    };
-    save_public_control_postgres(&pool, &original, first)
-        .await
-        .expect("first writer commits");
-    let result = save_public_control_postgres(&pool, &original, second).await;
-    let actual = load_public_control_postgres(&pool)
-        .await
-        .expect("load final state");
-    truncate_all(&pool).await;
-    assert!(
-        result.is_err(),
-        "a stale write must fail instead of restoring access or reporting a false revoke"
-    );
-    assert_eq!(
-        &actual, first,
-        "a failed stale write must leave committed authorization intact"
-    );
+    for target in [
+        RefreshWaitTarget::Relay,
+        RefreshWaitTarget::Client,
+        RefreshWaitTarget::Device,
+    ] {
+        let original = store_from(
+            vec![relay_reg("race", None)],
+            vec![client_ident("race")],
+            vec![device_grant("race", None)],
+            vec![],
+        );
+        save_public_control_postgres(&pool, &PublicControlStateStore::default(), &original)
+            .await
+            .expect("seed originals");
+        let mut rotated = original.clone();
+        let mut revoked = original.clone();
+        match target {
+            RefreshWaitTarget::Relay => {
+                let mut registration = rotated.relay_registrations_by_hash.remove("race").unwrap();
+                registration.refresh_token_hash = "race-new".into();
+                rotated
+                    .relay_registrations_by_hash
+                    .insert(registration.refresh_token_hash.clone(), registration);
+                revoked.relay_registrations_by_hash.clear();
+            }
+            RefreshWaitTarget::Client => {
+                let mut client = rotated.client_registrations_by_hash.remove("race").unwrap();
+                client.refresh_token_hash = "race-new".into();
+                rotated
+                    .client_registrations_by_hash
+                    .insert(client.refresh_token_hash.clone(), client);
+                revoked.client_registrations_by_hash.clear();
+            }
+            RefreshWaitTarget::Device => {
+                let mut grant = rotated.grants_by_hash.remove("race").unwrap();
+                grant.refresh_token_hash = "race-new".into();
+                rotated
+                    .grants_by_hash
+                    .insert(grant.refresh_token_hash.clone(), grant);
+                revoked.grants_by_hash.clear();
+            }
+        }
+        let (first, second) = if rotation_first {
+            (&rotated, &revoked)
+        } else {
+            (&revoked, &rotated)
+        };
+        save_public_control_postgres(&pool, &original, first)
+            .await
+            .expect("first writer commits");
+        let result = save_public_control_postgres(&pool, &original, second).await;
+        let actual = load_public_control_postgres(&pool)
+            .await
+            .expect("load final state");
+        truncate_all(&pool).await;
+        assert!(
+            result.is_err(),
+            "a stale write must fail instead of restoring access or reporting a false revoke"
+        );
+        assert_eq!(
+            &actual, first,
+            "a failed stale write must leave committed authorization intact"
+        );
+    }
 }
 
 /// The diff-save must apply adds, in-place updates, AND deletes so a reload
@@ -311,13 +337,8 @@ async fn postgres_targeted_save_applies_add_update_delete() {
     truncate_all(&pool).await;
 }
 
-/// Credential rotation (relay re-enroll, client rotation, device re-registration)
-/// changes the PK `refresh_token_hash` while KEEPING a secondary UNIQUE column
-/// (relay_id / broker_room_id / relay_verify_key / client_id / client_verify_key /
-/// `(relay_id, broker_room_id, device_id)`). The diff-save must delete the old row
-/// BEFORE inserting the new one, or the insert collides with the surviving old row
-/// on that secondary unique index and the whole transaction aborts — wedging the
-/// control plane. This is the regression guard for that ordering.
+/// Rotating a primary token hash must preserve unique identity columns without
+/// colliding with the previous credential's row.
 #[tokio::test]
 async fn postgres_targeted_save_handles_credential_rotation() {
     let Some((url, _serial)) = test_url().await else {
@@ -1083,6 +1104,223 @@ async fn postgres_refresh_bursts_leave_database_capacity_for_writes() {
             .expect("a reconnect burst should wait for its refresh slot");
     }
     assert_eq!(plane.inner.full_load_count.load(Ordering::SeqCst), 0);
+    truncate_all(&pool).await;
+}
+
+#[derive(Clone, Copy)]
+enum RefreshWaitTarget {
+    Relay,
+    Client,
+    Device,
+}
+
+#[tokio::test]
+async fn postgres_signed_refresh_waiting_on_relay_rotation_succeeds() {
+    assert_signed_refresh_waiting_on_credential_change(RefreshWaitTarget::Relay, true).await;
+}
+
+#[tokio::test]
+async fn postgres_signed_refresh_waiting_on_client_rotation_succeeds() {
+    assert_signed_refresh_waiting_on_credential_change(RefreshWaitTarget::Client, true).await;
+}
+
+#[tokio::test]
+async fn postgres_signed_refresh_waiting_on_device_rotation_succeeds() {
+    assert_signed_refresh_waiting_on_credential_change(RefreshWaitTarget::Device, true).await;
+}
+
+#[tokio::test]
+async fn postgres_signed_refresh_waiting_on_relay_revocation_is_refused() {
+    assert_signed_refresh_waiting_on_credential_change(RefreshWaitTarget::Relay, false).await;
+}
+
+#[tokio::test]
+async fn postgres_signed_refresh_waiting_on_client_revocation_is_refused() {
+    assert_signed_refresh_waiting_on_credential_change(RefreshWaitTarget::Client, false).await;
+}
+
+#[tokio::test]
+async fn postgres_signed_refresh_waiting_on_device_revocation_is_refused() {
+    assert_signed_refresh_waiting_on_credential_change(RefreshWaitTarget::Device, false).await;
+}
+
+async fn assert_signed_refresh_waiting_on_credential_change(
+    target: RefreshWaitTarget,
+    rotate: bool,
+) {
+    use ed25519_dalek::Signer;
+    let Some((url, _serial)) = test_url().await else {
+        return;
+    };
+    let pool = connect_and_init(&url).await;
+    truncate_all(&pool).await;
+    let plane = postgres_plane(pool.clone(), false);
+    let key = ed25519_dalek::SigningKey::from_bytes(&[91; 32]);
+    let relay = relay_reg("waiting", Some("before"));
+    let mut client = client_ident("waiting");
+    client.client_verify_key = STANDARD.encode(key.verifying_key().to_bytes());
+    client.client_id = plane
+        .inner
+        .credential_key
+        .client_id(&client.client_verify_key);
+    client.refresh_token_hash = sha256_hex(
+        &plane
+            .inner
+            .credential_key
+            .mint(CredentialKind::Client, &client.client_id),
+    );
+    let device = device_grant("waiting", Some(100));
+    let mut grant = client_relay_grant(&client.client_id, &relay.relay_id);
+    grant.broker_room_id = relay.broker_room_id.clone();
+    grant.device_id = device.device_id.clone();
+    let original = store_from(
+        vec![relay.clone()],
+        vec![client.clone()],
+        vec![device.clone()],
+        vec![grant],
+    );
+    save_public_control_postgres(&pool, &PublicControlStateStore::default(), &original)
+        .await
+        .unwrap();
+    *plane.inner.state.lock().await = original.clone();
+    let PublicControlPersistence::Postgres { last_saved, .. } = &plane.inner.persistence else {
+        unreachable!()
+    };
+    *last_saved.lock().await = original.clone();
+
+    let origin = "https://broker.test";
+    let mut request = CredentialRefreshChallengeRequest {
+        client_id: client.client_id.clone(),
+        broker_room_id: Some(relay.broker_room_id.clone()),
+        device_id: Some(device.device_id.clone()),
+        nonce: "waiting-rotation".into(),
+        signature: String::new(),
+    };
+    request.signature = STANDARD.encode(
+        key.sign(credential_refresh_init_message(&request, origin).as_bytes())
+            .to_bytes(),
+    );
+    let challenge = plane
+        .create_credential_refresh_challenge(request, origin)
+        .await
+        .unwrap();
+    let mut changed = original.clone();
+    let table = match target {
+        RefreshWaitTarget::Relay => {
+            let mut replacement = changed
+                .relay_registrations_by_hash
+                .remove(&relay.refresh_token_hash)
+                .unwrap();
+            if rotate {
+                replacement.refresh_token_hash = "rotated-relay".into();
+                replacement.relay_label = Some("after".into());
+                changed
+                    .relay_registrations_by_hash
+                    .insert(replacement.refresh_token_hash.clone(), replacement);
+            }
+            "public_relay_registrations"
+        }
+        RefreshWaitTarget::Client => {
+            let mut replacement = changed
+                .client_registrations_by_hash
+                .remove(&client.refresh_token_hash)
+                .unwrap();
+            if rotate {
+                replacement.refresh_token_hash = "rotated-client".into();
+                replacement.client_label = Some("after".into());
+                changed
+                    .client_registrations_by_hash
+                    .insert(replacement.refresh_token_hash.clone(), replacement);
+            }
+            "public_client_identities"
+        }
+        RefreshWaitTarget::Device => {
+            let mut replacement = changed
+                .grants_by_hash
+                .remove(&device.refresh_token_hash)
+                .unwrap();
+            if rotate {
+                replacement.refresh_token_hash = "rotated-device".into();
+                replacement.last_seen = Some(200);
+                changed
+                    .grants_by_hash
+                    .insert(replacement.refresh_token_hash.clone(), replacement);
+            }
+            "public_device_grants"
+        }
+    };
+    let mut writer = pool.begin().await.unwrap();
+    persist_public_control_delta(&mut writer, &original, &changed)
+        .await
+        .unwrap();
+    let refreshing = {
+        let plane = plane.clone();
+        tokio::spawn(async move {
+            plane
+                .refresh_credentials(
+                    CredentialRefreshRequest {
+                        challenge_id: challenge.challenge_id.clone(),
+                        signature: STANDARD.encode(
+                            key.sign(credential_refresh_message(&challenge).as_bytes())
+                                .to_bytes(),
+                        ),
+                    },
+                    origin,
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE $1)")
+                .bind(format!("SELECT * FROM {table}%")).fetch_one(&pool).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("signed refresh must wait on the changing credential row");
+    writer.commit().await.unwrap();
+    let result = refreshing.await.unwrap();
+    let loaded = load_public_control_postgres(&pool).await.unwrap();
+    if rotate {
+        let (response, client_token, device_token) =
+            result.expect("credential rotation must not look like revocation");
+        assert_eq!(response.client_id, client.client_id);
+        assert_eq!(response.device.unwrap().device_id, device.device_id);
+        let restarted = postgres_plane(pool.clone(), false);
+        restarted.issue_client_session(&client_token).await.unwrap();
+        restarted
+            .issue_device_session(&device_token.unwrap())
+            .await
+            .unwrap();
+        match target {
+            RefreshWaitTarget::Relay => assert_eq!(
+                loaded
+                    .registration_for_verify_key(relay.relay_verify_key.as_ref().unwrap())
+                    .unwrap()
+                    .relay_label
+                    .as_deref(),
+                Some("after")
+            ),
+            RefreshWaitTarget::Client => assert_eq!(
+                loaded
+                    .client_identity_for_id(&client.client_id)
+                    .unwrap()
+                    .client_label
+                    .as_deref(),
+                Some("after")
+            ),
+            RefreshWaitTarget::Device => assert!(loaded
+                .grants_by_hash
+                .values()
+                .all(|grant| grant.last_seen != Some(100))),
+        }
+    } else {
+        assert_eq!(result.unwrap_err(), "credential refresh is invalid");
+        assert_eq!(
+            loaded, changed,
+            "a rejected refresh must not restore revoked rows"
+        );
+    }
     truncate_all(&pool).await;
 }
 

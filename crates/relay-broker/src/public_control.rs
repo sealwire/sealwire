@@ -3795,13 +3795,7 @@ async fn save_public_control_postgres(
         .await
         .map_err(|error| format!("failed to begin public control-plane transaction: {error}"))?;
 
-    // Rotations reuse unique identity columns, so all deletes must precede all upserts.
-    // Conditional deletes prevent a stale broker from restoring revoked credentials.
-    delete_removed_public_control_rows(&mut tx, prev, next).await?;
-    upsert_relay_registrations(&mut tx, prev, next).await?;
-    upsert_client_identities(&mut tx, prev, next).await?;
-    upsert_device_grants(&mut tx, prev, next).await?;
-    upsert_client_relay_grants(&mut tx, prev, next).await?;
+    persist_public_control_delta(&mut tx, prev, next).await?;
 
     tx.commit()
         .await
@@ -3809,46 +3803,57 @@ async fn save_public_control_postgres(
     Ok(())
 }
 
-async fn delete_removed_public_control_rows(
+async fn persist_public_control_delta(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     prev: &PublicControlStateStore,
     next: &PublicControlStateStore,
 ) -> Result<(), String> {
-    for hash in prev.relay_registrations_by_hash.keys() {
+    reconcile_removed_public_control_rows(tx, prev, next).await?;
+    upsert_relay_registrations(tx, prev, next).await?;
+    upsert_client_identities(tx, prev, next).await?;
+    upsert_device_grants(tx, prev, next).await?;
+    upsert_client_relay_grants(tx, prev, next).await?;
+    Ok(())
+}
+
+async fn reconcile_removed_public_control_rows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    prev: &PublicControlStateStore,
+    next: &PublicControlStateStore,
+) -> Result<(), String> {
+    for (hash, registration) in &prev.relay_registrations_by_hash {
         if !next.relay_registrations_by_hash.contains_key(hash) {
-            let deleted =
-                sqlx::query("DELETE FROM public_relay_registrations WHERE refresh_token_hash = $1")
-                    .bind(hash)
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(|error| {
-                        format!("failed to delete public_relay_registrations: {error}")
-                    })?;
-            require_changed_credential(deleted.rows_affected())?;
+            let replacement = next
+                .relay_registrations_by_hash
+                .values()
+                .find(|candidate| candidate.relay_id == registration.relay_id)
+                .map(|candidate| candidate.refresh_token_hash.as_str());
+            rotate_or_delete_credential(tx, "public_relay_registrations", hash, replacement)
+                .await?;
         }
     }
-    for hash in prev.client_registrations_by_hash.keys() {
+    for (hash, client) in &prev.client_registrations_by_hash {
         if !next.client_registrations_by_hash.contains_key(hash) {
-            let deleted =
-                sqlx::query("DELETE FROM public_client_identities WHERE refresh_token_hash = $1")
-                    .bind(hash)
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(|error| {
-                        format!("failed to delete public_client_identities: {error}")
-                    })?;
-            require_changed_credential(deleted.rows_affected())?;
+            let replacement = next
+                .client_registrations_by_hash
+                .values()
+                .find(|candidate| candidate.client_id == client.client_id)
+                .map(|candidate| candidate.refresh_token_hash.as_str());
+            rotate_or_delete_credential(tx, "public_client_identities", hash, replacement).await?;
         }
     }
-    for hash in prev.grants_by_hash.keys() {
+    for (hash, grant) in &prev.grants_by_hash {
         if !next.grants_by_hash.contains_key(hash) {
-            let deleted =
-                sqlx::query("DELETE FROM public_device_grants WHERE refresh_token_hash = $1")
-                    .bind(hash)
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(|error| format!("failed to delete public_device_grants: {error}"))?;
-            require_changed_credential(deleted.rows_affected())?;
+            let replacement = next
+                .grants_by_hash
+                .values()
+                .find(|candidate| {
+                    candidate.relay_id == grant.relay_id
+                        && candidate.broker_room_id == grant.broker_room_id
+                        && candidate.device_id == grant.device_id
+                })
+                .map(|candidate| candidate.refresh_token_hash.as_str());
+            rotate_or_delete_credential(tx, "public_device_grants", hash, replacement).await?;
         }
     }
     for (key, grant) in &prev.client_relay_grants_by_key {
@@ -3864,6 +3869,31 @@ async fn delete_removed_public_control_rows(
         }
     }
     Ok(())
+}
+
+async fn rotate_or_delete_credential(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    table: &'static str,
+    old_hash: &str,
+    replacement: Option<&str>,
+) -> Result<(), String> {
+    // Keeping the row lets waiting FOR UPDATE readers follow a rotation.
+    // Matching the old hash prevents stale writers from restoring revoked credentials.
+    let sql = if replacement.is_some() {
+        format!("UPDATE {table} SET refresh_token_hash = $2 WHERE refresh_token_hash = $1")
+    } else {
+        format!("DELETE FROM {table} WHERE refresh_token_hash = $1")
+    };
+    let query = sqlx::query(&sql).bind(old_hash);
+    let query = match replacement {
+        Some(hash) => query.bind(hash),
+        None => query,
+    };
+    let changed = query
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("failed to rotate or delete {table}: {error}"))?;
+    require_changed_credential(changed.rows_affected())
 }
 
 async fn upsert_relay_registrations(
