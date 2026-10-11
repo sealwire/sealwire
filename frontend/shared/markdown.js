@@ -1,9 +1,11 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { isTauri } from "@tauri-apps/api/core";
 import { copyTextToClipboard } from "./clipboard.js";
 
 const h = React.createElement;
+export const MarkdownEditorLinksContext = React.createContext(false);
 
 /**
  * Render transcript text as markdown into React elements.
@@ -33,7 +35,7 @@ const h = React.createElement;
 
 const SAFE_URL_SCHEMES = new Set(["http:", "https:", "mailto:", "tel:"]);
 const BLOCKED_HREF = "#blocked";
-const FILE_LOCATION_RE = /^(?:[a-z]:(?:[\\/]|%5c)|[^:/\\?#]+\.[^:/\\?#]+:\d+(?::\d+)?$)/i;
+const FILE_LOCATION_RE = /^(?:[a-z]:(?:[\\/]|%5c)|[^:/\\?#]+\.[^:/\\?#]+:\d+(?:-\d+|:\d+)?$)/i;
 const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
 
 function safeUrl(url) {
@@ -75,7 +77,36 @@ function AltOnlyImage({ alt }) {
   return alt ? h(React.Fragment, null, alt) : null;
 }
 
+function editorFileHref(href) {
+  const hash = href.indexOf("#");
+  let file = hash < 0 ? href : href.slice(0, hash);
+  const fragment = hash < 0 ? null : /^L(\d+)(?:C(\d+))?(?:-L?\d+)?$/.exec(href.slice(hash + 1));
+  if (/:\d+-\d+$/.test(file) || (hash >= 0 && !fragment)) return null;
+  const position = /:(\d+)(?::(\d+))?$/.exec(file);
+  if (position) file = file.slice(0, position.index);
+  const line = fragment?.[1] || position?.[1];
+  const column = fragment?.[2] || position?.[2];
+  try {
+    file = decodeURIComponent(file);
+  } catch {
+    // A literal percent sign in a filename need not be a URL escape.
+  }
+  if (/^[a-z]:[\\/]/i.test(file)) file = file.replace(/\\/g, "/");
+  if (CONTROL_CHAR_RE.test(file)) return null;
+  const drive = /^([a-z]:)\//i.exec(file);
+  // A relative reference may belong to a different worktree than the session.
+  if ((!drive && !file.startsWith("/")) || file.startsWith("//")) return null;
+  const parts = [];
+  for (const part of file.slice(drive ? drive[0].length : 1).split("/")) {
+    if (part === "..") parts.pop();
+    else if (part && part !== ".") parts.push(encodeURIComponent(part));
+  }
+  const path = `/${drive ? `${drive[1]}/` : ""}${parts.join("/")}`;
+  return `vscode://file${path}${line ? `:${line}${column ? `:${column}` : ""}` : ""}`;
+}
+
 function SafeLink({ href, children, node, ...rest }) {
+  const openFileLinksInEditor = React.useContext(MarkdownEditorLinksContext);
   if (href && !/^(?:[#?]|\/\/)/.test(href)
     && (FILE_LOCATION_RE.test(href) || !/^[a-z][a-z\d+.-]*:/i.test(href))) {
     let path = href;
@@ -87,6 +118,24 @@ function SafeLink({ href, children, node, ...rest }) {
     // Copied paths may be pasted into a shell; hidden controls must not reach it.
     if (CONTROL_CHAR_RE.test(path)) {
       return h(React.Fragment, null, children);
+    }
+    // The desktop WebView has no external protocol opener.
+    const editorHref = openFileLinksInEditor && !isTauri() ? editorFileHref(href) : null;
+    if (editorHref) {
+      return h(
+        "a",
+        {
+          ...rest,
+          href: editorHref,
+          className: "markdown-file-link",
+          title: `Open in VS Code: ${path}`,
+          "aria-label": `Open in VS Code: ${path}`,
+          target: "_blank",
+          rel: "noopener noreferrer nofollow",
+          onClick: (event) => event.stopPropagation(),
+        },
+        children
+      );
     }
     return h(
       "span",

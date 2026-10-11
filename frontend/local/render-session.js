@@ -1317,6 +1317,7 @@ export function createSessionRenderer({
     const localUi = readLocalUiState(state.localUiStore);
     return {
       currentCwd: session?.current_cwd || state.selectedCwd || "",
+      openFileLinksInEditor: true,
       detailEntries: buildExpandedTranscriptDetailEntries(state, {
         expandedItemIds: localUi.transcriptExpandedItemIds,
         threadId: activeThreadId,
@@ -2120,6 +2121,7 @@ export function createSessionRenderer({
               // from this pane could mutate a different one.
               transcriptOptions: {
                 currentCwd: session?.current_cwd || state.selectedCwd || "",
+                openFileLinksInEditor: true,
                 expandedKeys: localUi.transcriptExpandedItemIds,
                 loadingItemIds: localUi.transcriptLoadingItemIds,
                 canFork: false,
