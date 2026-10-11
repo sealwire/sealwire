@@ -927,7 +927,7 @@ pub fn provider_display_name(provider_key: &str) -> &str {
         .unwrap_or(provider_key)
 }
 
-const PROVIDER_START_TIMEOUT_SECS: u64 = 30;
+const PROVIDER_START_TIMEOUT_SECS: u64 = 10;
 
 fn provider_start_timeout_secs() -> u64 {
     std::env::var("AGENT_RELAY_PROVIDER_START_TIMEOUT_SECS")
@@ -1439,7 +1439,7 @@ mod classify_tests {
     #[test]
     fn timeout_is_failed() {
         assert_eq!(
-            classify_spawn_error("timed out after 30s while starting Codex"),
+            classify_spawn_error("timed out after 10s while starting Codex"),
             ProviderStatusKind::Failed
         );
     }
