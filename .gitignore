@@ -41,8 +41,7 @@ node_modules/
 /.sealwire/
 /.agent-relay
 
-# Web-push VAPID private key material — never commit. The deployed key lives on
-# the Railway /data volume. Belt-and-suspenders.
+# Web-push private keys and persisted broker state must never reach a commit.
 *.key
 /data/
 
@@ -73,10 +72,8 @@ crates/sealwire-private/src/*
 !crates/sealwire-private/src/lib.rs
 !crates/sealwire-private/frontend/
 crates/sealwire-private/frontend/*
-# Every public placeholder needs its own line here. Being tracked is not enough:
-# ignore rules do not apply to tracked paths, so a missing exception still builds
-# from a checkout — but tools that pack the repo through .gitignore (`railway up`)
-# drop the file, and the broker image then fails on "Could not resolve".
+# Archive tools can omit tracked placeholders that match ignore rules.
+# Every public placeholder needs its own exception so broker images can build.
 !crates/sealwire-private/frontend/task-diff-react.js
 !crates/sealwire-private/frontend/task-review-screen.js
 !crates/sealwire-private/frontend/task-board-react.js

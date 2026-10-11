@@ -742,9 +742,8 @@ enum PublicControlPersistence {
         /// Reload the whole state from Postgres before every operation. Only
         /// needed when multiple broker instances share this database (so each
         /// sees the others' writes). Defaults to `false`: with a single instance
-        /// (self-host railway example `numReplicas = 1`) the in-memory state is authoritative,
-        /// and reloading every op is pure latency. Re-enable via
-        /// `RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE=1` before scaling out.
+        /// the in-memory state is authoritative, and reloading every op adds latency.
+        /// Enable `RELAY_BROKER_PUBLIC_POSTGRES_RELOAD_BEFORE_USE=1` before scaling out.
         reload_before_use: bool,
         /// Snapshot of what is currently persisted. `save()` diffs the live state
         /// against this and writes only the rows that actually changed (targeted

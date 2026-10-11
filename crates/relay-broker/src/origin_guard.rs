@@ -1,6 +1,6 @@
 //! Edge-only origin gate. With a CDN (Cloudflare) in front, the platform origin
-//! (e.g. `*.up.railway.app`) is still publicly routable, so the broker refuses any
-//! request that lacks the secret header only the edge adds.
+//! is still publicly routable, so the broker refuses requests without the secret
+//! header only the edge adds.
 
 use axum::{
     extract::{Request, State},
@@ -23,7 +23,7 @@ const MAX_ORIGIN_AUTH_SECRET_LEN: usize = 512;
 const MIN_ORIGIN_AUTH_SECRET_DISTINCT_BYTES: usize = 10;
 const MAX_HEADER_NAME_LEN: usize = 64;
 
-// Railway's deploy healthcheck calls the origin directly, so it never carries the edge header.
+// Deployment health probes call the origin directly without the edge header.
 const EXEMPT_PATHS: &[&str] = &["/api/health"];
 
 // Setting any of these at the edge would clobber auth, framing, the WebSocket upgrade,

@@ -1,20 +1,19 @@
 # Self-host OpenAccess broker (example)
 
-This directory is an **explicit** Railway / Docker example for operators who
-want to run the **public** `relay-broker` binary themselves (OpenAccess /
-self-hosted auth).
-
-It is **not** SealWire Cloud.
+Use the included [Docker Compose setup](../../docker-compose.yml) to run the
+public `relay-broker` binary on a server you control (OpenAccess / self-hosted
+auth). Follow the [deployment guide](../../DEPLOYMENT.md#use-your-own-broker)
+to configure the broker and connect your relay.
 
 | Path | What it is |
 |------|------------|
 | `npx sealwire cloud` | Attaches a local relay to the **hosted licensed** Cloud broker |
-| `docker/broker.Dockerfile` + this example | Builds/runs the **public** OpenAccess `relay-broker` image |
+| `docker-compose.yml` + `docker/broker.Dockerfile` | Builds/runs the **public** OpenAccess `relay-broker` image |
 
-To deploy self-host on Railway you must consciously point a service at
-`examples/self-host-broker/railway.toml` (or copy its contents). The public
-repository has **no** root `railway.toml` and **no** GitHub Action that runs
-`railway up` against the hosted Cloud service.
+Keep the broker's secrets and state across restarts. For `public` authentication
+mode, persist `RELAY_VAPID_KEY_PATH` and `RELAY_BROKER_PUBLIC_STATE_PATH` on a
+volume, or use `RELAY_BROKER_PUBLIC_POSTGRES_URL` for control-plane state.
+See the [configuration reference](../../.env.example) for the available settings.
 
 ## Public API admission
 

@@ -1933,7 +1933,7 @@ async fn bench_persistence_backends() {
     eprintln!("  JSON file read                       : {t_json_read:?}/op");
     eprintln!("  in-memory (reload_before_use=OFF)    : ~0 (no I/O at all)");
     eprintln!(
-        "NOTE: Railway adds network RTT per round-trip. full-rebuild does O(rows) round-trips \
+        "NOTE: A remote database adds network RTT per round-trip. full-rebuild does O(rows) round-trips \
          and reload does O(1) SELECTs returning all rows; targeted save + reload-off do far \
          fewer, which is the win you feel over the wire.\n"
     );

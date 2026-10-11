@@ -14,18 +14,8 @@ test("public repo has no root railway.toml that would silently deploy OpenAccess
   assert.equal(
     existsSync(path.join(repoRoot, "railway.toml")),
     false,
-    "root railway.toml must not exist; use examples/self-host-broker/railway.toml"
+    "Railway deployment configuration belongs in the private repository"
   );
-});
-
-test("self-host Railway example exists and starts relay-broker only", async () => {
-  const example = path.join(repoRoot, "examples/self-host-broker/railway.toml");
-  assert.ok(existsSync(example), "missing examples/self-host-broker/railway.toml");
-  const text = await readFile(example, "utf8");
-  assert.match(text, /SELF-HOST|OpenAccess|self-host/i);
-  assert.match(text, /exec relay-broker/);
-  assert.doesNotMatch(text, /exec sealwire-broker-private/);
-  assert.match(text, /docker\/broker\.Dockerfile/);
 });
 
 test("no GitHub workflow auto-deploys the public broker to Railway on main", async () => {

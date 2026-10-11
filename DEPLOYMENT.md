@@ -62,7 +62,7 @@ its ticket expires, and a connection it already has open is not closed then. To 
 off every device right away, change `RELAY_BROKER_TICKET_SECRET` on both sides,
 restart the broker, and pair the devices again.
 
-See the [self-hosted deployment example](examples/self-host-broker/README.md) and
+See the [self-hosted broker guide](examples/self-host-broker/README.md) and
 [configuration reference](.env.example) for other deployment options. Use HTTPS for internet access
 and keep the broker's settings and data across restarts so paired devices can
 reconnect.

@@ -10439,7 +10439,7 @@ async fn edge_requests_reach_the_public_control_plane() {
 }
 
 #[tokio::test]
-async fn railway_readiness_stays_reachable_without_the_edge_header() {
+async fn readiness_stays_reachable_without_the_edge_header() {
     let address = spawn_app_with_origin_guard(enforced_origin_guard()).await;
     let health = broker_health(address).await;
     assert_eq!(health.status, "ok");

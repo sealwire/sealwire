@@ -212,17 +212,8 @@ test("the broker image copies every repo file the frontend build configuration l
   }
 });
 
-// A tracked file that ALSO matches an ignore rule is a trap. Git keeps versioning it
-// (ignore rules do not apply to tracked paths), so it looks committed and builds fine
-// from a checkout — but every tool that packs a directory by consulting .gitignore
-// silently leaves it out. `railway up` is one of those, which is how the broker image
-// ended up without `crates/sealwire-private/frontend/task-review-screen.js`: its
-// sibling had an explicit un-ignore line and it did not, so the deploy failed on
-// "Could not resolve" while `docker build .` (which reads .dockerignore) was green.
-//
-// The private crate is deny-by-default with per-file exceptions on purpose, so the
-// next public placeholder added there will hit exactly this unless it gets its own
-// `!` line.
+// Archive tools can drop tracked placeholders that match ignore rules,
+// leaving the broker image without frontend imports that a checkout can build.
 test("no tracked file is excluded by the repo's own ignore rules", () => {
   const tracked = execFileSync("git", ["ls-files"], { cwd: repoRoot, encoding: "utf8" })
     .split("\n")
@@ -242,7 +233,7 @@ test("no tracked file is excluded by the repo's own ignore rules", () => {
     ignored,
     [],
     "these files are committed but match an ignore rule, so anything that packs the "
-      + "repo through .gitignore (`railway up`, most archive helpers) will omit them:\n  "
+      + "repo through .gitignore will omit them:\n  "
       + `${ignored.join("\n  ")}\n`
       + "Add an explicit `!` un-ignore line for each."
   );
