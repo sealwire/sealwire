@@ -153,13 +153,12 @@ async function main() {
 
     await assertActionButton(page, "rollback");
     await clickActionButton(page, "rollback");
-    await waitForFileContents(testFilePath, "old\n");
+    assert.equal(await fs.readFile(testFilePath, "utf8"), "old\n");
 
     await assertActionButton(page, "reapply");
     await clickActionButton(page, "reapply");
-    await waitForFileContents(testFilePath, "new\n");
-    await assertActionButton(page, "rollback");
     assert.equal(await fs.readFile(testFilePath, "utf8"), "new\n");
+    await assertActionButton(page, "rollback");
 
     console.log(
       JSON.stringify(
@@ -287,24 +286,24 @@ async function assertActionButton(page, direction) {
 
 async function clickActionButton(page, direction) {
   await assertActionButton(page, direction);
-  await page.click(actionButtonSelector(direction));
+  // git apply can briefly remove the file while replacing it. Check disk only
+  // after the handler has awaited git and acknowledged this action.
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (candidate) => candidate.request().method() === "POST"
+        && new URL(candidate.url()).pathname === `/api/file-changes/${encodeURIComponent(TURN_DIFF_ITEM_ID)}/apply`
+        && candidate.request().postDataJSON()?.direction === direction,
+      { timeout: TIMEOUT_MS }
+    ),
+    page.click(actionButtonSelector(direction)),
+  ]);
+  assert.ok(response.ok(), `${direction} returned HTTP ${response.status()}`);
+  const payload = await response.json();
+  assert.equal(payload.ok, true, `${direction} failed: ${JSON.stringify(payload)}`);
 }
 
 function actionButtonSelector(direction) {
   return `[data-file-change-action="${direction}"][data-item-id="${TURN_DIFF_ITEM_ID}"]`;
-}
-
-async function waitForFileContents(filePath, expected) {
-  const deadline = Date.now() + TIMEOUT_MS;
-  let lastContents = null;
-  while (Date.now() < deadline) {
-    lastContents = await fs.readFile(filePath, "utf8");
-    if (lastContents === expected) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  assert.equal(lastContents, expected);
 }
 
 async function dumpBrowserState(page) {
