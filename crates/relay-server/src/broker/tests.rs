@@ -99,6 +99,25 @@ fn temp_registration_path(prefix: &str) -> String {
 }
 
 async fn spawn_public_control_mock() -> String {
+    spawn_public_control_mock_with_revokes(
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        open_revoke_gate(),
+    )
+    .await
+}
+
+fn open_revoke_gate() -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(
+        tokio::sync::Semaphore::MAX_PERMITS,
+    ))
+}
+
+/// `fail_revokes` makes both revoke routes answer 503, as an outage would; each revoke
+/// first waits for a permit from `revoke_gate`, so a test can hold one in flight.
+async fn spawn_public_control_mock_with_revokes(
+    fail_revokes: Arc<std::sync::atomic::AtomicBool>,
+    revoke_gate: Arc<tokio::sync::Semaphore>,
+) -> String {
     async fn relay_enrollment_challenge(
         Json(request): Json<RelayEnrollmentChallengeRequest>,
     ) -> Json<RelayEnrollmentChallengeResponse> {
@@ -274,7 +293,26 @@ async fn spawn_public_control_mock() -> String {
         .route("/api/public/devices", post(device_grant))
         .route("/api/public/clients/grants", post(client_grant))
         .route("/api/public/devices/:device_id/revoke", post(revoke_device))
-        .route("/api/public/devices/revoke-others", post(revoke_other));
+        .route("/api/public/devices/revoke-others", post(revoke_other))
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let revoke = request.uri().path().contains("revoke");
+                let fail_revokes = fail_revokes.clone();
+                let revoke_gate = revoke_gate.clone();
+                async move {
+                    if revoke {
+                        revoke_gate.acquire().await.expect("gate open").forget();
+                    }
+                    if revoke && fail_revokes.load(std::sync::atomic::Ordering::SeqCst) {
+                        axum::response::IntoResponse::into_response(
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        )
+                    } else {
+                        next.run(request).await
+                    }
+                }
+            },
+        ));
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("listener should bind");
@@ -2705,7 +2743,20 @@ async fn broker_config_public_mode_requires_relay_refresh_token() {
 
 #[tokio::test]
 async fn broker_config_self_hosted_can_issue_expiring_device_join_credentials() {
-    let config = BrokerConfig::from_parts(
+    let config = self_hosted_config_with_ttl(Some("3600"))
+        .await
+        .expect("config should parse");
+
+    let credential = config
+        .device_broker_credential("device-1", None)
+        .await
+        .expect("device credential should mint");
+    assert!(credential.join_credential.expires_at.is_some());
+    assert_eq!(config.predicted_device_join_expires_at(100), Some(3700));
+}
+
+async fn self_hosted_config_with_ttl(ttl: Option<&str>) -> Result<BrokerConfig, String> {
+    BrokerConfig::from_parts(
         Some("ws://127.0.0.1:8788".to_string()),
         None,
         None,
@@ -2716,18 +2767,255 @@ async fn broker_config_self_hosted_can_issue_expiring_device_join_credentials() 
         None,
         None,
         None,
-        Some("3600".to_string()),
+        ttl.map(str::to_string),
     )
     .await
-    .expect("config should parse")
-    .expect("config should be enabled");
+    .map(|config| config.expect("config should be enabled"))
+}
 
+// The self-hosted broker checks tickets statelessly and cannot revoke one, so its
+// expiry is the only thing that stops a revoked phone from joining again.
+#[tokio::test]
+async fn self_hosted_device_join_tickets_expire_when_no_ttl_is_configured() {
+    let config = self_hosted_config_with_ttl(None).await.expect("config");
+    let now = unix_now();
     let credential = config
         .device_broker_credential("device-1", None)
         .await
         .expect("device credential should mint");
-    assert!(credential.join_credential.expires_at.is_some());
-    assert_eq!(config.device_join_ttl_secs(), Some(3600));
+    let expires_at = credential
+        .join_credential
+        .expires_at
+        .expect("a self-hosted device ticket must expire");
+    assert!(expires_at > now && expires_at <= now + 31 * 24 * 60 * 60);
+    assert!(config.predicted_device_join_expires_at(now).is_some());
+}
+
+#[tokio::test]
+async fn a_zero_self_hosted_device_join_ttl_is_refused() {
+    let error = self_hosted_config_with_ttl(Some("0"))
+        .await
+        .expect_err("a zero TTL mints tickets that are already dead");
+    assert!(
+        error.contains("RELAY_BROKER_DEVICE_JOIN_TTL_SECS"),
+        "{error}"
+    );
+}
+
+fn paired_for_revoke(
+    device_id: &str,
+    broker_join_ticket_expires_at: Option<u64>,
+) -> crate::state::PairedDevice {
+    crate::state::PairedDevice {
+        device_id: device_id.to_string(),
+        label: device_id.to_string(),
+        payload_secret: "secret".to_string(),
+        device_verify_key: test_phone_verify_key(),
+        created_at: 1,
+        last_seen_at: Some(1),
+        last_peer_id: None,
+        broker_join_ticket_expires_at,
+        path_scope: Vec::new(),
+        pairing_broker: None,
+    }
+}
+
+async fn revoke_test_state(devices: &[crate::state::PairedDevice]) -> AppState {
+    let state = broker_test_state();
+    for device in devices {
+        state.insert_paired_device_for_test(device.clone()).await;
+    }
+    state
+}
+
+async fn device_record_json(state: &AppState, device_id: &str) -> serde_json::Value {
+    let devices = serde_json::to_value(state.devices().await).expect("devices encode");
+    devices["device_records"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .find(|record| record["device_id"] == device_id)
+        .cloned()
+        .unwrap_or_else(|| panic!("no record for {device_id}: {devices}"))
+}
+
+#[tokio::test]
+async fn a_self_hosted_revoke_says_the_broker_ticket_lives_until_it_expires() {
+    let config = self_hosted_config_with_ttl(Some("3600"))
+        .await
+        .expect("config");
+    let state = revoke_test_state(&[
+        paired_for_revoke("phone-1", Some(4_000_000_000)),
+        paired_for_revoke("phone-2", Some(4_000_000_100)),
+        paired_for_revoke("phone-3", Some(4_000_000_050)),
+    ])
+    .await;
+
+    let receipt = state
+        .revoke_device_with(Some(&config), "phone-1")
+        .await
+        .expect("revoke");
+    let receipt = serde_json::to_value(receipt).expect("receipt encodes");
+    assert_eq!(receipt["revoked"], true);
+    assert_eq!(
+        receipt["broker_credential"],
+        serde_json::json!({ "status": "lapses", "expires_at": 4_000_000_000_u64 }),
+        "{receipt}"
+    );
+
+    let bulk = state
+        .revoke_other_devices_with(Some(&config), "phone-2")
+        .await
+        .expect("bulk revoke");
+    let bulk = serde_json::to_value(bulk).expect("receipt encodes");
+    assert_eq!(
+        bulk["broker_credential"],
+        serde_json::json!({ "status": "lapses", "expires_at": 4_000_000_050_u64 }),
+        "{bulk}"
+    );
+}
+
+async fn public_config_for_revoke(
+    fail_revokes: Arc<std::sync::atomic::AtomicBool>,
+    revoke_gate: Arc<tokio::sync::Semaphore>,
+) -> BrokerConfig {
+    let control_url = spawn_public_control_mock_with_revokes(fail_revokes, revoke_gate).await;
+    ready_public_broker_config(
+        "wss://broker.example.com",
+        &control_url,
+        &temp_registration_path("agent-relay-revoke-failure"),
+        [4_u8; 32],
+        "relay-owner-1",
+        "relay-refresh-1",
+        "demo-room",
+        "relay-1",
+    )
+    .await
+}
+
+// The local revoke is what actually stops the phone, so it stands; the broker failure
+// is reported and the record remembers it, which is what lets the user retry.
+#[tokio::test]
+async fn a_failed_broker_revoke_is_reported_and_a_retry_reaches_the_broker() {
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let config = public_config_for_revoke(fail.clone(), open_revoke_gate()).await;
+    let state = revoke_test_state(&[
+        paired_for_revoke("phone-1", None),
+        paired_for_revoke("phone-2", None),
+    ])
+    .await;
+
+    let error = state
+        .revoke_device_with(Some(&config), "phone-1")
+        .await
+        .expect_err("a broker failure must not read as a finished revoke");
+    assert!(error.contains("broker"), "{error}");
+    assert!(state.paired_device_payload_secret("phone-1").await.is_err());
+    assert_eq!(
+        device_record_json(&state, "phone-1").await["broker_revoke_pending"],
+        true
+    );
+    state
+        .revoke_device_with(Some(&config), "phone-1")
+        .await
+        .expect_err("still failing, the retry must not pretend either");
+
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    state
+        .revoke_device_with(Some(&config), "phone-2")
+        .await
+        .expect("phone-2 is revoked everywhere");
+    let cleared = state.clear_device_history().await;
+    assert_eq!(cleared.removed_count, 1, "Clear history keeps the retry");
+
+    let receipt = state
+        .revoke_device_with(Some(&config), "phone-1")
+        .await
+        .expect("the retry reaches the broker");
+    let receipt = serde_json::to_value(receipt).expect("receipt encodes");
+    assert_eq!(
+        receipt["broker_credential"]["status"], "revoked",
+        "{receipt}"
+    );
+    assert_eq!(
+        device_record_json(&state, "phone-1").await["broker_revoke_pending"],
+        false
+    );
+}
+
+// The record is the only way to retry, and it is not marked until the broker answers.
+#[tokio::test]
+async fn clearing_history_while_the_broker_answers_keeps_the_retry() {
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let config = public_config_for_revoke(fail.clone(), gate.clone()).await;
+    let state = revoke_test_state(&[
+        paired_for_revoke("phone-1", None),
+        paired_for_revoke("phone-2", None),
+        paired_for_revoke("phone-3", None),
+    ])
+    .await;
+
+    let single = {
+        let (state, config) = (state.clone(), config.clone());
+        tokio::spawn(async move { state.revoke_device_with(Some(&config), "phone-1").await })
+    };
+    let bulk = {
+        let (state, config) = (state.clone(), config.clone());
+        tokio::spawn(async move {
+            state
+                .revoke_other_devices_with(Some(&config), "phone-3")
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.paired_device_payload_secret("phone-1").await.is_ok()
+            || state.paired_device_payload_secret("phone-2").await.is_ok()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both local revokes land before the broker answers");
+    state.clear_device_history().await;
+    gate.add_permits(2);
+    single.await.unwrap().expect_err("the broker is down");
+    bulk.await.unwrap().expect_err("the broker is down");
+
+    for device_id in ["phone-1", "phone-2"] {
+        assert_eq!(
+            device_record_json(&state, device_id).await["broker_revoke_pending"],
+            true,
+            "{device_id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_broker_bulk_revoke_is_reported_and_marks_every_revoked_device() {
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let config = public_config_for_revoke(fail, open_revoke_gate()).await;
+    let state = revoke_test_state(&[
+        paired_for_revoke("phone-1", None),
+        paired_for_revoke("phone-2", None),
+        paired_for_revoke("phone-3", None),
+    ])
+    .await;
+
+    let error = state
+        .revoke_other_devices_with(Some(&config), "phone-1")
+        .await
+        .expect_err("a broker failure must not read as a finished revoke");
+    assert!(error.contains("broker"), "{error}");
+    for device_id in ["phone-2", "phone-3"] {
+        assert!(state.paired_device_payload_secret(device_id).await.is_err());
+        assert_eq!(
+            device_record_json(&state, device_id).await["broker_revoke_pending"],
+            true,
+            "{device_id}"
+        );
+    }
+    assert!(state.paired_device_payload_secret("phone-1").await.is_ok());
 }
 
 #[test]
@@ -3380,6 +3668,48 @@ mod transcript_delta_delivery {
             "a device whose scope no longer covers the thread must receive nothing"
         );
     }
+}
+
+// The broker records the device on the pairing seat from this, to close the seat on revoke;
+// a rejected or replaced pairing must name nobody.
+#[test]
+fn only_an_approved_pairing_result_names_its_device_to_the_broker() {
+    let result = |error: Option<&str>| crate::state::PendingPairingResult {
+        pairing_id: "pair-abc".to_string(),
+        target_peer_id: "surface-intended".to_string(),
+        pairing_secret: "pairing-secret-from-the-qr".to_string(),
+        device: Some(crate::protocol::PairedDeviceView {
+            device_id: "phone-1".to_string(),
+            label: "Phone".to_string(),
+            lifecycle_state: crate::protocol::DeviceLifecycleState::Approved,
+            created_at: 1,
+            last_seen_at: None,
+            last_peer_id: None,
+            broker_join_ticket_expires_at: None,
+            fingerprint: None,
+            path_scope: Vec::new(),
+        }),
+        payload_secret: None,
+        relay_id: None,
+        relay_label: None,
+        client_claim_id: None,
+        client_claim_nonce: None,
+        client_claim_expires_at: None,
+        device_refresh_token: None,
+        device_join_ticket: None,
+        device_join_ticket_expires_at: None,
+        error: error.map(str::to_string),
+    };
+    let outer = |error: Option<&str>| {
+        let message = pairing_result_targeted_message(result(error)).expect("seals");
+        serde_json::to_value(&*message.payload).expect("payload encodes")
+    };
+
+    let approved = outer(None);
+    assert_eq!(approved["pairing_id"], "pair-abc");
+    assert_eq!(approved["device_id"], "phone-1", "{approved}");
+    let refused = outer(Some("pairing was rejected"));
+    assert!(refused.get("device_id").is_none(), "{refused}");
 }
 
 #[test]

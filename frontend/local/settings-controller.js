@@ -16,7 +16,7 @@ import { LOCAL_SETTINGS_TABS, LocalSettings } from "./settings-view.js";
  *   actions: {
  *     startPairing: (scope: string[]) => Promise<object>,
  *     copyPairingLink: () => Promise<boolean>,
- *     revokePairedDevice: (id: string) => Promise<void>,
+ *     revokePairedDevice: (id: string, options?: { retry?: boolean }) => Promise<void>,
  *     revokeOtherDevices: (id: string) => Promise<void>,
  *     decidePairingRequest: (id: string, decision: string) => Promise<void>,
  *     saveAllowedRoots: (roots: string[]) => Promise<boolean>,
@@ -179,6 +179,7 @@ export function createSettingsController({
         pendingDecisions: state.pendingPairingDecisions || {},
         onDecide: (id, decision) => void actions.decidePairingRequest(id, decision),
         onRevoke: (id) => void actions.revokePairedDevice(id),
+        onRetryRevoke: (id) => void actions.revokePairedDevice(id, { retry: true }),
         onRevokeOthers: (id) => void actions.revokeOtherDevices(id),
         onClearHistory: (count) => void actions.clearDeviceHistory(count),
       },

@@ -2638,9 +2638,7 @@ async fn with_durable_mutations(
 }
 
 async fn with_csrf_protection(request: Request, next: Next) -> Response {
-    if let Err(error) =
-        authorize_csrf_protection(request.method(), request.headers(), request.uri())
-    {
+    if let Err(error) = authorize_csrf_protection(request.headers(), request.uri()) {
         return error.into_response();
     }
 
@@ -2648,11 +2646,11 @@ async fn with_csrf_protection(request: Request, next: Next) -> Response {
 }
 
 fn authorize_csrf_protection(
-    method: &Method,
     headers: &HeaderMap,
     uri: &Uri,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
-    if !uri.path().starts_with("/api/") || method_is_safe(method) {
+    // GETs too: some act (`/api/stream` opens a surface, model lists wake providers).
+    if !uri.path().starts_with("/api/") {
         return Ok(());
     }
 
@@ -2704,6 +2702,14 @@ enum RequestOrigin {
 ///    the authoritative statement; if it is present and opaque, a friendly
 ///    Referer next to it is not a second opinion worth taking.
 fn classify_request_origin(headers: &HeaderMap, uri: &Uri) -> RequestOrigin {
+    // A page can strip Origin and Referer from a GET, but cannot set or drop Sec-Fetch-Site.
+    let cross_site = headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| matches!(value.as_bytes(), b"cross-site" | b"same-site"));
+    if cross_site && !has_valid_csrf_header(headers) {
+        return RequestOrigin::Untrusted;
+    }
+
     // `.get()` is Some for a present-but-opaque header, so this falls through
     // to Referer only when Origin was genuinely not sent.
     let Some(raw) = headers
@@ -2728,8 +2734,7 @@ fn classify_request_origin(headers: &HeaderMap, uri: &Uri) -> RequestOrigin {
     // server, a static server showing an untrusted file, a local tool with an
     // XSS. The custom header is what separates them, because a cross-origin
     // page cannot set it without a CORS preflight this server never grants.
-    // Every mutating call from the real frontend carries it already
-    // (`frontend/local/api.js` `applyCsrfHeader`).
+    // Every call from the real frontend carries it (`applyCsrfHeader`).
     let loopback = declared
         .parse::<Uri>()
         .ok()

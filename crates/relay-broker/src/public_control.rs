@@ -1055,6 +1055,31 @@ impl PublicControlPlane {
         &self.inner.issuer_key
     }
 
+    /// Many paired devices in one save; issuing each grant would rewrite the store per device.
+    #[cfg(test)]
+    pub(crate) async fn seed_device_grants_for_test(
+        &self,
+        grants: impl IntoIterator<Item = (String, String, String)>,
+    ) {
+        let mut store = self.lock_state().await.expect("state");
+        for (relay_id, broker_room_id, device_id) in grants {
+            let refresh_token_hash = format!("seeded-{relay_id}-{device_id}");
+            store.grants_by_hash.insert(
+                refresh_token_hash.clone(),
+                PersistedDeviceGrant {
+                    relay_id,
+                    broker_room_id,
+                    device_id,
+                    refresh_token_hash,
+                    created_at: unix_now(),
+                    last_seen: None,
+                    superseded: Vec::new(),
+                },
+            );
+        }
+        self.persist(&mut store).await.expect("seeded grants save");
+    }
+
     pub fn has_persistent_state(&self) -> bool {
         self.inner.persistence.has_persistent_state()
     }
@@ -1305,12 +1330,45 @@ impl PublicControlPlane {
     /// Used after join-ticket verification so socket access checks bind to the
     /// authenticated registration rather than a caller-chosen victim id.
     pub async fn relay_id_for_broker_room(&self, broker_room_id: &str) -> Option<String> {
-        let store = self.lock_state().await.ok()?;
-        store
+        self.relay_id_for_join(broker_room_id, None).await.ok()
+    }
+
+    /// A device join also needs a live grant: its ws token outlives a revoke by up to its TTL.
+    pub async fn relay_id_for_join(
+        &self,
+        broker_room_id: &str,
+        device_id: Option<&str>,
+    ) -> Result<String, &'static str> {
+        const NO_RELAY: &str = "broker room has no active relay registration";
+        let store = self.lock_state().await.map_err(|_| NO_RELAY)?;
+        let relay_id = store
             .relay_registrations_by_hash
             .values()
             .find(|registration| registration.broker_room_id == broker_room_id)
             .map(|registration| registration.relay_id.clone())
+            .ok_or(NO_RELAY)?;
+        let Some(device_id) = device_id else {
+            return Ok(relay_id);
+        };
+        if store.has_device_grant(&relay_id, Some(broker_room_id), device_id) {
+            return Ok(relay_id);
+        }
+        drop(store);
+        // In a deploy overlap the other instance may have granted it after this one loaded;
+        // with reload-before-use the store above is already fresh.
+        let granted_elsewhere = self.miss_may_be_stale()
+            && !self.reload_before_use()
+            && self
+                .inner
+                .persistence
+                .device_grant_exists(&relay_id, broker_room_id, device_id)
+                .await
+                .unwrap_or(false);
+        if granted_elsewhere {
+            Ok(relay_id)
+        } else {
+            Err("device grant was revoked")
+        }
     }
 
     /// After a successful access-strategy release: drop the authenticated relay
@@ -1451,7 +1509,8 @@ impl PublicControlPlane {
         let mut store = self.lock_state().await?;
         // Cap check happens first and only for genuinely new devices; a
         // re-registration of an existing device is a replace, not a new seat.
-        let already_registered = store.has_device_grant(&registration.relay_id, &request.device_id);
+        let already_registered =
+            store.has_device_grant(&registration.relay_id, None, &request.device_id);
         if !already_registered {
             if let Some(limit) = device_limit {
                 let current = store.count_device_grants_for_relay(&registration.relay_id);
@@ -2815,6 +2874,40 @@ impl PublicControlPersistence {
         }
     }
 
+    async fn device_grant_exists(
+        &self,
+        relay_id: &str,
+        broker_room_id: &str,
+        device_id: &str,
+    ) -> Result<bool, String> {
+        match self {
+            Self::InMemory => Ok(false),
+            Self::Json(path) => Ok(load_public_control_json(path).await?.has_device_grant(
+                relay_id,
+                Some(broker_room_id),
+                device_id,
+            )),
+            Self::Postgres { pool, gate, .. } => gate
+                .run_spare(async {
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM public_device_grants \
+                         WHERE relay_id = $1 AND broker_room_id = $2 AND device_id = $3)",
+                    )
+                    .bind(relay_id)
+                    .bind(broker_room_id)
+                    .bind(device_id)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|error| {
+                        warn!(%error, "public control-plane device grant probe failed");
+                        "public control-plane database unavailable".to_string()
+                    })
+                })
+                .await
+                .map_err(PublicControlDbGateError::into_message),
+        }
+    }
+
     fn reload_before_use(&self) -> bool {
         match self {
             Self::Postgres {
@@ -2966,10 +3059,22 @@ impl PublicControlStateStore {
 
     /// Whether a device grant already exists for `(relay_id, device_id)`. Used to
     /// exempt re-registrations from the cap (they replace a seat, never add one).
-    fn has_device_grant(&self, relay_id: &str, device_id: &str) -> bool {
-        self.grants_by_hash
-            .values()
-            .any(|grant| grant.relay_id == relay_id && grant.device_id == device_id)
+    fn has_device_grant(
+        &self,
+        relay_id: &str,
+        broker_room_id: Option<&str>,
+        device_id: &str,
+    ) -> bool {
+        self.grants_by_hash.values().any(|grant| {
+            matches_optional_relay_target(
+                &grant.relay_id,
+                &grant.broker_room_id,
+                &grant.device_id,
+                relay_id,
+                broker_room_id,
+                Some(device_id),
+            )
+        })
     }
 
     fn remove_device_grants(

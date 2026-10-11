@@ -1,8 +1,11 @@
+import { applyCsrfHeader } from "./local/api.js";
+
 function sessionStreamHeaders() {
   const headers = new Headers({
     Accept: "text/event-stream",
     "Cache-Control": "no-store",
   });
+  applyCsrfHeader(headers);
   return headers;
 }
 

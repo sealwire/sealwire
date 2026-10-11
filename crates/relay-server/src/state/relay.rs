@@ -545,6 +545,9 @@ pub struct RelayState {
     pub available_models: Vec<ModelOptionView>,
     pub device_records: HashMap<String, DeviceRecord>,
     pub paired_devices: HashMap<String, PairedDevice>,
+    /// Revoked here with the broker's answer still pending: Clear history must keep their
+    /// records, which are the only place a broker failure can be marked for retry.
+    pub(crate) broker_revokes_in_flight: HashSet<String>,
     online_surface_peer_ids: HashSet<String>,
     online_surface_peer_devices: HashMap<String, String>,
     /// The lease each present surface is on. A surface takes a new one every time it
@@ -823,6 +826,7 @@ impl RelayState {
             available_models: Vec::new(),
             device_records: HashMap::new(),
             paired_devices: HashMap::new(),
+            broker_revokes_in_flight: HashSet::new(),
             online_surface_peer_ids: HashSet::new(),
             online_surface_peer_devices: HashMap::new(),
             surface_leases: HashMap::new(),
@@ -4618,6 +4622,7 @@ so {} never got it — hand over again when you are ready.",
                     device_verify_key: request.device_verify_key.clone(),
                     broker_join_ticket_expires_at: None,
                     path_scope: request.path_scope.clone(),
+                    broker_revoke_pending: false,
                 },
             );
         }

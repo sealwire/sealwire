@@ -52,6 +52,9 @@ test("session stream opens without cookies or authorization", async () => {
   assert.ok(!fetchCalls[0].url.includes("access_token="));
   assert.equal(fetchCalls[0].headers.get("Authorization"), null);
   assert.equal(fetchCalls[0].headers.get("Accept"), "text/event-stream");
+  // Under the vite dev proxy the relay sees a loopback page on another port, which
+  // only this header separates from any other local page.
+  assert.equal(fetchCalls[0].headers.get("X-Agent-Relay-CSRF"), "1");
   assert.equal(fetchCalls[0].credentials, "omit");
   assert.equal(opened, true);
   assert.deepEqual(sessionPayload, { current_status: "ready" });

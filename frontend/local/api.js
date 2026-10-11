@@ -1,8 +1,5 @@
-export function applyCsrfHeader(headers, method) {
-  if (method === "GET" || method === "HEAD") {
-    return;
-  }
-
+// On reads too: some GETs act, and the relay checks them like writes.
+export function applyCsrfHeader(headers) {
   headers.set("X-Agent-Relay-CSRF", "1");
 }
 
@@ -280,7 +277,7 @@ export function createApiFetch({ fetchImpl = fetch } = {}) {
   return async function apiFetch(input, init = {}) {
     const method = (init.method || "GET").toUpperCase();
     const headers = new Headers(init.headers || {});
-    applyCsrfHeader(headers, method);
+    applyCsrfHeader(headers);
 
     const response = await fetchImpl(input, {
       ...init,

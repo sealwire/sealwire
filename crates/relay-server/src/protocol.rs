@@ -1505,6 +1505,8 @@ pub struct DeviceRecordView {
     pub pairing_broker_url: Option<String>,
     /// Whether that pairing is the broker and relay key this relay is on now.
     pub pairing_broker_current: bool,
+    /// Revoked here, but the broker refused or never answered the revoke of its credential.
+    pub broker_revoke_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
@@ -3220,6 +3222,20 @@ pub struct PairingDecisionReceipt {
 pub struct RevokeDeviceReceipt {
     pub device_id: String,
     pub revoked: bool,
+    pub broker_credential: BrokerCredentialRevocation,
+}
+
+/// What became of the revoked devices' broker credentials.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum BrokerCredentialRevocation {
+    /// No broker is configured, or nothing was revoked.
+    None,
+    Revoked,
+    /// A self-hosted broker cannot revoke tickets; they work until `expires_at` (`None`: never).
+    Lapses {
+        expires_at: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3232,6 +3248,7 @@ pub struct BulkRevokeDevicesReceipt {
     pub kept_device_id: String,
     pub revoked_device_ids: Vec<String>,
     pub revoked_count: usize,
+    pub broker_credential: BrokerCredentialRevocation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

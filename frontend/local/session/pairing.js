@@ -3,6 +3,7 @@ export function createPairingController(ctx) {
     state,
     apiFetch,
     shortId,
+    formatTimestamp,
     logLine,
     renderSession,
   } = ctx;
@@ -58,32 +59,49 @@ export function createPairingController(ctx) {
     }
   }
 
-  async function revokePairedDevice(deviceId) {
+  /** `retry` re-sends a revoke the broker failed; the device is already cut off here. */
+  async function revokePairedDevice(deviceId, { retry = false } = {}) {
     if (!deviceId) {
       return;
     }
 
-    if (!window.confirm(`Revoke paired device ${deviceId}?`)) {
+    if (!retry && !window.confirm(`Revoke paired device ${deviceId}?`)) {
       return;
     }
 
-    logLine(`Revoking paired device ${shortId(deviceId)}.`);
+    logLine(
+      retry
+        ? `Asking the broker again to revoke ${shortId(deviceId)}.`
+        : `Revoking paired device ${shortId(deviceId)}.`
+    );
 
     try {
       const response = await apiFetch(`/api/devices/${encodeURIComponent(deviceId)}/revoke`, {
         method: "POST",
       });
       const payload = await response.json();
+      await loadSession("post-device-revoke refresh");
 
       if (!response.ok || !payload.ok) {
         throw new Error(payload?.error?.message || "Failed to revoke paired device");
       }
 
-      await loadSession("post-device-revoke refresh");
       logLine(`Revoked paired device ${shortId(deviceId)}.`);
+      logBrokerCredentialNote(payload.data.broker_credential);
     } catch (error) {
       logLine(`Revoke failed: ${error.message}`);
     }
+  }
+
+  function logBrokerCredentialNote(credential) {
+    if (credential?.status !== "lapses") {
+      return;
+    }
+    logLine(
+      credential.expires_at
+        ? `A self-hosted broker cannot cancel a ticket: the revoked device can still connect to the broker until ${formatTimestamp(credential.expires_at)}, though this relay ignores it.`
+        : "A self-hosted broker cannot cancel a ticket, and this one never expires: the revoked device can still connect to the broker, though this relay ignores it. To end that, change RELAY_BROKER_TICKET_SECRET and pair your other devices again."
+    );
   }
 
   async function clearDeviceHistory(count) {
@@ -127,16 +145,18 @@ export function createPairingController(ctx) {
       );
       const payload = await response.json();
 
+      await loadSession("post-bulk-device-revoke refresh");
+
       if (!response.ok || !payload.ok) {
         throw new Error(payload?.error?.message || "Failed to revoke other paired devices");
       }
 
-      await loadSession("post-bulk-device-revoke refresh");
       logLine(
         payload.data.revoked_count > 0
           ? `Revoked ${payload.data.revoked_count} other device(s); kept ${shortId(keepDeviceId)}.`
           : `No other paired devices were active; kept ${shortId(keepDeviceId)}.`
       );
+      logBrokerCredentialNote(payload.data.broker_credential);
     } catch (error) {
       logLine(`Bulk revoke failed: ${error.message}`);
     }

@@ -218,6 +218,87 @@ fn temp_state_path(tag: &str) -> PathBuf {
     ))
 }
 
+// A Postgres broker counts as shared even as a single instance, so a missing grant must
+// still refuse a revoked phone's unexpired ws token there.
+#[tokio::test]
+async fn a_revoked_device_may_not_join_on_a_shared_database() {
+    for reload_before_use in [false, true] {
+        let path = temp_state_path("revoked-join");
+        let plane = shared_json_plane(&path, |inner| {
+            inner.force_reload_before_use = reload_before_use;
+        })
+        .await;
+        let relay = plane
+            .issue_relay_registration_for_verify_key(&ticket_verify_key(), None)
+            .await
+            .unwrap();
+        plane
+            .issue_device_grant(
+                &relay.relay_refresh_token,
+                device_request(&relay, "phone"),
+                None,
+            )
+            .await
+            .unwrap();
+        let joins = || plane.relay_id_for_join(&relay.broker_room_id, Some("phone"));
+        assert_eq!(joins().await, Ok(relay.relay_id.clone()));
+        plane
+            .revoke_device_grant(
+                &relay.relay_refresh_token,
+                "phone",
+                DeviceGrantRevokeRequest {
+                    relay_id: relay.relay_id.clone(),
+                    broker_room_id: relay.broker_room_id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            joins().await.is_err(),
+            "reload_before_use={reload_before_use}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+// In a deploy overlap the new instance holds only what it loaded at start; a phone the old
+// one granted afterwards must not wait for its ws token to expire to get in.
+#[tokio::test]
+async fn an_instance_admits_a_device_another_instance_granted_after_it_loaded() {
+    for reload_before_use in [false, true] {
+        let path = temp_state_path("overlap-grant");
+        let writer = json_plane(&path).await;
+        let relay = writer
+            .issue_relay_registration_for_verify_key(&ticket_verify_key(), None)
+            .await
+            .unwrap();
+        let reader = shared_json_plane(&path, |inner| {
+            inner.force_reload_before_use = reload_before_use;
+        })
+        .await;
+        writer
+            .issue_device_grant(
+                &relay.relay_refresh_token,
+                device_request(&relay, "phone"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let room = &relay.broker_room_id;
+        assert_eq!(
+            reader.relay_id_for_join(room, Some("phone")).await,
+            Ok(relay.relay_id.clone()),
+            "reload_before_use={reload_before_use}"
+        );
+        assert!(reader
+            .relay_id_for_join(room, Some("never-granted"))
+            .await
+            .is_err());
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 async fn json_plane(path: &Path) -> PublicControlPlane {
     PublicControlPlane::from_parts(
         Some("miss-reload-test-issuer-a3f76b4c2089d15e6b0fa873c4e9521d".to_string()),

@@ -953,6 +953,7 @@ loser of a race keeps an id that is not the pin and silently loses its toolset"
                     device_verify_key: String::new(),
                     broker_join_ticket_expires_at: None,
                     path_scope: Vec::new(),
+                    broker_revoke_pending: false,
                 },
             );
         }

@@ -94,6 +94,9 @@ pub(super) enum OutboundBrokerPayload {
     EncryptedPairingResult {
         pairing_id: String,
         target_peer_id: String,
+        /// Approvals only: the broker ties the pairing seat to this device, to close it on revoke.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        device_id: Option<String>,
         envelope: EncryptedEnvelope,
     },
     TargetedMessages {

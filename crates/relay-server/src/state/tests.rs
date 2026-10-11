@@ -31,6 +31,7 @@ fn test_persisted_state() -> PersistedRelayState {
             device_verify_key: TEST_VERIFY_KEY_B64.to_string(),
             broker_join_ticket_expires_at: None,
             path_scope: Vec::new(),
+            broker_revoke_pending: false,
         },
     );
     let mut paired_devices = std::collections::HashMap::new();
@@ -756,6 +757,36 @@ fn transcript_write_advances_thread_last_activity() {
         None,
     );
     assert!(relay.thread_last_activity_or("thread-1", 0) > 1_000);
+}
+
+// A restart while the broker call is out must not lose the only record that can retry it;
+// in memory the flag stays clear so the Devices list does not flash a retry on every revoke.
+#[test]
+fn a_revoke_awaiting_the_broker_is_saved_as_retryable() {
+    let mut relay = test_state();
+    relay.paired_devices.insert(
+        "phone-2".to_string(),
+        PairedDevice {
+            device_id: "phone-2".to_string(),
+            label: "Second Phone".to_string(),
+            payload_secret: "payload-secret".to_string(),
+            device_verify_key: TEST_VERIFY_KEY_B64.to_string(),
+            created_at: 7,
+            last_seen_at: None,
+            last_peer_id: None,
+            broker_join_ticket_expires_at: None,
+            path_scope: Vec::new(),
+            pairing_broker: None,
+        },
+    );
+    assert!(relay.revoke_paired_device("phone-2", 10));
+    relay.broker_revokes_in_flight.insert("phone-2".to_string());
+
+    let persisted = PersistedRelayState::from_relay(&relay);
+    assert!(!relay.device_records["phone-2"].broker_revoke_pending);
+    let mut restored = test_state();
+    restored.apply_persisted(&persisted);
+    assert!(restored.device_records["phone-2"].broker_revoke_pending);
 }
 
 #[test]
@@ -3492,6 +3523,7 @@ fn clearing_device_history_drops_a_stale_orchestrator_pin_and_is_saved() {
             device_verify_key: String::new(),
             broker_join_ticket_expires_at: None,
             path_scope: Vec::new(),
+            broker_revoke_pending: false,
         },
     );
 
@@ -7503,6 +7535,7 @@ mod watched_threads {
                 device_verify_key: String::new(),
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                broker_revoke_pending: false,
             },
         );
 

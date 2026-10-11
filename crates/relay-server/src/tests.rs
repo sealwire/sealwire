@@ -998,12 +998,8 @@ fn csrf_rejects_a_foreign_origin() {
         HeaderValue::from_static("https://evil.example"),
     );
 
-    let error = authorize_csrf_protection(
-        &Method::POST,
-        &headers,
-        &Uri::from_static("/api/session/start"),
-    )
-    .expect_err("a foreign origin must be rejected on the local API");
+    let error = authorize_csrf_protection(&headers, &Uri::from_static("/api/session/start"))
+        .expect_err("a foreign origin must be rejected on the local API");
 
     assert_eq!(error.0, StatusCode::FORBIDDEN);
     assert_eq!(error.1 .0.error.code, "csrf_rejected");
@@ -1019,12 +1015,7 @@ fn csrf_allows_a_mutating_request_that_carries_no_origin_at_all() {
     headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
 
     assert!(
-        authorize_csrf_protection(
-            &Method::POST,
-            &headers,
-            &Uri::from_static("/api/session/start"),
-        )
-        .is_ok(),
+        authorize_csrf_protection(&headers, &Uri::from_static("/api/session/start")).is_ok(),
         "non-browser clients send no Origin and must keep working"
     );
 }
@@ -1034,7 +1025,7 @@ fn csrf_allows_a_mutating_request_that_carries_no_origin_at_all() {
 /// a legitimate mismatch that must keep working.
 ///
 /// The custom header is what makes accepting it safe, and it is why this test
-/// sends one: every mutating call from the real frontend goes through
+/// sends one: every call from the real frontend goes through
 /// `createApiFetch` -> `applyCsrfHeader` (`frontend/local/api.js`). Loopback
 /// alone is NOT sufficient — see
 /// `another_loopback_page_cannot_post_without_the_csrf_header`.
@@ -1052,12 +1043,7 @@ fn csrf_allows_a_loopback_origin_from_the_vite_dev_proxy() {
     );
 
     assert!(
-        authorize_csrf_protection(
-            &Method::POST,
-            &headers,
-            &Uri::from_static("/api/session/start"),
-        )
-        .is_ok(),
+        authorize_csrf_protection(&headers, &Uri::from_static("/api/session/start")).is_ok(),
         "the vite dev proxy must keep working"
     );
 }
@@ -1154,12 +1140,7 @@ fn an_opaque_or_unparseable_origin_is_refused_rather_than_ignored() {
         );
 
         assert!(
-            authorize_csrf_protection(
-                &Method::POST,
-                &headers,
-                &Uri::from_static("/api/session/start"),
-            )
-            .is_err(),
+            authorize_csrf_protection(&headers, &Uri::from_static("/api/session/start")).is_err(),
             "`Origin: {value}` is declared but names nobody; it must not pass"
         );
     }
@@ -1179,12 +1160,7 @@ fn an_opaque_origin_does_not_fall_through_to_a_friendly_referer() {
     );
 
     assert!(
-        authorize_csrf_protection(
-            &Method::POST,
-            &headers,
-            &Uri::from_static("/api/session/start"),
-        )
-        .is_err(),
+        authorize_csrf_protection(&headers, &Uri::from_static("/api/session/start")).is_err(),
         "Origin is authoritative; a friendly Referer must not rescue an opaque one"
     );
 }
@@ -1204,14 +1180,98 @@ fn another_loopback_page_cannot_post_without_the_csrf_header() {
     );
 
     assert!(
-        authorize_csrf_protection(
-            &Method::POST,
-            &headers,
-            &Uri::from_static("/api/session/start"),
-        )
-        .is_err(),
+        authorize_csrf_protection(&headers, &Uri::from_static("/api/session/start")).is_err(),
         "a cross-port loopback origin without the custom header must be refused"
     );
+}
+
+fn get_headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
+    for (name, value) in pairs {
+        headers.insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    }
+    headers
+}
+
+// Some GETs act: `/api/stream` opens a surface generation, `/api/threads?q=` and the
+// model list wake providers. A cross-site page can send them even if it cannot read
+// the reply, and `referrerpolicy="no-referrer"` strips Origin and Referer from a GET.
+#[test]
+fn a_cross_site_page_cannot_send_a_get_to_the_local_api() {
+    for pairs in [
+        vec![("sec-fetch-site", "cross-site")],
+        vec![("sec-fetch-site", "same-site")],
+        vec![("origin", "https://evil.example")],
+        vec![("referer", "https://evil.example/page")],
+        vec![("origin", "http://localhost:8000")],
+    ] {
+        let headers = get_headers(&pairs);
+        assert!(
+            authorize_csrf_protection(&headers, &Uri::from_static("/api/stream?surface_id=s"))
+                .is_err(),
+            "a GET carrying {pairs:?} must be refused"
+        );
+    }
+}
+
+#[test]
+fn the_relay_page_scripts_and_the_vite_proxy_can_still_get() {
+    for pairs in [
+        // The relay's own page: `Referrer-Policy: no-referrer`, so no Origin or Referer.
+        vec![("sec-fetch-site", "same-origin")],
+        // The user typed the URL.
+        vec![("sec-fetch-site", "none")],
+        // curl, Node scripts, the desktop shell.
+        vec![],
+        vec![
+            ("sec-fetch-site", "same-origin"),
+            ("referer", "http://localhost:5173/static/index.html"),
+            (CSRF_HEADER_NAME, CSRF_HEADER_VALUE),
+        ],
+    ] {
+        let headers = get_headers(&pairs);
+        assert!(
+            authorize_csrf_protection(&headers, &Uri::from_static("/api/threads?q=x")).is_ok(),
+            "a GET carrying {pairs:?} must pass"
+        );
+    }
+}
+
+#[tokio::test]
+async fn side_effecting_gets_refuse_a_cross_site_page_before_routing() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    for route in [
+        "/api/stream?surface_id=s&surface_generation=9",
+        "/api/threads?q=x",
+        "/api/providers/codex/models",
+    ] {
+        let (context, _project) = test_context(HostPolicy::loopback_only());
+        let router = build_router(context, WebAssets::Embedded);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(route)
+                    .header(header::HOST, "127.0.0.1:8787")
+                    .header("sec-fetch-site", "cross-site")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{route} must refuse a cross-site GET"
+        );
+    }
 }
 
 /// Build a router whose relay is rooted at `cwd` and (optionally) fenced to
@@ -1621,12 +1681,7 @@ fn bearer_headers_cannot_bypass_local_origin_checks() {
         HeaderName::from_static(CSRF_HEADER_NAME),
         HeaderValue::from_static(CSRF_HEADER_VALUE),
     );
-    assert!(authorize_csrf_protection(
-        &Method::POST,
-        &headers,
-        &Uri::from_static("/api/session/start")
-    )
-    .is_err());
+    assert!(authorize_csrf_protection(&headers, &Uri::from_static("/api/session/start")).is_err());
 }
 
 #[test]
@@ -1645,12 +1700,7 @@ fn csrf_checks_referer_when_origin_is_absent() {
             HeaderValue::from_static(CSRF_HEADER_VALUE),
         );
         assert_eq!(
-            authorize_csrf_protection(
-                &Method::POST,
-                &headers,
-                &Uri::from_static("/api/session/start")
-            )
-            .is_ok(),
+            authorize_csrf_protection(&headers, &Uri::from_static("/api/session/start")).is_ok(),
             allowed,
             "{referer}"
         );

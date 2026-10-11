@@ -2624,8 +2624,17 @@ async fn run_git_capture(
     workspace: &TrustedWorkspace,
     args: &[&str],
 ) -> Result<std::process::Output, String> {
+    // The repo's `.gitattributes` picks the diff driver; without these flags it can make us
+    // run a configured `diff.<driver>.command` or show textconv output instead of the change.
+    let args: Vec<&str> = match args.split_first() {
+        Some((&"diff", rest)) => ["diff", "--no-ext-diff", "--no-textconv"]
+            .into_iter()
+            .chain(rest.iter().copied())
+            .collect(),
+        _ => args.to_vec(),
+    };
     background_git(workspace)
-        .args(args)
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())

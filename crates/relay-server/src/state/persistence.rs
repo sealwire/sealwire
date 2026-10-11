@@ -305,7 +305,18 @@ impl PersistedRelayState {
             usage_budget_policy: relay.usage_budget.policy.as_str().to_string(),
             trusted_workspaces: relay.trusted_workspaces.clone(),
             allowed_roots_trust_migrated: relay.allowed_roots_trust_migrated,
-            device_records: relay.device_records.clone(),
+            // Saved as retryable so a restart mid-call keeps the retry; memory keeps the flag
+            // clear so the Devices list does not show a retry for a call still running.
+            device_records: relay
+                .device_records
+                .iter()
+                .map(|(device_id, record)| {
+                    let mut record = record.clone();
+                    record.broker_revoke_pending |=
+                        relay.broker_revokes_in_flight.contains(device_id);
+                    (device_id.clone(), record)
+                })
+                .collect(),
             paired_devices: relay.paired_devices.clone(),
             reviewer_threads: relay
                 .reviewer_threads

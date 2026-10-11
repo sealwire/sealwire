@@ -33,8 +33,8 @@ struct Inner {
     rooms: HashMap<String, RoomState>,
     next_connection_id: u64,
     /// Process-global room-access epoch (constant cardinality). Bumped by every
-    /// [`BrokerState::force_close_room`], including when the room is empty, so a
-    /// join that captured an older epoch cannot seat after access release.
+    /// [`BrokerState::force_close_room`] and device revoke, including when the room is
+    /// empty, so a join that captured an older epoch cannot seat after either.
     access_epoch: u64,
 }
 
@@ -236,7 +236,7 @@ impl BrokerState {
             None => Vec::new(),
         };
         for superseded_peer_id in &superseded {
-            let Some(handle) = room.peers.remove(superseded_peer_id) else {
+            let Some(handle) = self.unseat(room, channel_id, superseded_peer_id) else {
                 continue;
             };
             info!(
@@ -249,25 +249,6 @@ impl BrokerState {
                 code: "pairing_ticket_superseded".to_string(),
                 message: "another client joined with this pairing ticket".to_string(),
             });
-            let left_peer = PeerSummary {
-                peer_id: superseded_peer_id.clone(),
-                role: handle.role,
-                device_id: handle.device_id.clone(),
-            };
-            for remaining in room.peers.values() {
-                let _ = remaining.enqueue(ServerMessage::Presence {
-                    channel_id: channel_id.to_string(),
-                    kind: PresenceKind::Left,
-                    peer: left_peer.clone(),
-                });
-            }
-            self.record_event(UsageEvent::new(
-                UsageEventKind::Disconnect,
-                channel_id,
-                superseded_peer_id,
-                handle.role,
-                handle.device_id,
-            ));
         }
 
         let existing_peers = room
@@ -396,14 +377,21 @@ impl BrokerState {
             }
         }
 
-        let Some(handle) = room.peers.remove(peer_id) else {
+        if self.unseat(room, channel_id, peer_id).is_none() {
             return;
-        };
+        }
+        if room.peers.is_empty() {
+            inner.rooms.remove(channel_id);
+        }
+    }
 
+    /// Remove a seat and tell the rest of the room it left, as a normal departure does.
+    fn unseat(&self, room: &mut RoomState, channel_id: &str, peer_id: &str) -> Option<PeerHandle> {
+        let handle = room.peers.remove(peer_id)?;
         let left_peer = PeerSummary {
             peer_id: peer_id.to_string(),
             role: handle.role,
-            device_id: handle.device_id,
+            device_id: handle.device_id.clone(),
         };
 
         for peer in room.peers.values() {
@@ -421,10 +409,44 @@ impl BrokerState {
             left_peer.role,
             left_peer.device_id,
         ));
+        Some(handle)
+    }
 
+    /// Close the surface seats of revoked devices. Returns how many were closed.
+    pub async fn close_revoked_surfaces(
+        &self,
+        channel_id: &str,
+        is_revoked_device: impl Fn(&str) -> bool,
+    ) -> usize {
+        let mut inner = self.inner.lock().await;
+        // A join already past its grant check would otherwise seat after this; any other
+        // join in flight is refused once too and retries.
+        inner.access_epoch = inner.access_epoch.saturating_add(1);
+        let Some(room) = inner.rooms.get_mut(channel_id) else {
+            return 0;
+        };
+        let revoked: Vec<String> = room
+            .peers
+            .iter()
+            .filter(|(_, handle)| {
+                handle.role == PeerRole::Surface
+                    && handle.device_id.as_deref().is_some_and(&is_revoked_device)
+            })
+            .map(|(peer_id, _)| peer_id.clone())
+            .collect();
+        for peer_id in &revoked {
+            // Dropping the handle after this message is what ends the socket's loop.
+            if let Some(handle) = self.unseat(room, channel_id, peer_id) {
+                let _ = handle.enqueue(ServerMessage::Error {
+                    code: "device_revoked".to_string(),
+                    message: "this device was revoked".to_string(),
+                });
+            }
+        }
         if room.peers.is_empty() {
             inner.rooms.remove(channel_id);
         }
+        revoked.len()
     }
 
     pub async fn publish(
@@ -455,8 +477,8 @@ impl BrokerState {
         expected_connection_id: Option<u64>,
         payload: serde_json::Value,
     ) -> Result<(), String> {
-        let inner = self.inner.lock().await;
-        let Some(room) = inner.rooms.get(channel_id) else {
+        let mut inner = self.inner.lock().await;
+        let Some(room) = inner.rooms.get_mut(channel_id) else {
             return Err(format!("channel `{channel_id}` is not active"));
         };
 
@@ -518,7 +540,7 @@ impl BrokerState {
         let mut missing_target_count = 0usize;
         let mut failed_count = 0usize;
         for message in targeted.messages {
-            let Some(handle) = room.peers.get(&message.target_peer_id) else {
+            let Some(handle) = room.peers.get_mut(&message.target_peer_id) else {
                 missing_target_count += 1;
                 warn!(
                     channel_id,
@@ -528,6 +550,11 @@ impl BrokerState {
                 );
                 continue;
             };
+            if sender_role == PeerRole::Relay && handle.device_id.is_none() {
+                if let Some(device_id) = approved_pairing_device(&message.payload, handle) {
+                    handle.device_id = Some(device_id.to_string());
+                }
+            }
             if handle
                 .enqueue(ServerMessage::Message {
                     channel_id: channel_id.to_string(),
@@ -571,6 +598,27 @@ struct TargetedMessagesPayload {
 struct TargetedMessagePayload {
     target_peer_id: String,
     payload: serde_json::Value,
+}
+
+/// A paired phone keeps its pairing seat, which joined with no device id. Only the relay's
+/// approval of that seat's own pairing may name it: other replies echo the phone's own claim.
+fn approved_pairing_device<'a>(
+    payload: &'a serde_json::Value,
+    seat: &PeerHandle,
+) -> Option<&'a str> {
+    if payload_kind(payload) != "encrypted_pairing_result" {
+        return None;
+    }
+    let pairing_id = payload
+        .get("pairing_id")
+        .and_then(serde_json::Value::as_str)?;
+    if seat.pairing_id.as_deref() != Some(pairing_id) {
+        return None;
+    }
+    payload
+        .get("device_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|device_id| !device_id.is_empty())
 }
 
 fn is_targeted_messages_payload(payload: &serde_json::Value) -> bool {

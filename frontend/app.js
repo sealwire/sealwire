@@ -1552,6 +1552,7 @@ controller = createSessionController({
   apiFetch,
   queryClient: localQueryClient,
   shortId,
+  formatTimestamp,
   logLine,
   seedDefaults,
   setSelectedCwd,

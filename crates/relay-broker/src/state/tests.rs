@@ -837,3 +837,58 @@ async fn byte_limit_also_bounds_targeted_messages_and_releases_consumed_bytes() 
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn only_an_approved_pairing_result_names_a_pairing_seat() {
+    let state = BrokerState::default();
+    let _relay = state
+        .join("room-a", "relay-1", PeerRole::Relay, None, None)
+        .await
+        .expect("relay should join");
+    for (peer, pairing) in [
+        ("phone-1", "pair-1"),
+        ("phone-2", "pair-2"),
+        ("phone-3", "pair-3"),
+    ] {
+        state
+            .join(
+                "room-a",
+                peer,
+                PeerRole::Surface,
+                None,
+                Some(pairing.to_string()),
+            )
+            .await
+            .expect("pairing seat should join");
+    }
+    for payload in [
+        // The hello proof echoes the id the phone sent; a fresh phone sends "".
+        json!({"kind": "relay_hello_proof", "target_peer_id": "phone-1", "device_id": ""}),
+        json!({"kind": "relay_hello_proof", "target_peer_id": "phone-2", "device_id": "device-b"}),
+        json!({"kind": "encrypted_remote_action_result", "target_peer_id": "phone-2", "device_id": "device-b"}),
+        // Another seat's pairing.
+        json!({"kind": "encrypted_pairing_result", "target_peer_id": "phone-3", "pairing_id": "pair-1", "device_id": "device-b"}),
+        // The approval, for this seat's own pairing.
+        json!({"kind": "encrypted_pairing_result", "target_peer_id": "phone-1", "pairing_id": "pair-1", "device_id": "device-a"}),
+    ] {
+        state
+            .publish("room-a", "relay-1", payload)
+            .await
+            .expect("publish should succeed");
+    }
+
+    assert_eq!(
+        state
+            .close_revoked_surfaces("room-a", |device_id| device_id == "device-b")
+            .await,
+        0,
+        "nothing but an approval may name a seat"
+    );
+    assert_eq!(
+        state
+            .close_revoked_surfaces("room-a", |device_id| device_id == "device-a")
+            .await,
+        1,
+        "the approved seat is closed with its device"
+    );
+}

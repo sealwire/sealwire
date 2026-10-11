@@ -432,24 +432,6 @@ fn signing_key_for_verify_key(verify_key: &str) -> Option<SigningKey> {
         .cloned()
 }
 
-async fn assert_ws_closed_after_access_released(
-    label: &str,
-    stream: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) {
-    match next_server_message(stream).await {
-        ServerMessage::Error { code, .. } => assert_eq!(code, "access_released", "{label}"),
-        other => panic!("{label}: expected access_released, got {other:?}"),
-    }
-    match stream.next().await {
-        None | Some(Ok(Message::Close(_))) | Some(Err(_)) => {}
-        Some(Ok(other)) => {
-            panic!("{label}: expected socket end after access_released, got {other:?}")
-        }
-    }
-}
-
 async fn http_get(address: SocketAddr, path: &str) -> String {
     http_get_with_headers(address, path, &[]).await
 }
@@ -3916,6 +3898,230 @@ async fn public_bulk_revoke_keeps_selected_device() {
     )
     .await;
     assert!(error_body.contains("request failed"));
+}
+
+type TestSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn seat_public_relay(address: SocketAddr) -> TestSocket {
+    let relay_token: RelayWsTokenResponse = post_signed_relay_ws_token(
+        address,
+        "relay-refresh-1",
+        "relay-1".to_string(),
+        "room-a".to_string(),
+        "relay-1".to_string(),
+        &seeded_relay_signing_key(),
+    )
+    .await;
+    let (mut relay, _) = connect_async(format!(
+        "ws://{address}/ws/room-a?role=relay&client_version=0.11.3&peer_id=relay-1&join_ticket={}",
+        relay_token.relay_ws_token
+    ))
+    .await
+    .expect("relay should connect");
+    let _welcome = next_server_message(&mut relay).await;
+    relay
+}
+
+async fn seat_surface(address: SocketAddr, ticket: &str) -> (TestSocket, String) {
+    let (mut socket, _) = connect_async(format!(
+        "ws://{address}/ws/room-a?role=surface&join_ticket={ticket}"
+    ))
+    .await
+    .expect("surface should connect");
+    match next_server_message(&mut socket).await {
+        ServerMessage::Welcome { peer_id, .. } => (socket, peer_id),
+        other => panic!("surface expected a welcome, got {other:?}"),
+    }
+}
+
+async fn grant_device(address: SocketAddr, device_id: &str) -> DeviceGrantResponse {
+    public_post(
+        address,
+        "/api/public/devices",
+        "relay-refresh-1",
+        &DeviceGrantRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            device_id: device_id.to_string(),
+        },
+    )
+    .await
+}
+
+async fn seat_pairing_surface(address: SocketAddr, pairing_id: &str) -> (TestSocket, String) {
+    let pairing: PairingWsTokenResponse = public_post(
+        address,
+        "/api/public/pairing/ws-token",
+        "relay-refresh-1",
+        &PairingWsTokenRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            pairing_id: pairing_id.to_string(),
+            expires_at: u64::MAX - 1,
+        },
+    )
+    .await;
+    seat_surface(address, &pairing.pairing_join_ticket).await
+}
+
+/// What the relay sends a phone's pairing seat when the pairing is approved.
+async fn approve_pairing_seat(
+    relay: &mut TestSocket,
+    seat: &mut TestSocket,
+    seat_peer_id: &str,
+    pairing_id: &str,
+    device_id: &str,
+) {
+    relay
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::Publish {
+                protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+                payload: serde_json::json!({
+                    "kind": "encrypted_pairing_result",
+                    "pairing_id": pairing_id,
+                    "target_peer_id": seat_peer_id,
+                    "device_id": device_id,
+                    "envelope": {},
+                }),
+            })
+            .expect("publish should encode"),
+        ))
+        .await
+        .expect("relay publish should send");
+    loop {
+        if let ServerMessage::Message { .. } = read_server_message(seat).await {
+            break;
+        }
+    }
+}
+
+/// Skips presence noise; panics if the socket is still open with nothing to say.
+async fn expect_closed_with(label: &str, socket: &mut TestSocket, code: &str) {
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match read_server_message(socket).await {
+                ServerMessage::Presence { .. } => continue,
+                ServerMessage::Error { code: got, .. } => break got,
+                other => panic!("{label}: expected {code}, got {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{label}: still open, expected {code}"));
+    assert_eq!(closed, code, "{label}");
+    match socket.next().await {
+        None | Some(Ok(Message::Close(_))) | Some(Err(_)) => {}
+        Some(Ok(other)) => panic!("{label}: expected the socket to end, got {other:?}"),
+    }
+}
+
+// The ws token outlives the grant by up to its TTL, so the join must consult the grant,
+// and the open sockets must go: the broker never re-checks a seated peer.
+#[tokio::test]
+async fn revoking_a_device_closes_its_seats_and_refuses_its_unexpired_token() {
+    let (address, broker, _control) = spawn_public_mode_app_with_access_and_state(
+        std::sync::Arc::new(OpenAccessStrategy),
+        BrokerState::default(),
+    )
+    .await;
+    let mut relay = seat_public_relay(address).await;
+    let revoked = grant_device(address, "device-1").await;
+    let kept = grant_device(address, "device-2").await;
+    let (mut revoked_socket, _) = seat_surface(address, &revoked.device_ws_token).await;
+    // Right after pairing a phone keeps its pairing socket, which joined with no device id.
+    let (mut pairing_socket, pairing_peer) = seat_pairing_surface(address, "pair-1").await;
+    approve_pairing_seat(
+        &mut relay,
+        &mut pairing_socket,
+        &pairing_peer,
+        "pair-1",
+        "device-1",
+    )
+    .await;
+    let (_kept_socket, _) = seat_surface(address, &kept.device_ws_token).await;
+    assert_eq!(broker.room_peer_count("room-a").await, 4);
+
+    let _: DeviceGrantRevokeResponse = public_post(
+        address,
+        "/api/public/devices/device-1/revoke",
+        "relay-refresh-1",
+        &DeviceGrantRevokeRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+        },
+    )
+    .await;
+
+    expect_closed_with("device socket", &mut revoked_socket, "device_revoked").await;
+    expect_closed_with("pairing socket", &mut pairing_socket, "device_revoked").await;
+    assert_eq!(
+        broker.room_peer_count("room-a").await,
+        2,
+        "the relay and the other device stay seated"
+    );
+    let (mut rejoin, _) = connect_async(format!(
+        "ws://{address}/ws/room-a?role=surface&join_ticket={}",
+        revoked.device_ws_token
+    ))
+    .await
+    .expect("tcp connects");
+    expect_closed_with("rejoin", &mut rejoin, "join_rejected").await;
+
+    let repaired = grant_device(address, "device-1").await;
+    let _ = seat_surface(address, &repaired.device_ws_token).await;
+}
+
+#[tokio::test]
+async fn bulk_revoke_closes_every_other_devices_seats() {
+    let (address, broker, _control) = spawn_public_mode_app_with_access_and_state(
+        std::sync::Arc::new(OpenAccessStrategy),
+        BrokerState::default(),
+    )
+    .await;
+    let mut relay = seat_public_relay(address).await;
+    let kept = grant_device(address, "keep-me").await;
+    let revoked = grant_device(address, "revoke-me").await;
+    let (_kept_socket, _) = seat_surface(address, &kept.device_ws_token).await;
+    let (mut revoked_socket, _) = seat_surface(address, &revoked.device_ws_token).await;
+    let (mut pairing_socket, pairing_peer) = seat_pairing_surface(address, "pair-2").await;
+    approve_pairing_seat(
+        &mut relay,
+        &mut pairing_socket,
+        &pairing_peer,
+        "pair-2",
+        "revoke-me",
+    )
+    .await;
+    // A phone still scanning a QR code belongs to no device yet and must not be closed.
+    let (_scanning_socket, _) = seat_pairing_surface(address, "pair-3").await;
+
+    let _: DeviceGrantBulkRevokeResponse = public_post(
+        address,
+        "/api/public/devices/revoke-others",
+        "relay-refresh-1",
+        &DeviceGrantBulkRevokeRequest {
+            relay_id: "relay-1".to_string(),
+            broker_room_id: "room-a".to_string(),
+            keep_device_id: "keep-me".to_string(),
+        },
+    )
+    .await;
+
+    expect_closed_with("device socket", &mut revoked_socket, "device_revoked").await;
+    expect_closed_with("pairing socket", &mut pairing_socket, "device_revoked").await;
+    assert_eq!(
+        broker.room_peer_count("room-a").await,
+        3,
+        "the relay, the kept device and the phone mid-pairing stay seated"
+    );
+    let (mut rejoin, _) = connect_async(format!(
+        "ws://{address}/ws/room-a?role=surface&join_ticket={}",
+        revoked.device_ws_token
+    ))
+    .await
+    .expect("tcp connects");
+    expect_closed_with("rejoin", &mut rejoin, "join_rejected").await;
 }
 
 #[tokio::test]
@@ -7675,8 +7881,8 @@ async fn access_release_orders_auth_before_strategy_and_revokes_on_success() {
     assert!(released.released);
     assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
 
-    assert_ws_closed_after_access_released("relay", &mut relay_ws).await;
-    assert_ws_closed_after_access_released("device", &mut device_ws).await;
+    expect_closed_with("relay", &mut relay_ws, "access_released").await;
+    expect_closed_with("device", &mut device_ws, "access_released").await;
 
     assert!(
         !control
@@ -8035,8 +8241,14 @@ async fn released_ticket_cannot_seat_after_concurrent_access_release() {
     assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn released_device_ticket_cannot_seat_after_concurrent_access_release() {
+/// Holds one device join inside the access strategy, after its grant check passed, while
+/// `interrupt` runs; the join must then be refused rather than seated.
+async fn assert_device_join_refused_after<Fut>(
+    seed_label: &str,
+    interrupt: impl FnOnce(SocketAddr, RelayEnrollmentResponse) -> Fut,
+) where
+    Fut: std::future::Future<Output = ()>,
+{
     use std::sync::mpsc::sync_channel;
 
     let (at_auth_tx, at_auth_rx) = sync_channel::<()>(0);
@@ -8061,7 +8273,7 @@ async fn released_device_ticket_cannot_seat_after_concurrent_access_release() {
     });
     let (address, broker, _) =
         spawn_public_mode_app_with_access_and_state(access, BrokerState::default()).await;
-    let enrolled = enroll_relay(address, "release-toctou-device", None)
+    let enrolled = enroll_relay(address, seed_label, None)
         .await
         .expect("enroll");
     let device_grant: DeviceGrantResponse = public_post(
@@ -8088,24 +8300,49 @@ async fn released_device_ticket_cannot_seat_after_concurrent_access_release() {
         .await
         .unwrap()
         .unwrap();
-    let released: AccessReleaseResponse = public_post(
-        address,
-        "/api/public/relay/access/release",
-        &enrolled.relay_refresh_token,
-        &AccessReleaseRequest {
-            relay_id: enrolled.relay_id.clone(),
-            broker_room_id: enrolled.broker_room_id.clone(),
-        },
-    )
-    .await;
-    assert!(released.released);
+    interrupt(address, enrolled.clone()).await;
     go_tx.send(()).unwrap();
     match join_task.await.unwrap() {
         ServerMessage::Error { code, .. } => assert_eq!(code, "join_rejected"),
-        ServerMessage::Welcome { .. } => panic!("device ticket must not Welcome after release"),
+        ServerMessage::Welcome { .. } => panic!("{seed_label}: the held join must not Welcome"),
         other => panic!("unexpected {other:?}"),
     }
     assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn released_device_ticket_cannot_seat_after_concurrent_access_release() {
+    assert_device_join_refused_after("release-toctou-device", |address, enrolled| async move {
+        let released: AccessReleaseResponse = public_post(
+            address,
+            "/api/public/relay/access/release",
+            &enrolled.relay_refresh_token,
+            &AccessReleaseRequest {
+                relay_id: enrolled.relay_id.clone(),
+                broker_room_id: enrolled.broker_room_id.clone(),
+            },
+        )
+        .await;
+        assert!(released.released);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoked_device_ticket_cannot_seat_after_a_concurrent_revoke() {
+    assert_device_join_refused_after("revoke-toctou-device", |address, enrolled| async move {
+        let _: DeviceGrantRevokeResponse = public_post(
+            address,
+            "/api/public/devices/device-race/revoke",
+            &enrolled.relay_refresh_token,
+            &DeviceGrantRevokeRequest {
+                relay_id: enrolled.relay_id.clone(),
+                broker_room_id: enrolled.broker_room_id.clone(),
+            },
+        )
+        .await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -8222,7 +8459,7 @@ async fn access_release_reload_uncertain_returns_503_even_when_memory_target_cle
     );
     assert!(!body.to_string().to_ascii_lowercase().contains("sql"));
     assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
-    assert_ws_closed_after_access_released("relay", &mut relay_ws).await;
+    expect_closed_with("relay", &mut relay_ws, "access_released").await;
 
     // Memory was left target-cleared without a confirmed durable commit; a
     // follow-up with the same bearer is Unauthorized (ambiguous 503→Unauthorized
@@ -8371,7 +8608,7 @@ async fn open_access_release_force_closes_stale_join_seated_during_cleanup() {
     assert!(body.released);
     // Final force-close must have cleared the seat before released=true returned.
     assert_eq!(broker.room_peer_count(&enrolled.broker_room_id).await, 0);
-    assert_ws_closed_after_access_released("stale", &mut stale_ws).await;
+    expect_closed_with("stale", &mut stale_ws, "access_released").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

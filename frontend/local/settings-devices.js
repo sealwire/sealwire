@@ -113,7 +113,12 @@ export function DevicesPage({ active, devices, pairing, roots, formatTimestamp, 
           )
     ),
     past.length
-      ? h(DeviceHistory, { formatTimestamp, onClear: devices.onClearHistory, records: past })
+      ? h(DeviceHistory, {
+          formatTimestamp,
+          onClear: devices.onClearHistory,
+          onRetryRevoke: devices.onRetryRevoke,
+          records: past,
+        })
       : null
   );
 }
@@ -175,7 +180,7 @@ function DeviceRow({ record, canRevokeOthers, formatTimestamp, now, onRevoke, on
               approved
                 ? record.broker_join_ticket_expires_at
                   ? `Expires ${formatTimestamp(record.broker_join_ticket_expires_at)}`
-                  : "Until revoked"
+                  : "Never expires"
                 : "Not active"
             ),
             field("Paired", formatTimestamp(record.created_at))
@@ -213,14 +218,34 @@ function DeviceRow({ record, canRevokeOthers, formatTimestamp, now, onRevoke, on
   );
 }
 
-function DeviceHistory({ records, formatTimestamp, onClear }) {
+function DeviceHistory({ records, formatTimestamp, onClear, onRetryRevoke }) {
   const [open, setOpen] = React.useState(false);
   const [showAll, setShowAll] = React.useState(false);
   const visible = showAll ? records : records.slice(0, HISTORY_PREVIEW);
   const hiddenCount = records.length - visible.length;
+  const pending = records.filter((record) => record.broker_revoke_pending);
+  // The relay keeps these on Clear history: each one is the only way to retry its revoke.
+  const clearable = records.length - pending.length;
   return h(
     "div",
     { className: "settings-history" },
+    ...pending.map((record) =>
+      h(
+        "p",
+        { key: `retry-${record.device_id}`, className: "settings-hint" },
+        `${record.label || "Unnamed device"} (${record.device_id}) is revoked here, but the broker still accepts its credential. `,
+        h(
+          "button",
+          {
+            className: "settings-link",
+            "data-retry-revoke-device-id": record.device_id,
+            onClick: () => onRetryRevoke(record.device_id),
+            type: "button",
+          },
+          "Retry"
+        )
+      )
+    ),
     h(
       "button",
       {
@@ -259,17 +284,19 @@ function DeviceHistory({ records, formatTimestamp, onClear }) {
                   `Show ${hiddenCount} more`
                 )
               : null,
-            hiddenCount > 0 ? h("span", { "aria-hidden": "true" }, " · ") : null,
-            h(
-              "button",
-              {
-                className: "settings-link",
-                id: "clear-device-history-button",
-                onClick: () => onClear(records.length),
-                type: "button",
-              },
-              "Clear history"
-            )
+            hiddenCount > 0 && clearable > 0 ? h("span", { "aria-hidden": "true" }, " · ") : null,
+            clearable > 0
+              ? h(
+                  "button",
+                  {
+                    className: "settings-link",
+                    id: "clear-device-history-button",
+                    onClick: () => onClear(clearable),
+                    type: "button",
+                  },
+                  "Clear history"
+                )
+              : null
           )
         )
       : null

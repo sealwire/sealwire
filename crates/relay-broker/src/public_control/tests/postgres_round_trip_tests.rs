@@ -209,3 +209,73 @@ async fn postgres_device_grant_last_seen_round_trips_and_touches() {
         "a ws-token refresh must bump last_seen via the targeted UPDATE, got {bumped:?}"
     );
 }
+
+/// Deploy overlap on one database: the other instance grants a phone after this one
+/// loaded. This one must admit it from the database, and refuse it once revoked.
+///   RELAY_BROKER_TEST_POSTGRES_URL=... cargo test -p relay-broker postgres_device_join -- --test-threads=1
+#[tokio::test]
+async fn postgres_device_join_sees_a_grant_made_after_this_instance_loaded() {
+    let Some((url, _serial)) = crate::postgres_test_url().await else {
+        eprintln!("skipping postgres device join: set RELAY_BROKER_TEST_POSTGRES_URL to a live DB");
+        return;
+    };
+    let issuer = Some("test-issuer-secret-a3f76b4c2089d15e6b0fa873c4e9521d".to_string());
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let plane = || {
+        PublicControlPlane::from_parts_with_postgres(
+            issuer.clone(),
+            None,
+            None,
+            Some(url.clone()),
+            None,
+            None,
+        )
+    };
+    let other = plane().await.expect("first instance should connect");
+    let enrolled = other
+        .issue_relay_registration_for_verify_key(&format!("join-verify-key-{unique}"), None)
+        .await
+        .expect("registration should save");
+    let loaded_first = plane().await.expect("second instance should connect");
+    other
+        .issue_device_grant(
+            &enrolled.relay_refresh_token,
+            DeviceGrantRequest {
+                relay_id: enrolled.relay_id.clone(),
+                broker_room_id: enrolled.broker_room_id.clone(),
+                device_id: "phone".to_string(),
+            },
+            None,
+        )
+        .await
+        .expect("grant should save");
+
+    assert_eq!(
+        loaded_first
+            .relay_id_for_join(&enrolled.broker_room_id, Some("phone"))
+            .await,
+        Ok(enrolled.relay_id.clone()),
+        "a grant the other instance made must be found in the database"
+    );
+    other
+        .revoke_device_grant(
+            &enrolled.relay_refresh_token,
+            "phone",
+            DeviceGrantRevokeRequest {
+                relay_id: enrolled.relay_id.clone(),
+                broker_room_id: enrolled.broker_room_id.clone(),
+            },
+        )
+        .await
+        .expect("revoke should save");
+    assert!(
+        loaded_first
+            .relay_id_for_join(&enrolled.broker_room_id, Some("phone"))
+            .await
+            .is_err(),
+        "a revoked grant must be refused"
+    );
+}

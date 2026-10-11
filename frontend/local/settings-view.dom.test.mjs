@@ -268,6 +268,38 @@ test("revoked devices fold into one line and list only id and date, four at a ti
   }
 });
 
+// Visible with the history folded: the phone is cut off here, but the broker still lets it in.
+test("a revoked device the broker still accepts offers a retry", () => {
+  const { props } = baseProps();
+  const retried = [];
+  const cleared = [];
+  const view = render({
+    ...props,
+    devices: {
+      ...props.devices,
+      records: [
+        device("mobile-a"),
+        device("old-a", { lifecycle_state: "revoked", broker_revoke_pending: true }),
+        device("old-b", { lifecycle_state: "revoked" }),
+      ],
+      onRetryRevoke: (id) => retried.push(id),
+      onClearHistory: (count) => cleared.push(count),
+    },
+  });
+  try {
+    const retry = view.host.querySelectorAll("[data-retry-revoke-device-id]");
+    assert.equal(retry.length, 1);
+    assert.match(retry[0].parentElement.textContent, /broker/i);
+    click(retry[0]);
+    assert.deepEqual(retried, ["old-a"]);
+    click(view.host.querySelector(".settings-history-toggle"));
+    click(view.host.querySelector("#clear-device-history-button"));
+    assert.deepEqual(cleared, [1], "Clear history keeps the device the broker still accepts");
+  } finally {
+    view.cleanup();
+  }
+});
+
 // The QR arrives as SVG markup from the relay; it must go through an <img>, never be injected.
 test("the pairing page shows the QR as an image and the link to copy", (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW_SECONDS * 1000 });

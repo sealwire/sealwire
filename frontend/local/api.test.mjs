@@ -370,7 +370,7 @@ test("startTeam POSTs the flat spec as JSON and returns the receipt", async () =
   assert.equal(body.device_id, "device-a");
 });
 
-test("local requests omit cookies and keep the CSRF header on writes", async () => {
+test("local requests omit cookies and carry the CSRF header on reads and writes", async () => {
   const calls = [];
   const apiFetch = createApiFetch({ fetchImpl: async (input, init) => {
     calls.push({input, init});
@@ -382,5 +382,6 @@ test("local requests omit cookies and keep the CSRF header on writes", async () 
     assert.equal(init.credentials, "omit");
     assert.equal(init.headers.get("Authorization"), null);
   }
+  assert.equal(calls[0].init.headers.get("X-Agent-Relay-CSRF"), "1");
   assert.equal(calls[1].init.headers.get("X-Agent-Relay-CSRF"), "1");
 });

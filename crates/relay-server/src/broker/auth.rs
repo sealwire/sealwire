@@ -27,6 +27,9 @@ pub(crate) const RELAY_BROKER_CONTROL_URL_ENV: &str = "RELAY_BROKER_CONTROL_URL"
 pub(crate) const RELAY_BROKER_RELAY_ID_ENV: &str = "RELAY_BROKER_RELAY_ID";
 pub(crate) const RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV: &str = "RELAY_BROKER_RELAY_REFRESH_TOKEN";
 pub(crate) const RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV: &str = "RELAY_BROKER_DEVICE_JOIN_TTL_SECS";
+/// A self-hosted broker cannot revoke a ticket, so this bounds how long a revoked phone can
+/// still join it; there is no renewal, so it is also how often a phone re-pairs.
+pub(crate) const DEFAULT_SELF_HOSTED_DEVICE_JOIN_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
 const CONTROL_PLANE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONTROL_PLANE_RESPONSE_BYTES: usize = 64 * 1024;
@@ -107,7 +110,7 @@ pub(crate) struct ClientBrokerGrant {
 pub(crate) enum BrokerAuthConfig {
     SelfHostedSharedSecret {
         join_ticket_key: JoinTicketKey,
-        device_join_ttl_secs: Option<u64>,
+        device_join_ttl_secs: u64,
     },
     PublicControlPlane {
         control_url: Url,
@@ -165,12 +168,19 @@ impl BrokerAuthConfig {
                     })?;
                 let join_ticket_key = JoinTicketKey::from_secret(join_ticket_secret.as_bytes())
                     .map_err(|error| format!("{JOIN_TICKET_SECRET_ENV}: {error}"))?;
+                let device_join_ttl_secs = parse_optional_u64_env(
+                    RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV,
+                    device_join_ttl_secs,
+                )?
+                .unwrap_or(DEFAULT_SELF_HOSTED_DEVICE_JOIN_TTL_SECS);
+                if device_join_ttl_secs == 0 {
+                    return Err(format!(
+                        "{RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV} must be greater than 0"
+                    ));
+                }
                 Ok(Self::SelfHostedSharedSecret {
                     join_ticket_key,
-                    device_join_ttl_secs: parse_optional_u64_env(
-                        RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV,
-                        device_join_ttl_secs,
-                    )?,
+                    device_join_ttl_secs,
                 })
             }
             BrokerAuthMode::PublicControlPlane => {
@@ -363,11 +373,10 @@ impl BrokerAuthConfig {
                 join_ticket_key,
                 device_join_ttl_secs,
             } => {
-                let expires_at = expires_at_override.or_else(|| {
-                    device_join_ttl_secs
-                        .map(|ttl| unix_now().saturating_add(ttl))
-                        .filter(|expires_at| *expires_at > 0)
-                });
+                let expires_at = Some(
+                    expires_at_override
+                        .unwrap_or_else(|| unix_now().saturating_add(*device_join_ttl_secs)),
+                );
                 Ok(DeviceBrokerCredential {
                     join_credential: BrokerJoinCredential {
                         token: join_ticket_key.mint(&JoinTicketClaims::device_surface_join(
@@ -468,6 +477,8 @@ impl BrokerAuthConfig {
         }
     }
 
+    /// `None` in self-hosted mode: that broker checks tickets statelessly, so there is
+    /// nothing it could revoke; the ticket lasts until its own expiry.
     pub(crate) async fn revoke_device_credential(
         &self,
         broker_room_id: &str,
@@ -542,22 +553,12 @@ impl BrokerAuthConfig {
         }
     }
 
-    pub(crate) fn device_join_ttl_secs(&self) -> Option<u64> {
-        match self {
-            Self::SelfHostedSharedSecret {
-                device_join_ttl_secs,
-                ..
-            } => *device_join_ttl_secs,
-            Self::PublicControlPlane { .. } => None,
-        }
-    }
-
     pub(crate) fn predicted_device_join_expires_at(&self, now: u64) -> Option<u64> {
         match self {
             Self::SelfHostedSharedSecret {
                 device_join_ttl_secs,
                 ..
-            } => device_join_ttl_secs.map(|ttl| now.saturating_add(ttl)),
+            } => Some(now.saturating_add(*device_join_ttl_secs)),
             Self::PublicControlPlane { .. } => None,
         }
     }

@@ -106,6 +106,8 @@ pub(crate) struct DeviceRecord {
     pub(crate) broker_join_ticket_expires_at: Option<u64>,
     #[serde(default)]
     pub(crate) path_scope: Vec<String>,
+    #[serde(default)]
+    pub(crate) broker_revoke_pending: bool,
 }
 
 impl PairedDevice {
@@ -137,6 +139,7 @@ impl DeviceRecord {
             device_verify_key: device.device_verify_key.clone(),
             broker_join_ticket_expires_at: device.broker_join_ticket_expires_at,
             path_scope: device.path_scope.clone(),
+            broker_revoke_pending: false,
         }
     }
 
@@ -154,6 +157,7 @@ impl DeviceRecord {
             path_scope: self.path_scope.clone(),
             pairing_broker_url: None,
             pairing_broker_current: false,
+            broker_revoke_pending: self.broker_revoke_pending,
         }
     }
 }
@@ -831,6 +835,7 @@ impl RelayState {
 
     /// Forget revoked and rejected devices. A revoked record still limits the folders its
     /// device's already-accepted work may touch, so such work loses that limit here.
+    /// A record still waiting on a broker revoke stays: it is the only way to retry it.
     pub fn clear_device_history(&mut self) -> Vec<String> {
         let mut removed: Vec<String> = self
             .device_records
@@ -839,7 +844,8 @@ impl RelayState {
                 matches!(
                     record.lifecycle_state,
                     DeviceLifecycleState::Revoked | DeviceLifecycleState::Rejected
-                )
+                ) && !record.broker_revoke_pending
+                    && !self.broker_revokes_in_flight.contains(&record.device_id)
             })
             .map(|record| record.device_id.clone())
             .collect();
@@ -1181,6 +1187,7 @@ impl RelayState {
         record.broker_join_ticket_expires_at = device.broker_join_ticket_expires_at;
         record.path_scope = device.path_scope.clone();
         record.state_changed_at = now;
+        record.broker_revoke_pending = false;
     }
 
     fn record_rejected_device(
@@ -1215,6 +1222,7 @@ impl RelayState {
                 device_verify_key: device_verify_key.to_string(),
                 broker_join_ticket_expires_at: None,
                 path_scope: Vec::new(),
+                broker_revoke_pending: false,
             });
         record.label = label.to_string();
         record.lifecycle_state = DeviceLifecycleState::Rejected;

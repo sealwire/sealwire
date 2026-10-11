@@ -80,24 +80,72 @@ impl AppState {
             relay.push_log("info", format!("Revoked paired device {device_id}."));
             relay.notify();
         }
-        drop(relay);
-        if revoked {
-            if let Some(broker) = broker {
-                if let Err(error) = broker.revoke_device_credential(device_id).await {
-                    self.push_runtime_log(
-                        "warn",
-                        format!(
-                            "Local revoke for {device_id} succeeded, but broker credential revoke failed: {error}"
-                        ),
-                    )
-                    .await;
-                }
-            }
+        // Revoking again is how the user retries a broker revoke that failed.
+        let retry = !revoked
+            && relay
+                .device_records
+                .get(device_id)
+                .is_some_and(|record| record.broker_revoke_pending);
+        let broker = broker.filter(|_| revoked || retry);
+        if broker.is_some() {
+            relay.broker_revokes_in_flight.insert(device_id.to_string());
         }
+        drop(relay);
+        let broker_credential = match broker {
+            Some(broker) => {
+                let outcome = broker.revoke_device_credential(device_id).await;
+                self.settle_broker_revoke(&[device_id.to_string()], outcome)
+                    .await?
+            }
+            None => crate::protocol::BrokerCredentialRevocation::None,
+        };
         Ok(RevokeDeviceReceipt {
             device_id: device_id.to_string(),
             revoked,
+            broker_credential,
         })
+    }
+
+    /// Marks each device with whether the broker still accepts its credential, so a failure
+    /// stays on the Devices list with a retry instead of only in the log.
+    async fn settle_broker_revoke(
+        &self,
+        device_ids: &[String],
+        outcome: Result<crate::broker::BrokerRevocation, String>,
+    ) -> Result<crate::protocol::BrokerCredentialRevocation, String> {
+        use crate::protocol::BrokerCredentialRevocation;
+        let mut relay = self.relay.write().await;
+        for device_id in device_ids {
+            relay.broker_revokes_in_flight.remove(device_id);
+            if let Some(record) = relay.device_records.get_mut(device_id) {
+                record.broker_revoke_pending = outcome.is_err();
+            }
+        }
+        relay.notify();
+        match outcome {
+            Ok(crate::broker::BrokerRevocation::Revoked) => Ok(BrokerCredentialRevocation::Revoked),
+            Ok(crate::broker::BrokerRevocation::NotRevocable) => {
+                let expiries = device_ids.iter().map(|device_id| {
+                    relay
+                        .device_records
+                        .get(device_id)
+                        .and_then(|record| record.broker_join_ticket_expires_at)
+                });
+                // One ticket without an expiry means some revoked phone keeps its seat for good.
+                let expires_at = expiries
+                    .collect::<Option<Vec<_>>>()
+                    .and_then(|all| all.into_iter().max());
+                Ok(BrokerCredentialRevocation::Lapses { expires_at })
+            }
+            Err(error) => {
+                let message = format!(
+                    "Revoked {} on this computer, but the broker did not revoke its credential: {error}",
+                    device_ids.join(", ")
+                );
+                relay.push_log("warn", message.clone());
+                Err(message)
+            }
+        }
     }
 
     pub async fn clear_device_history(&self) -> crate::protocol::ClearDeviceHistoryReceipt {
@@ -123,6 +171,15 @@ impl AppState {
         keep_device_id: &str,
     ) -> Result<BulkRevokeDevicesReceipt, String> {
         let broker = BrokerConfig::from_env().await?;
+        self.revoke_other_devices_with(broker.as_ref(), keep_device_id)
+            .await
+    }
+
+    pub(crate) async fn revoke_other_devices_with(
+        &self,
+        broker: Option<&BrokerConfig>,
+        keep_device_id: &str,
+    ) -> Result<BulkRevokeDevicesReceipt, String> {
         let mut relay = self.relay.write().await;
         let revoked_device_ids =
             relay.revoke_all_other_paired_devices(keep_device_id, unix_now())?;
@@ -137,24 +194,26 @@ impl AppState {
             );
             relay.notify();
         }
-        drop(relay);
-        if !revoked_device_ids.is_empty() {
-            if let Some(broker) = broker {
-                if let Err(error) = broker.revoke_other_device_credentials(keep_device_id).await {
-                    self.push_runtime_log(
-                        "warn",
-                        format!(
-                            "Local bulk revoke kept {keep_device_id}, but broker credential revoke failed: {error}"
-                        ),
-                    )
-                    .await;
-                }
-            }
+        let broker = broker.filter(|_| !revoked_device_ids.is_empty());
+        if broker.is_some() {
+            relay
+                .broker_revokes_in_flight
+                .extend(revoked_device_ids.iter().cloned());
         }
+        drop(relay);
+        let broker_credential = match broker {
+            Some(broker) => {
+                let outcome = broker.revoke_other_device_credentials(keep_device_id).await;
+                self.settle_broker_revoke(&revoked_device_ids, outcome)
+                    .await?
+            }
+            None => crate::protocol::BrokerCredentialRevocation::None,
+        };
         Ok(BulkRevokeDevicesReceipt {
             kept_device_id: keep_device_id.to_string(),
             revoked_count: revoked_device_ids.len(),
             revoked_device_ids,
+            broker_credential,
         })
     }
 

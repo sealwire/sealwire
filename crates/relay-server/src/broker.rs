@@ -2,6 +2,7 @@ mod access_release;
 mod activation;
 mod auth;
 mod credentials;
+pub(crate) use credentials::BrokerRevocation;
 mod crypto;
 mod env_secret;
 mod lifecycle;
@@ -1316,10 +1317,6 @@ impl BrokerConfig {
         self.auth.mode()
     }
 
-    pub(crate) fn device_join_ttl_secs(&self) -> Option<u64> {
-        self.auth.device_join_ttl_secs()
-    }
-
     pub(crate) fn predicted_device_join_expires_at(&self, now: u64) -> Option<u64> {
         self.auth.predicted_device_join_expires_at(now)
     }
@@ -1425,14 +1422,6 @@ async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
         broker_url = %config.url,
         "relay-server broker publishing is enabled"
     );
-    if config.auth_mode() == BrokerAuthMode::SelfHostedSharedSecret
-        && config.device_join_ttl_secs().is_none()
-    {
-        warn!(
-            "self-hosted device join tickets are configured as long-lived bearer credentials until revoke"
-        );
-    }
-
     let change_rx = state.subscribe();
     let broker_state = state.clone();
     tokio::spawn(async move {
@@ -1448,17 +1437,6 @@ async fn launch_broker(state: AppState, resolution: BrokerConfigResolution) {
                 ),
             )
             .await;
-        if config.auth_mode() == BrokerAuthMode::SelfHostedSharedSecret
-            && config.device_join_ttl_secs().is_none()
-        {
-            broker_state
-                .push_runtime_log(
-                    "warn",
-                    "Device broker join tickets are long-lived bearer credentials until revoke."
-                        .to_string(),
-                )
-                .await;
-        }
         run_broker_loop(broker_state, change_rx, config).await;
     });
 }
@@ -3065,6 +3043,11 @@ fn build_transcript_resync_messages(
 fn pairing_result_targeted_message(
     result: crate::state::PendingPairingResult,
 ) -> Result<TargetedBrokerMessage, String> {
+    let device_id = result
+        .device
+        .as_ref()
+        .filter(|_| result.error.is_none())
+        .map(|device| device.device_id.clone());
     let encrypted = encrypt_json(
         &result.pairing_secret,
         &PairingResultPlaintext {
@@ -3087,6 +3070,7 @@ fn pairing_result_targeted_message(
         payload: Box::new(OutboundBrokerPayload::EncryptedPairingResult {
             pairing_id: result.pairing_id,
             target_peer_id: result.target_peer_id,
+            device_id,
             envelope: encrypted,
         }),
     })

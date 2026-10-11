@@ -3219,11 +3219,18 @@ async fn public_revoke_device_grant(
     let operation = format!("POST /api/public/devices/{device_id}/revoke");
     let input: DeviceGrantRevokeRequest =
         verified_relay_control_body(&control_plane, bearer, &operation, &headers, &body).await?;
-    control_plane
+    let response = control_plane
         .revoke_device_grant(bearer, &device_id, input)
         .await
-        .map(Json)
-        .map_err(public_api_error)
+        .map_err(public_api_error)?;
+    // A seated socket is never re-checked, so the grant alone would not reach it.
+    state
+        .broker
+        .close_revoked_surfaces(&response.broker_room_id, |seated| {
+            seated == response.device_id
+        })
+        .await;
+    Ok(Json(response))
 }
 
 async fn public_revoke_other_device_grants(
@@ -3254,11 +3261,17 @@ async fn public_revoke_other_device_grants(
         &body,
     )
     .await?;
-    control_plane
+    let response = control_plane
         .revoke_other_device_grants(bearer, input)
         .await
-        .map(Json)
-        .map_err(public_api_error)
+        .map_err(public_api_error)?;
+    state
+        .broker
+        .close_revoked_surfaces(&response.broker_room_id, |seated| {
+            seated != response.kept_device_id
+        })
+        .await;
+    Ok(Json(response))
 }
 
 async fn websocket(
@@ -4421,14 +4434,17 @@ async fn authorize_verified_join_access(
     broker_room_id: &str,
     verified: &VerifiedBrokerJoin,
 ) -> Result<(String, usize), &'static str> {
+    let device_id = matches!(verified.kind, JoinTicketKind::DeviceSurfaceJoin)
+        .then(|| verified.device_id.as_deref().unwrap_or_default());
     let relay_id = match state.join_verifier.public_control_plane() {
-        Some(control_plane) => match control_plane.relay_id_for_broker_room(broker_room_id).await {
-            Some(relay_id) => relay_id,
-            // Public mode requires a live registration for the room. Released /
-            // never-enrolled rooms fail closed even if the HMAC ticket is still
-            // within its short TTL.
-            None => return Err("broker room has no active relay registration"),
-        },
+        // Public mode requires a live registration for the room. Released /
+        // never-enrolled rooms fail closed even if the HMAC ticket is still
+        // within its short TTL.
+        Some(control_plane) => {
+            control_plane
+                .relay_id_for_join(broker_room_id, device_id)
+                .await?
+        }
         // Self-host shared-secret mode: no registration table. Use the room id as
         // a neutral key so OpenAccess still allows and Unavailable still denies.
         None => broker_room_id.to_string(),

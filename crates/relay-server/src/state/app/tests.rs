@@ -431,6 +431,56 @@ mod workspace_diff_tests {
         );
     }
 
+    // `.gitattributes` is repo content: it may name a driver whose command lives in the
+    // user's own gitconfig, and the Changes panel must still show the bytes on disk.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_diff_driver_named_by_the_repo_neither_runs_nor_rewrites_the_diff() {
+        let dir = init_repo().await;
+        let root = dir.path().canonicalize().expect("canonicalize");
+        let scripts = TempDir::new().expect("scripts dir");
+        let ran = scripts.path().join("external-diff-ran");
+        let external = scripts.path().join("external.sh");
+        std::fs::write(
+            &external,
+            format!("#!/bin/sh\ntouch '{}'\necho EXTERNAL\n", ran.display()),
+        )
+        .unwrap();
+        let textconv = scripts.path().join("textconv.sh");
+        std::fs::write(&textconv, "#!/bin/sh\necho TEXTCONV\n").unwrap();
+        for script in [&external, &textconv] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(root.join(".gitattributes"), "* diff=evil\n").unwrap();
+        git_stdout(&root, &["add", ".gitattributes"]).await;
+        git_stdout(&root, &["commit", "-q", "-m", "attributes"]).await;
+        git_stdout(
+            &root,
+            &["config", "diff.evil.command", external.to_str().unwrap()],
+        )
+        .await;
+        git_stdout(
+            &root,
+            &["config", "diff.evil.textconv", textconv.to_str().unwrap()],
+        )
+        .await;
+        std::fs::write(root.join("seed.txt"), "line1\nline2\nline3\n").unwrap();
+
+        let workspace =
+            TrustedWorkspace::granted_for_test(root.to_str().unwrap()).expect("workspace");
+        let diff = collect_workspace_diff_against(&workspace, None)
+            .await
+            .expect("diff");
+
+        assert!(!ran.exists(), "the external diff command was spawned");
+        assert!(
+            diff.diff.contains("+line3") && !diff.diff.contains("TEXTCONV"),
+            "the diff must be the real change, got:\n{}",
+            diff.diff
+        );
+    }
+
     #[tokio::test]
     async fn an_unresolvable_merge_base_is_none_rather_than_an_error() {
         let dir = init_repo().await;

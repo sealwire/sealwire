@@ -73,6 +73,14 @@ RELAY_BROKER_CHANNEL_ID=my-relay \
 npx sealwire --broker https://broker.example.com
 ```
 
+A device paired through your own broker gets a broker ticket that lasts 30 days
+(`RELAY_BROKER_DEVICE_JOIN_TTL_SECS` changes this). After that, pair the device
+again. The broker cannot cancel a ticket early. Revoking a device stops this relay
+from talking to it at once, but the device can still open broker connections until
+its ticket expires, and a connection it already has open is not closed then. To cut
+off every device right away, change `RELAY_BROKER_TICKET_SECRET` on both sides,
+restart the broker, and pair the devices again.
+
 See the [self-hosted deployment example](examples/self-host-broker/README.md) and
 [configuration reference](.env.example) for other deployment options. Use HTTPS for internet access
 and keep the broker's settings and data across restarts so paired devices can

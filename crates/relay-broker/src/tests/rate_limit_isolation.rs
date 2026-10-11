@@ -548,6 +548,16 @@ async fn broker_restart_admits_more_than_1024_preexisting_device_identities() {
     )
     .await
     .unwrap();
+    // Real device tickets are only issued to granted devices, and a join checks the grant.
+    plane
+        .seed_device_grants_for_test((0..IDENTITY_COUNT).map(|index| {
+            (
+                format!("relay-{index}"),
+                format!("room-{index}"),
+                format!("device-{index}"),
+            )
+        }))
+        .await;
     let tickets = (0..IDENTITY_COUNT)
         .map(|index| {
             plane
