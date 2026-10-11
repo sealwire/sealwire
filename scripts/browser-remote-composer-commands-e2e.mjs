@@ -1062,7 +1062,15 @@ async function assertAndroidImeTap(page) {
     "Enter selection retains Android typing focus");
   assert.ok(await page.evaluate((before) => visualViewport.height < before * 0.8, fullHeight));
   await page.keyboard.press("Backspace");
-  await page.keyboard.type("/rev", { delay: 150 });
+  await page.keyboard.type("/");
+  await page.waitForFunction((before) => visualViewport.height >= before - 1, fullHeight, { timeout: TIMEOUT_MS });
+  assert.equal(await page.inputValue("#remote-message-input"), "/");
+  assert.equal(await page.$eval("#remote-message-input", (input) => document.activeElement === input), false,
+    "a new slash also dismisses after Backspace removes the previous command");
+  await dispatchAndroidSystemTap(page, page.locator("#remote-message-input"));
+  await page.waitForFunction((before) => visualViewport.height < before * 0.8, fullHeight, { timeout: TIMEOUT_MS });
+  await page.keyboard.type("rev", { delay: 150 });
+  assert.equal(await page.inputValue("#remote-message-input"), "/rev");
   const firstRow = page.locator(".composer-command-row:not(.is-provider)");
   await page.waitForFunction(() => {
     const row = document.querySelector(".composer-command-row:not(.is-provider)");
@@ -1091,8 +1099,11 @@ async function assertAndroidImeTap(page) {
   await page.waitForFunction(() => !document.querySelector(".composer-command-pill"), null, { timeout: TIMEOUT_MS });
   await page.fill("#remote-message-input", "/rev");
   await page.waitForSelector(".composer-command-row.is-provider", { timeout: TIMEOUT_MS });
+  await page.waitForFunction((before) => visualViewport.height >= before - 1, fullHeight, { timeout: TIMEOUT_MS });
+  await dispatchAndroidSystemTap(page, page.locator("#remote-message-input"));
+  await page.waitForFunction((before) => visualViewport.height < before * 0.8, fullHeight, { timeout: TIMEOUT_MS });
   assert.equal(await page.$eval("#remote-message-input", (input) => document.activeElement === input), true,
-    "Backspace removal and retyping keep keyboard focus");
+    "explicitly returning to the repeated filter keeps keyboard focus");
   const providerRow = page.locator(".composer-command-row.is-provider");
   const before = await page.evaluate(() => {
     const rect = (node) => {
@@ -1148,6 +1159,9 @@ async function assertAndroidImeTap(page) {
   await page.keyboard.type("/");
   const expand = page.locator(".composer-command-expand");
   await expand.waitFor();
+  await page.waitForFunction((before) => visualViewport.height >= before - 1, fullHeight, { timeout: TIMEOUT_MS });
+  await dispatchAndroidSystemTap(page, page.locator("#remote-message-input"));
+  await page.waitForFunction((before) => visualViewport.height < before * 0.8, fullHeight, { timeout: TIMEOUT_MS });
   await centreInCommandMenu(expand);
   await dispatchAndroidSystemTap(page, expand);
   await waitExpanded(page, true);
@@ -1176,6 +1190,11 @@ async function assertPhoneTaps(page, { jitter = false, systemTouch = false } = {
   ]) {
     await page.fill("#remote-message-input", "/rev");
     await page.waitForSelector(".composer-command-row.is-provider", { timeout: TIMEOUT_MS });
+    if (systemTouch) {
+      await waitForAndroidViewportStable(page);
+      // Ordinary selections start after dismissal; the keyboard suite covers early taps.
+      await page.waitForTimeout(1050);
+    }
     await tap(page.locator(selector));
     await page.waitForFunction(
       (expected) => [...document.querySelectorAll(".composer-command-pill-label")].some((n) => n.textContent === expected),
@@ -1205,7 +1224,11 @@ async function assertPhoneTaps(page, { jitter = false, systemTouch = false } = {
   }
   await page.fill("#remote-message-input", "/");
   const expand = page.locator(".composer-command-expand");
-  if (systemTouch) await centreInCommandMenu(expand);
+  if (systemTouch) {
+    await waitForAndroidViewportStable(page);
+    await page.waitForTimeout(1050);
+    await centreInCommandMenu(expand);
+  }
   await tap(expand);
   await waitExpanded(page, true);
   const target = page.locator(".composer-command-row.is-provider").filter({ hasText: "$batch-skill-060" });

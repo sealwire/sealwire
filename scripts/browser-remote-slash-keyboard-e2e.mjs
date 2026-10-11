@@ -165,10 +165,15 @@ async function assertKeyboardExpand(page) {
   assert.equal(await page.inputValue(input), "check auth");
 }
 
-async function assertBackgroundFocus(page) {
+async function assertBackgroundFocus(page, viewport) {
   await page.fill(input, "/batch-skill-11");
   await page.waitForSelector(".composer-command-row.is-provider");
   await settle(page);
+  // Another field's software keyboard must not let a catalogue refresh grab focus.
+  if (viewport.height > 600) {
+    await page.setViewportSize({ width: viewport.width, height: 366 });
+    await settle(page);
+  }
   await page.evaluate(() => window.__fakeRelay.moveSession({ current_cwd: "/tmp/e2e-elsewhere" }));
   await page.waitForFunction(() => !document.querySelector(".composer-command-menu"));
   await page.evaluate(() => {
@@ -204,6 +209,9 @@ async function assertBackgroundFocus(page) {
 }
 
 async function assertIosKeyboard(page, viewport, dismiss) {
+  // Match the native 714 -> 366 contraction, not a larger desktop-sized delta.
+  await page.setViewportSize({ width: viewport.width, height: 714 });
+  await settle(page);
   await page.tap(input);
   if (!dismiss) {
     await page.keyboard.type("/");
@@ -230,7 +238,10 @@ async function assertIosKeyboard(page, viewport, dismiss) {
       "a touch intended for the retreating keyboard must not select a command");
     await page.evaluate(() => { delete visualViewport.offsetTop; });
     await page.setViewportSize(viewport);
-    await page.waitForTimeout(450);
+    await page.waitForTimeout(1050);
+    const restored = await geometry(page);
+    assert.ok(restored.height > Math.min(500, (restored.composerTop - restored.threadTop) * 0.8),
+      `the long touch menu uses the space released by the keyboard: ${JSON.stringify(restored)}`);
     await assertReachable(page, ".composer-command-expand");
     await page.tap(".composer-command-expand");
     const last = page.locator(".composer-command-row.is-provider").last();
@@ -247,6 +258,181 @@ async function assertIosKeyboard(page, viewport, dismiss) {
     assert.equal(await page.inputValue(input), "/review");
     assert.equal(await page.$eval(input, (node) => document.activeElement === node), true);
   }
+}
+
+async function assertInstructionEditing(page, viewport) {
+  await page.fill(input, "/rev");
+  await page.tap(".composer-command-row:not(.is-provider)");
+  await page.tap(input);
+  await page.keyboard.type("please check");
+  await page.$eval(input, (node) => node.blur());
+  await settle(page);
+  await page.tap(input);
+  await page.setViewportSize({ width: viewport.width, height: 366 });
+  await page.keyboard.press("End");
+  for (let count = 0; count < 11; count += 1) await page.keyboard.press("Backspace");
+  await page.waitForSelector(".composer-command-row");
+  await settle(page);
+  assert.equal(await page.$eval(input, (node) => document.activeElement === node), true,
+    "argument suggestions appearing while editing instructions must not dismiss the keyboard");
+  await page.keyboard.press("Backspace");
+  await page.keyboard.type("fix the login", { delay: 120 });
+  assert.deepEqual((await readMenu(page)).surfaceDraft, { found: true, value: "fix the login" });
+  for (const character of "fix the login") await page.keyboard.press("Backspace");
+  await page.keyboard.type("@");
+  await settle(page);
+  assert.equal(await page.$eval(input, (node) => document.activeElement === node), true,
+    "session suggestions are part of editing an already selected command");
+  assert.equal(await page.locator(".composer-command-pill-label").textContent(), "/review");
+}
+
+async function assertDismissalGesture(page, viewport, engine) {
+  // Freeze wall time, not animation frames, so down and click straddle the guard
+  // deterministically even when the browser or CI host is slow.
+  await page.clock.setFixedTime(new Date("2026-01-01T00:00:00Z"));
+  await page.tap(input);
+  await page.setViewportSize({ width: viewport.width, height: 366 });
+  await page.keyboard.type("/");
+  await settle(page);
+  assert.equal(await page.$eval(input, (node) => document.activeElement === node), false);
+  await page.setViewportSize(viewport);
+  await settle(page);
+  for (const elapsed of [650, 800, 1150, 1450]) {
+    await page.clock.setFixedTime(new Date(Date.UTC(2026, 0, 1, 0, 0, 0, elapsed)));
+    await page.tap(".composer-command-row");
+    assert.equal(await page.locator(".composer-command-pill").count(), 0,
+      "continued taps at the former keyboard position must not select or remove commands");
+  }
+  const row = page.locator(".composer-command-row").first();
+  const box = await row.boundingBox();
+  const touch = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const cdp = engine === "chromium" ? await page.context().newCDPSession(page) : null;
+  if (cdp) await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [touch] });
+  else await row.dispatchEvent("pointerdown", { pointerType: "touch", pointerId: 1, bubbles: true, cancelable: true });
+  await page.clock.setFixedTime(new Date("2026-01-01T00:00:03Z"));
+  if (cdp) await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  else {
+    await row.dispatchEvent("pointerup", { pointerType: "touch", pointerId: 1, bubbles: true });
+    await row.dispatchEvent("click", { detail: 1, bubbles: true, cancelable: true });
+  }
+  assert.equal(await page.locator(".composer-command-pill").count(), 0,
+    "a touch starting during dismissal stays blocked when released after the guard expires");
+  assert.equal(await page.inputValue(input), "/");
+  await row.tap();
+  assert.equal(await page.locator(".composer-command-pill").count(), 1,
+    "a fresh touch after dismissal selects normally");
+}
+
+async function assertKeyboardDetection(page, viewport, composition) {
+  await page.setViewportSize({ width: viewport.width, height: 714 });
+  await settle(page);
+  await page.tap(input);
+  if (composition) await page.dispatchEvent(input, "compositionstart", { data: "" });
+  await page.setViewportSize({ width: viewport.width, height: composition ? 366 : 644 });
+  await page.keyboard.type("/");
+  await settle(page);
+  assert.equal(await page.$eval(input, (node) => document.activeElement === node), true,
+    composition ? "composition must not be interrupted by keyboard dismissal" : "browser chrome resizing is not a software keyboard");
+  if (composition) {
+    await page.dispatchEvent(input, "compositionend", { data: "/" });
+  } else {
+    await page.keyboard.press("Backspace");
+    await page.setViewportSize({ width: viewport.width, height: 366 });
+    await page.keyboard.type("/");
+  }
+  await settle(page);
+  assert.equal(await page.$eval(input, (node) => document.activeElement === node), false,
+    composition ? "the committed composition opens commands and dismisses the keyboard" : "a native-sized contraction dismisses the keyboard");
+  assert.equal((await readMenu(page)).surfaceDraft.value, "/");
+  // Returning to filtering applies to this query, not every future slash draft.
+  await page.tap(input);
+  await page.keyboard.press("Backspace");
+  await page.keyboard.type("hello");
+  for (const character of "hello") await page.keyboard.press("Backspace");
+  await page.keyboard.type("/");
+  await settle(page);
+  assert.equal(await page.$eval(input, (node) => document.activeElement === node), false,
+    "a new slash draft follows the same keyboard rule after an earlier filter was cleared");
+  await page.tap(input);
+  await page.keyboard.type("rev");
+  await page.keyboard.press("Enter");
+  assert.equal(await page.locator(".composer-command-pill-label").textContent(), "/review");
+  await page.keyboard.press("Backspace");
+  await page.keyboard.type("/");
+  await settle(page);
+  assert.equal(await page.$eval(input, (node) => document.activeElement === node), false,
+    "a new slash draft also dismisses after removing the previous command with Backspace");
+}
+
+async function assertLandscapeFilter(page, viewport, label) {
+  await page.tap(input);
+  await page.keyboard.type("/");
+  await page.waitForSelector(".composer-command-menu");
+  await settle(page);
+  await page.tap(input);
+  await page.setViewportSize({ width: viewport.width, height: viewport.width === 844 ? 190 : 170 });
+  await settle(page);
+  assert.equal(await page.$eval(input, (node) => document.activeElement === node), true,
+    "landscape filtering keeps typing focus");
+  const box = await geometry(page);
+  assert.ok(box.top >= 0 && box.bottom <= box.composerTop, `landscape menu fits above the input: ${JSON.stringify(box)}`);
+  await assertReachable(page, ".composer-command-row");
+  await assertReachable(page, ".composer-command-expand");
+  await page.keyboard.type("rev");
+  await settle(page);
+  await assertReachable(page, ".composer-command-row.is-provider");
+  if (screenshots) await page.screenshot({ path: path.join(screenshots, `${label}.png`) });
+  await page.tap(".composer-command-row.is-provider");
+  assert.equal(await page.locator(".composer-command-pill-label").textContent(), "$review");
+}
+
+async function assertTinyViewport(page, viewport, label) {
+  await page.fill(input, "/");
+  await page.waitForSelector(".composer-command-menu");
+  await page.tap(input);
+  await page.setViewportSize({ width: viewport.width, height: 118 });
+  // Reproduce native iOS's panned input and remaining strip, including its stale offset.
+  // This isolates placement; XCTest separately verifies actual keyboard taps.
+  await page.evaluate(() => {
+    const field = document.querySelector("#remote-message-input");
+    field.closest(".composer-inner").style.transform = `translateY(${18 - field.getBoundingClientRect().top}px)`;
+    Object.defineProperties(visualViewport, {
+      height: { configurable: true, value: 62 },
+      offsetTop: { configurable: true, value: 220 },
+    });
+    visualViewport.dispatchEvent(new Event("resize"));
+  });
+  await settle(page);
+  assert.equal(await page.$eval(input, (node) => document.activeElement === node), true);
+  const box = await geometry(page);
+  assert.ok(box.height > 14, `even a tiny viewport must show list content: ${JSON.stringify(box)}`);
+  assert.ok(box.top >= 0 && box.bottom <= 62, `the list stays in the remaining visible strip: ${JSON.stringify(box)}`);
+  const reveal = async (selector) => {
+    const row = page.locator(selector).first();
+    await row.evaluate((node) => {
+      const menu = node.closest(".composer-command-menu");
+      menu.scrollTop += node.getBoundingClientRect().top - menu.getBoundingClientRect().top - 7;
+    });
+    const point = await row.evaluate((node) => {
+      const menu = node.closest(".composer-command-menu").getBoundingClientRect();
+      const rect = node.getBoundingClientRect();
+      const top = Math.max(menu.top + 7, rect.top, 0);
+      const bottom = Math.min(menu.bottom - 7, rect.bottom, 62);
+      const x = rect.left + rect.width / 2;
+      const y = (top + bottom) / 2;
+      return { x, y, visibleHeight: bottom - top, hittable: node.contains(document.elementFromPoint(x, y)) };
+    });
+    assert.ok(point.visibleHeight > 0 && point.hittable, `${selector} has visible, tappable content: ${JSON.stringify(point)}`);
+    return point;
+  };
+  await reveal(".composer-command-row");
+  const expand = await reveal(".composer-command-expand");
+  await page.touchscreen.tap(expand.x, expand.y);
+  assert.equal(await page.locator(".composer-command-row").count(), 130);
+  const last = await reveal('.composer-command-row.is-provider:last-child');
+  if (screenshots) await page.screenshot({ path: path.join(screenshots, `${label}.png`) });
+  await page.touchscreen.tap(last.x, last.y);
+  assert.equal(await page.locator(".composer-command-pill-label").textContent(), "$batch-skill-119");
 }
 
 async function assertFocusAppearance(page, target, label) {
@@ -311,11 +497,13 @@ try {
   for (const [engine, type] of engines) {
     const browser = await type.launch({ headless: true });
     try {
-      for (const viewport of [{ width: 390, height: 844 }, { width: 390, height: 320 }, { width: 320, height: 568 }, { width: 1024, height: 1366 }]) {
-        for (const scenario of ["typing", "keyboard-pick", "keyboard-expand", "menu", "backspace", "retained", "filter", "background", "soft-keyboard", "ios-viewport", "focus-list", "focus-expand", "focus-pill"]) {
+      for (const viewport of [{ width: 390, height: 844 }, { width: 390, height: 320 }, { width: 320, height: 568 }, { width: 1024, height: 1366 }, { width: 844, height: 390 }, { width: 667, height: 375 }]) {
+        for (const scenario of ["typing", "keyboard-pick", "keyboard-expand", "menu", "backspace", "retained", "filter", "background", "soft-keyboard", "ios-viewport", "instructions", "dismissal-gesture", "threshold", "composition", "landscape", "tiny-viewport", "focus-list", "focus-expand", "focus-pill"]) {
           if (process.env.SLASH_SCENARIO && process.env.SLASH_SCENARIO !== scenario) continue;
+          if (scenario !== "tiny-viewport" && (scenario === "landscape") !== (viewport.width === 844 || viewport.width === 667)) continue;
           if (scenario.startsWith("focus-") && viewport.height < 600) continue;
           if ((scenario === "soft-keyboard" || scenario === "ios-viewport") && viewport.height < 600) continue;
+          if (["instructions", "dismissal-gesture", "threshold", "composition"].includes(scenario) && viewport.height < 600) continue;
           const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true, serviceWorkers: "block" });
           const page = await context.newPage();
           const errors = [];
@@ -327,10 +515,15 @@ try {
             if (scenario !== "menu") {
               if (scenario.startsWith("focus-")) await assertFocusAppearance(page, scenario.slice(6), label);
               else if (scenario === "filter") await assertFilterCorrection(page);
-              else if (scenario === "background") await assertBackgroundFocus(page);
+              else if (scenario === "background") await assertBackgroundFocus(page, viewport);
               else if (scenario === "typing") await assertContinuousTyping(page);
               else if (scenario === "keyboard-pick") await assertKeyboardPick(page);
               else if (scenario === "keyboard-expand") await assertKeyboardExpand(page);
+              else if (scenario === "instructions") await assertInstructionEditing(page, viewport);
+              else if (scenario === "dismissal-gesture") await assertDismissalGesture(page, viewport, engine);
+              else if (scenario === "landscape") await assertLandscapeFilter(page, viewport, label);
+              else if (scenario === "tiny-viewport") await assertTinyViewport(page, viewport, label);
+              else if (scenario === "threshold" || scenario === "composition") await assertKeyboardDetection(page, viewport, scenario === "composition");
               else if (scenario === "soft-keyboard" || scenario === "ios-viewport") await assertIosKeyboard(page, viewport, scenario === "soft-keyboard");
               else await assertRepeatedFilter(page, scenario === "backspace");
               assert.deepEqual(errors, []);
