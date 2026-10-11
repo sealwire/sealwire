@@ -203,6 +203,52 @@ async function assertBackgroundFocus(page) {
     "deferred menu placement respects a focus change after the input event");
 }
 
+async function assertIosKeyboard(page, viewport, dismiss) {
+  await page.tap(input);
+  if (!dismiss) {
+    await page.keyboard.type("/");
+    await page.waitForSelector(".composer-command-menu");
+    await page.tap(input);
+  }
+  // Native iOS shrank innerHeight but retained a 348px pan offset. Reproduce those
+  // measurements here; only a native test can prove the software keyboard closes.
+  await page.evaluate(() => Object.defineProperty(visualViewport, "offsetTop", { configurable: true, value: 348 }));
+  await page.setViewportSize({ width: viewport.width, height: 366 });
+  if (dismiss) await page.keyboard.type("/");
+  await page.waitForSelector(".composer-command-menu");
+  await settle(page);
+  assert.equal(await page.$eval(input, (node) => document.activeElement === node), !dismiss,
+    dismiss ? "opening commands releases input focus in a keyboard-sized viewport" : "explicit filtering retains input focus");
+  assert.equal((await readMenu(page)).surfaceDraft.value, "/");
+  const box = await geometry(page);
+  assert.ok(box.height > 100 && box.top >= box.threadTop && box.bottom <= 366,
+    `iOS resize plus residual pan must leave a usable menu: ${JSON.stringify(box)}`);
+  if (screenshots) await page.screenshot({ path: path.join(screenshots, `${viewport.width}-ios-${dismiss ? "dismiss" : "filter"}.png`) });
+  if (dismiss) {
+    await page.tap(".composer-command-row");
+    assert.equal(await page.locator(".composer-command-pill").count(), 0,
+      "a touch intended for the retreating keyboard must not select a command");
+    await page.evaluate(() => { delete visualViewport.offsetTop; });
+    await page.setViewportSize(viewport);
+    await page.waitForTimeout(450);
+    await assertReachable(page, ".composer-command-expand");
+    await page.tap(".composer-command-expand");
+    const last = page.locator(".composer-command-row.is-provider").last();
+    await last.evaluate((row) => { row.closest(".composer-command-menu").scrollTop = row.offsetTop; });
+    await last.tap();
+    assert.equal(await page.locator(".composer-command-pill").count(), 1,
+      "the final command in the expanded long list is selectable");
+  } else {
+    await page.keyboard.type("revzzq", { delay: 120 });
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("iew", { delay: 120 });
+    assert.equal(await page.inputValue(input), "/review");
+    assert.equal(await page.$eval(input, (node) => document.activeElement === node), true);
+  }
+}
+
 async function assertFocusAppearance(page, target, label) {
   await page.tap(input);
   await page.keyboard.type("/");
@@ -266,9 +312,10 @@ try {
     const browser = await type.launch({ headless: true });
     try {
       for (const viewport of [{ width: 390, height: 844 }, { width: 390, height: 320 }, { width: 320, height: 568 }, { width: 1024, height: 1366 }]) {
-        for (const scenario of ["typing", "keyboard-pick", "keyboard-expand", "menu", "backspace", "retained", "filter", "background", "focus-list", "focus-expand", "focus-pill"]) {
+        for (const scenario of ["typing", "keyboard-pick", "keyboard-expand", "menu", "backspace", "retained", "filter", "background", "soft-keyboard", "ios-viewport", "focus-list", "focus-expand", "focus-pill"]) {
           if (process.env.SLASH_SCENARIO && process.env.SLASH_SCENARIO !== scenario) continue;
           if (scenario.startsWith("focus-") && viewport.height < 600) continue;
+          if ((scenario === "soft-keyboard" || scenario === "ios-viewport") && viewport.height < 600) continue;
           const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true, serviceWorkers: "block" });
           const page = await context.newPage();
           const errors = [];
@@ -284,6 +331,7 @@ try {
               else if (scenario === "typing") await assertContinuousTyping(page);
               else if (scenario === "keyboard-pick") await assertKeyboardPick(page);
               else if (scenario === "keyboard-expand") await assertKeyboardExpand(page);
+              else if (scenario === "soft-keyboard" || scenario === "ios-viewport") await assertIosKeyboard(page, viewport, scenario === "soft-keyboard");
               else await assertRepeatedFilter(page, scenario === "backspace");
               assert.deepEqual(errors, []);
               console.log(`${label} OK`);
@@ -302,6 +350,7 @@ try {
             // A synthetic viewport isolates positioning from native keyboard/scroll
             // behavior. It is a geometry regression, not evidence of iPhone behavior.
             if (viewport.height > 600) {
+              await page.tap(input);
               await page.evaluate(() => {
                 Object.defineProperties(visualViewport, {
                   height: { configurable: true, value: 330 },

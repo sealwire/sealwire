@@ -516,7 +516,11 @@ async function main() {
       return;
     }
     for (const height of [MOBILE_VIEWPORT.height, 480]) {
+      // Set up each screen size while idle; shrinking a focused input's viewport
+      // represents an opening software keyboard and intentionally dismisses it.
+      await page.$eval("#remote-message-input", (input) => input.blur());
       await page.setViewportSize({ width: MOBILE_VIEWPORT.width, height });
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       await assertPhoneTaps(page);
       // WebKit's automation API exposes taps; continuous native touch input is CDP-only.
       if (!WEBKIT) await assertPhoneTaps(page, { jitter: true });
@@ -721,6 +725,10 @@ async function assertDelegateViewport(page) {
   await page.setViewportSize({ width: MOBILE_VIEWPORT.width, height: 320 });
   await page.$eval(input, (node) => node.blur());
   await page.focus(input);
+  await page.keyboard.type("/");
+  await page.waitForSelector(".composer-command-menu");
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.tap(input);
   await page.evaluate((screenHeight) => {
     Object.defineProperty(screen, "height", { configurable: true, value: screenHeight });
     window.__delegateInputBlurs = [];
@@ -728,12 +736,12 @@ async function assertDelegateViewport(page) {
       window.__delegateInputBlurs.push(event.target.value);
     });
   }, MOBILE_VIEWPORT.height);
-  await page.keyboard.type("/delegate ", { delay: 120 });
+  await page.keyboard.type("delegate ", { delay: 120 });
   await page.waitForFunction((name) => document.querySelector(".composer-command-name")?.textContent === name,
     asks[0].peer_title, { timeout: TIMEOUT_MS });
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   assert.deepEqual(await page.evaluate(() => window.__delegateInputBlurs), [],
-    "typing /delegate must keep the keyboard open");
+    "explicitly filtering /delegate must keep the keyboard open");
   await assertFirstDelegateVisible("while typing /delegate above the keyboard");
   await page.keyboard.type("@受托者");
   assert.equal(await page.inputValue(input), "@受托者", "typing continues without refocusing");
@@ -1025,13 +1033,19 @@ async function assertAndroidImeTap(page) {
     fullHeight,
     { timeout: TIMEOUT_MS }
   );
-  await page.keyboard.type("/rev", { delay: 150 });
-  assert.equal(await page.inputValue("#remote-message-input"), "/rev", "Android receives every character after the slash");
+  await page.keyboard.type("/");
+  await page.waitForFunction((before) => visualViewport.height >= before - 1, fullHeight, { timeout: TIMEOUT_MS });
+  assert.equal(await page.$eval("#remote-message-input", (input) => document.activeElement === input), false,
+    "opening slash commands dismisses the Android IME");
+  await dispatchAndroidSystemTap(page, page.locator("#remote-message-input"));
+  await page.waitForFunction((before) => visualViewport.height < before * 0.8, fullHeight, { timeout: TIMEOUT_MS });
+  await page.keyboard.type("rev", { delay: 150 });
+  assert.equal(await page.inputValue("#remote-message-input"), "/rev", "Android receives every character of an explicit filter");
   assert.equal((await readMenu(page)).surfaceDraft.value, "/rev");
   assert.equal(await page.locator(".composer-command-pill").count(), 0, "typing never selects an unintended command");
   await page.waitForSelector(".composer-command-row.is-provider", { timeout: TIMEOUT_MS });
   assert.ok(await page.evaluate((before) => visualViewport.height < before * 0.8, fullHeight),
-    "opening the menu during typing keeps the Android IME up");
+    "explicit filtering keeps the Android IME up");
   await page.keyboard.type("zzq", { delay: 120 });
   assert.equal(await page.locator(".composer-command-menu").count(), 0);
   for (let count = 0; count < 3; count += 1) await page.keyboard.press("Backspace");
@@ -1230,6 +1244,7 @@ async function readExpandedMenu(page) {
       clientHeight: menu?.clientHeight ?? 0,
       viewportHeight: window.innerHeight,
       focused: document.activeElement?.id || "",
+      threadTop: document.querySelector(".remote-thread-panel .thread-shell")?.getBoundingClientRect().top || 0,
       draft: document.querySelector("#remote-message-input")?.value ?? null,
       pills: [...document.querySelectorAll(".composer-command-pill-label")].map((n) => n.textContent),
     };
@@ -1244,8 +1259,8 @@ function assertFitsAboveComposer(state, label) {
     `${label}: the menu must not cover the composer — ${JSON.stringify(state)}`
   );
   assert.ok(
-    state.menu.height <= state.viewportHeight * 0.45,
-    `${label}: however many rows, the list keeps to a slice of the screen — ${JSON.stringify(state)}`
+    state.menu.top >= state.threadTop && state.menu.bottom <= state.viewportHeight,
+    `${label}: however many rows, the list stays below the header and inside the viewport — ${JSON.stringify(state)}`
   );
 }
 
