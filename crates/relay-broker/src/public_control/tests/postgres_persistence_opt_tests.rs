@@ -181,6 +181,161 @@ async fn postgres_revoke_cannot_report_success_after_a_concurrent_rotation() {
     assert_postgres_rotation_revoke_conflict(true).await;
 }
 
+#[tokio::test]
+async fn postgres_stale_device_activity_cannot_restore_a_revoked_grant() {
+    let Some((url, _serial)) = test_url().await else {
+        return;
+    };
+    let pool = connect_and_init(&url).await;
+    truncate_all(&pool).await;
+    let owner = postgres_plane(pool.clone(), false);
+    let relay = owner
+        .issue_relay_registration_for_verify_key("activity-owner", None)
+        .await
+        .unwrap();
+    let device = owner
+        .issue_device_grant(
+            &relay.relay_refresh_token,
+            DeviceGrantRequest {
+                relay_id: relay.relay_id.clone(),
+                broker_room_id: relay.broker_room_id.clone(),
+                device_id: "activity-phone".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE public_device_grants SET last_seen = 100")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let stale = postgres_plane(pool.clone(), false);
+    stale
+        .issue_device_session(&device.device_refresh_token)
+        .await
+        .unwrap();
+    owner
+        .revoke_device_grant(
+            &relay.relay_refresh_token,
+            "activity-phone",
+            DeviceGrantRevokeRequest {
+                relay_id: relay.relay_id.clone(),
+                broker_room_id: relay.broker_room_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    stale
+        .issue_device_ws_token(&device.device_refresh_token)
+        .await
+        .unwrap();
+    let result = stale
+        .issue_relay_registration_for_verify_key("unrelated-activity-relay", None)
+        .await;
+    assert!(result.is_err(), "a stale activity write must fail");
+    let loaded = load_public_control_postgres(&pool).await.unwrap();
+    assert!(loaded.grants_by_hash.is_empty());
+    assert_eq!(loaded.relay_registrations_by_hash.len(), 1);
+    assert!(stale
+        .issue_device_session(&device.device_refresh_token)
+        .await
+        .is_err());
+    let restarted = postgres_plane(pool.clone(), false);
+    assert!(restarted
+        .issue_device_session(&device.device_refresh_token)
+        .await
+        .is_err());
+    truncate_all(&pool).await;
+}
+
+#[tokio::test]
+async fn postgres_stale_metadata_cannot_restore_revoked_or_rotated_credentials() {
+    let Some((url, _serial)) = test_url().await else {
+        return;
+    };
+    let pool = connect_and_init(&url).await;
+    truncate_all(&pool).await;
+    for target in [
+        RefreshWaitTarget::Relay,
+        RefreshWaitTarget::Client,
+        RefreshWaitTarget::Device,
+    ] {
+        for rotate in [false, true] {
+            let original = store_from(
+                vec![relay_reg("metadata", None)],
+                vec![client_ident("metadata")],
+                vec![device_grant("metadata", None)],
+                vec![],
+            );
+            save_public_control_postgres(&pool, &PublicControlStateStore::default(), &original)
+                .await
+                .unwrap();
+            let mut authoritative = original.clone();
+            let mut stale = original.clone();
+            match target {
+                RefreshWaitTarget::Relay => {
+                    let mut row = authoritative
+                        .relay_registrations_by_hash
+                        .remove("metadata")
+                        .unwrap();
+                    if rotate {
+                        row.refresh_token_hash = "metadata-rotated".into();
+                        authoritative
+                            .relay_registrations_by_hash
+                            .insert(row.refresh_token_hash.clone(), row);
+                    }
+                    stale
+                        .relay_registrations_by_hash
+                        .get_mut("metadata")
+                        .unwrap()
+                        .relay_label = Some("stale".into());
+                }
+                RefreshWaitTarget::Client => {
+                    let mut row = authoritative
+                        .client_registrations_by_hash
+                        .remove("metadata")
+                        .unwrap();
+                    if rotate {
+                        row.refresh_token_hash = "metadata-rotated".into();
+                        authoritative
+                            .client_registrations_by_hash
+                            .insert(row.refresh_token_hash.clone(), row);
+                    }
+                    stale
+                        .client_registrations_by_hash
+                        .get_mut("metadata")
+                        .unwrap()
+                        .client_label = Some("stale".into());
+                }
+                RefreshWaitTarget::Device => {
+                    let mut row = authoritative.grants_by_hash.remove("metadata").unwrap();
+                    if rotate {
+                        row.refresh_token_hash = "metadata-rotated".into();
+                        authoritative
+                            .grants_by_hash
+                            .insert(row.refresh_token_hash.clone(), row);
+                    }
+                    stale.grants_by_hash.get_mut("metadata").unwrap().last_seen = Some(500);
+                }
+            }
+            save_public_control_postgres(&pool, &original, &authoritative)
+                .await
+                .unwrap();
+            assert_eq!(
+                save_public_control_postgres(&pool, &original, &stale)
+                    .await
+                    .unwrap_err(),
+                "public control-plane credential changed before save; retry"
+            );
+            assert_eq!(
+                load_public_control_postgres(&pool).await.unwrap(),
+                authoritative
+            );
+            truncate_all(&pool).await;
+        }
+    }
+}
+
 async fn assert_postgres_rotation_revoke_conflict(rotation_first: bool) {
     let Some((url, _serial)) = test_url().await else {
         return;
@@ -332,6 +487,17 @@ async fn postgres_targeted_save_applies_add_update_delete() {
     assert!(
         loaded2.client_relay_grants_by_key.is_empty(),
         "removed client-relay grant must be deleted"
+    );
+
+    let mut v3 = v2.clone();
+    v3.grants_by_hash.get_mut("g2").unwrap().last_seen = Some(500);
+    save_public_control_postgres(&pool, &v2, &v3)
+        .await
+        .expect("save device metadata update");
+    assert_eq!(
+        load_public_control_postgres(&pool).await.unwrap(),
+        v3,
+        "an existing device's metadata must still update"
     );
 
     truncate_all(&pool).await;
@@ -1301,18 +1467,25 @@ async fn assert_signed_refresh_waiting_on_credential_change(
                     .as_deref(),
                 Some("after")
             ),
-            RefreshWaitTarget::Client => assert_eq!(
-                loaded
-                    .client_identity_for_id(&client.client_id)
-                    .unwrap()
-                    .client_label
-                    .as_deref(),
-                Some("after")
-            ),
-            RefreshWaitTarget::Device => assert!(loaded
-                .grants_by_hash
-                .values()
-                .all(|grant| grant.last_seen != Some(100))),
+            RefreshWaitTarget::Client => {
+                let refreshed = loaded.client_identity_for_id(&client.client_id).unwrap();
+                assert_eq!(refreshed.client_label.as_deref(), Some("after"));
+                assert!(refreshed
+                    .superseded
+                    .iter()
+                    .any(|token| token.refresh_token_hash == "rotated-client"));
+            }
+            RefreshWaitTarget::Device => {
+                let refreshed = loaded
+                    .grants_by_hash
+                    .values()
+                    .find(|grant| grant.device_id == device.device_id)
+                    .unwrap();
+                assert!(refreshed
+                    .superseded
+                    .iter()
+                    .any(|token| token.refresh_token_hash == "rotated-device"));
+            }
         }
     } else {
         assert_eq!(result.unwrap_err(), "credential refresh is invalid");

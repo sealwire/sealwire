@@ -3903,7 +3903,18 @@ async fn upsert_relay_registrations(
 ) -> Result<(), String> {
     for (hash, reg) in &next.relay_registrations_by_hash {
         if prev.relay_registrations_by_hash.get(hash) != Some(reg) {
-            sqlx::query(
+            let existing = prev.relay_registrations_by_hash.contains_key(hash);
+            let statement = if existing {
+                r#"
+                UPDATE public_relay_registrations SET
+                    relay_id = $2,
+                    broker_room_id = $3,
+                    created_at = $4,
+                    relay_label = $5,
+                    relay_verify_key = $6
+                WHERE refresh_token_hash = $1
+                "#
+            } else {
                 r#"
                 INSERT INTO public_relay_registrations (
                     refresh_token_hash, relay_id, broker_room_id, created_at, relay_label, relay_verify_key
@@ -3915,17 +3926,21 @@ async fn upsert_relay_registrations(
                     created_at = EXCLUDED.created_at,
                     relay_label = EXCLUDED.relay_label,
                     relay_verify_key = EXCLUDED.relay_verify_key
-                "#,
-            )
-            .bind(&reg.refresh_token_hash)
-            .bind(&reg.relay_id)
-            .bind(&reg.broker_room_id)
-            .bind(u64_to_i64(reg.created_at, "created_at")?)
-            .bind(&reg.relay_label)
-            .bind(&reg.relay_verify_key)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| format!("failed to upsert public_relay_registrations: {error}"))?;
+                "#
+            };
+            let changed = sqlx::query(statement)
+                .bind(&reg.refresh_token_hash)
+                .bind(&reg.relay_id)
+                .bind(&reg.broker_room_id)
+                .bind(u64_to_i64(reg.created_at, "created_at")?)
+                .bind(&reg.relay_label)
+                .bind(&reg.relay_verify_key)
+                .execute(&mut **tx)
+                .await
+                .map_err(|error| format!("failed to upsert public_relay_registrations: {error}"))?;
+            if existing {
+                require_changed_credential(changed.rows_affected())?;
+            }
         }
     }
     Ok(())
@@ -3938,7 +3953,18 @@ async fn upsert_client_identities(
 ) -> Result<(), String> {
     for (hash, client) in &next.client_registrations_by_hash {
         if prev.client_registrations_by_hash.get(hash) != Some(client) {
-            sqlx::query(
+            let existing = prev.client_registrations_by_hash.contains_key(hash);
+            let statement = if existing {
+                r#"
+                UPDATE public_client_identities SET
+                    client_id = $2,
+                    client_verify_key = $3,
+                    created_at = $4,
+                    client_label = $5,
+                    superseded_tokens = $6
+                WHERE refresh_token_hash = $1
+                "#
+            } else {
                 r#"
                 INSERT INTO public_client_identities (
                     refresh_token_hash, client_id, client_verify_key, created_at, client_label,
@@ -3951,17 +3977,21 @@ async fn upsert_client_identities(
                     created_at = EXCLUDED.created_at,
                     client_label = EXCLUDED.client_label,
                     superseded_tokens = EXCLUDED.superseded_tokens
-                "#,
-            )
-            .bind(&client.refresh_token_hash)
-            .bind(&client.client_id)
-            .bind(&client.client_verify_key)
-            .bind(u64_to_i64(client.created_at, "created_at")?)
-            .bind(&client.client_label)
-            .bind(encode_superseded(&client.superseded)?)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| format!("failed to upsert public_client_identities: {error}"))?;
+                "#
+            };
+            let changed = sqlx::query(statement)
+                .bind(&client.refresh_token_hash)
+                .bind(&client.client_id)
+                .bind(&client.client_verify_key)
+                .bind(u64_to_i64(client.created_at, "created_at")?)
+                .bind(&client.client_label)
+                .bind(encode_superseded(&client.superseded)?)
+                .execute(&mut **tx)
+                .await
+                .map_err(|error| format!("failed to upsert public_client_identities: {error}"))?;
+            if existing {
+                require_changed_credential(changed.rows_affected())?;
+            }
         }
     }
     Ok(())
@@ -3974,7 +4004,19 @@ async fn upsert_device_grants(
 ) -> Result<(), String> {
     for (hash, grant) in &next.grants_by_hash {
         if prev.grants_by_hash.get(hash) != Some(grant) {
-            sqlx::query(
+            let existing = prev.grants_by_hash.contains_key(hash);
+            let statement = if existing {
+                r#"
+                UPDATE public_device_grants SET
+                    relay_id = $2,
+                    broker_room_id = $3,
+                    device_id = $4,
+                    created_at = $5,
+                    last_seen = $6,
+                    superseded_tokens = $7
+                WHERE refresh_token_hash = $1
+                "#
+            } else {
                 r#"
                 INSERT INTO public_device_grants (
                     refresh_token_hash, relay_id, broker_room_id, device_id, created_at, last_seen,
@@ -3988,18 +4030,22 @@ async fn upsert_device_grants(
                     created_at = EXCLUDED.created_at,
                     last_seen = EXCLUDED.last_seen,
                     superseded_tokens = EXCLUDED.superseded_tokens
-                "#,
-            )
-            .bind(&grant.refresh_token_hash)
-            .bind(&grant.relay_id)
-            .bind(&grant.broker_room_id)
-            .bind(&grant.device_id)
-            .bind(u64_to_i64(grant.created_at, "created_at")?)
-            .bind(grant.last_seen.and_then(|value| i64::try_from(value).ok()))
-            .bind(encode_superseded(&grant.superseded)?)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| format!("failed to upsert public_device_grants: {error}"))?;
+                "#
+            };
+            let changed = sqlx::query(statement)
+                .bind(&grant.refresh_token_hash)
+                .bind(&grant.relay_id)
+                .bind(&grant.broker_room_id)
+                .bind(&grant.device_id)
+                .bind(u64_to_i64(grant.created_at, "created_at")?)
+                .bind(grant.last_seen.and_then(|value| i64::try_from(value).ok()))
+                .bind(encode_superseded(&grant.superseded)?)
+                .execute(&mut **tx)
+                .await
+                .map_err(|error| format!("failed to upsert public_device_grants: {error}"))?;
+            if existing {
+                require_changed_credential(changed.rows_affected())?;
+            }
         }
     }
     Ok(())
