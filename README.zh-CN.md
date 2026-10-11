@@ -61,7 +61,9 @@ Sealwire 会在浏览器打开 <http://localhost:8787>。在你另作决定之�
 npx sealwire cloud
 ```
 
-第一次会要你的 SealWire Cloud access key。用手机扫二维码，同样的会话就会出现在手机上。加到主屏幕，用起来就像 App，通知也有。
+第一次会要你的 SealWire Cloud access key。Cloud 目前在 beta 测试，需要的话发邮件到 [sealwire.dev@gmail.com](mailto:sealwire.dev@gmail.com) 申请。然后在电脑上打开 **Settings › Devices › Pair new device**，用手机扫二维码，再回到电脑上点 **Approve**，同样的会话就会出现在手机上的 <https://app.sealwire.dev> 里。加到主屏幕，用起来就像 App，通知也有。
+
+一步一步的说明和常见问题：[用手机或另一台电脑连进来](docs/remote-access.zh-CN.md)。
 
 ## 让智能体互相审阅
 

@@ -30,28 +30,9 @@ npx sealwire local
 
 ## Connect your phone or another computer
 
-```bash
-npx sealwire cloud
-```
-
-The first time, enter your SealWire Cloud access key when prompted. Open
-Settings in the local interface, scan the pairing QR code on your other device,
-and approve the pairing on your computer.
-
-Paired devices can follow your sessions, send messages, respond to approvals,
-and receive notifications. Add the phone interface to your home screen to use
-it like an app. Your computer must stay running for remote access.
-
-All remote connections use end-to-end encryption. The broker cannot read
-messages, transcripts, or action results. Plaintext remote connections are not
-supported.
-
-You can remove paired devices from Settings. To release this computer's Cloud
-access:
-
-```bash
-npx sealwire cloud unbind
-```
+Run `npx sealwire cloud`, then pair the device from Settings › Devices. See
+[Connect from your phone or another computer](docs/remote-access.md) for the full
+steps.
 
 ## Use your own broker
 

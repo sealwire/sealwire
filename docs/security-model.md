@@ -1,7 +1,8 @@
 # Security model
 
 Security is a core part of the product, not a later add-on. This page is the
-summary. See [`DEPLOYMENT.md`](../DEPLOYMENT.md) for setup and pairing, and
+summary. See [`DEPLOYMENT.md`](../DEPLOYMENT.md) for setup,
+[`remote-access.md`](remote-access.md) for pairing, and
 [`.env.example`](../.env.example) for connection and security settings.
 
 ## Remote access

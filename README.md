@@ -81,9 +81,15 @@ long jobs keep going even with your laptop closed.
 npx sealwire cloud
 ```
 
-The first time, it asks for your SealWire Cloud access key. Then scan the QR
-code with your phone and the same sessions show up there. Add
-it to your home screen and it works like an app, notifications included.
+The first time, it asks for your SealWire Cloud access key. Cloud is in beta;
+email [sealwire.dev@gmail.com](mailto:sealwire.dev@gmail.com) for a key. Then open
+**Settings › Devices › Pair new device** on your computer, scan the QR code with
+your phone, and click **Approve** back on the computer. The same sessions show up
+on your phone at <https://app.sealwire.dev>. Add it to your home screen and it
+works like an app, notifications included.
+
+Step-by-step guide, with fixes for common problems:
+[Connect from your phone or another computer](docs/remote-access.md).
 
 ## Let agents review each other
 
