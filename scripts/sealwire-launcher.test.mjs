@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
   existsSync,
@@ -116,4 +119,103 @@ test("launcher accepts IPv4 and IPv6 loopback addresses", async () => {
     assert.equal(result.code, 0, result.stderr);
     assert.notEqual(result.captured, null);
   }
+});
+
+// Drives the source fallback from a copy of the launcher whose package root has no
+// prebuilt `bin/relay-server`. The stub cargo puts the binary where real cargo would
+// (honouring CARGO_BUILD_TARGET) and prints the artifact message when asked for JSON.
+async function runSourceFallback(extraEnv = {}) {
+  // Real paths: the stubs record getcwd(), and macOS tmpdir sits behind the /var symlink.
+  const workdir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sealwire-launcher-cargo-")));
+  const packageDir = path.join(workdir, "package");
+  mkdirSync(path.join(packageDir, "scripts"), { recursive: true });
+  for (const file of ["sealwire.mjs", "sealwire-browser.mjs"]) {
+    copyFileSync(path.join(here, file), path.join(packageDir, "scripts", file));
+  }
+  const userDir = path.join(workdir, "user-project");
+  const binDir = path.join(workdir, "bin");
+  const targetDir = path.join(workdir, "cargo-target");
+  const cargoCapture = path.join(workdir, "cargo-invocations.txt");
+  const relayCapture = path.join(workdir, "relay-cwd.txt");
+  mkdirSync(path.join(userDir, ".cargo"), { recursive: true });
+  mkdirSync(binDir);
+  writeFileSync(
+    path.join(userDir, ".cargo", "config.toml"),
+    `[build]\nrustc-wrapper = "${path.join(userDir, "evil-wrapper")}"\n`
+  );
+  writeFileSync(
+    path.join(binDir, "cargo"),
+    [
+      "#!/bin/sh",
+      `printf '%s\\t%s\\n' "$PWD" "$*" >> "${cargoCapture}"`,
+      'case "$1" in',
+      "  build)",
+      '    out="$CARGO_TARGET_DIR/${CARGO_BUILD_TARGET:+$CARGO_BUILD_TARGET/}release"',
+      '    /bin/mkdir -p "$out"',
+      `    printf '#!/bin/sh\\nprintf %%s "$PWD" > "${relayCapture}"\\nexit 0\\n' > "$out/relay-server"`,
+      '    /bin/chmod +x "$out/relay-server"',
+      '    case "$*" in *--message-format=json*)',
+      `      printf '{"reason":"compiler-artifact","target":{"name":"relay-server","kind":["bin"]},"executable":"%s"}\\n{"reason":"build-finished","success":true}\\n' "$out/relay-server";;`,
+      "    esac;;",
+      "esac",
+      "exit 0",
+      "",
+    ].join("\n")
+  );
+  chmodSync(path.join(binDir, "cargo"), 0o755);
+
+  const env = {
+    HOME: process.env.HOME,
+    PATH: binDir, // the stub cargo and nothing else
+    CARGO_TARGET_DIR: targetDir,
+    ...extraEnv,
+  };
+  const result = await new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      [path.join(packageDir, "scripts", "sealwire.mjs"), "--no-broker", "--no-open"],
+      {
+        cwd: userDir,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("exit", (code) => resolve({ code, stdout, stderr }));
+  });
+  const cargoRuns = existsSync(cargoCapture)
+    ? readFileSync(cargoCapture, "utf8").trim().split("\n").map((line) => line.split("\t"))
+    : [];
+  const relayCwd = existsSync(relayCapture) ? readFileSync(relayCapture, "utf8") : null;
+  rmSync(workdir, { recursive: true, force: true });
+  return { result, cargoRuns, relayCwd, userDir, packageDir };
+}
+
+// Cargo obeys `.cargo/config.toml` in its working directory (`rustc-wrapper`, `runner`),
+// so a hostile folder the user launches from must never be cargo's cwd.
+test("source fallback builds from the package, not the user's folder, and still starts the relay there", async () => {
+  const { result, cargoRuns, relayCwd, userDir, packageDir } = await runSourceFallback();
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(cargoRuns.length > 0, "the launcher should have fallen back to cargo");
+  for (const [cwd, args] of cargoRuns) {
+    assert.equal(cwd, packageDir, `cargo ${args} must run from the package, not ${cwd}`);
+  }
+  assert.ok(
+    cargoRuns.some(([, args]) => args.startsWith("build ")),
+    `expected a cargo build, got: ${cargoRuns.map(([, args]) => args).join(" | ")}`
+  );
+  assert.equal(relayCwd, userDir, "the built relay must still start in the user's folder");
+});
+
+test("source fallback starts the binary cargo built, wherever a build target puts it", async () => {
+  const { result, relayCwd, userDir } = await runSourceFallback({
+    CARGO_BUILD_TARGET: "aarch64-apple-darwin",
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(relayCwd, userDir, "the relay built under target/<triple>/release must start");
 });

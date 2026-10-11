@@ -217,10 +217,12 @@ if (brokerConfig) {
   );
 }
 
+const relayServerCommand = relayServerBinary || buildRelayServerFromSource(env);
+
 if (args.cloud) {
   const activate = runCloudActivate({
     brokerConfig,
-    relayServerBinary,
+    relayServerCommand,
     accessKey: capturedAccessKey,
     accessKeyFile: capturedAccessKeyFile,
     baseEnv: env,
@@ -261,24 +263,13 @@ console.log(
   } (shared across launch directories; set RELAY_STATE_DB to isolate)`
 );
 
-const command = relayServerBinary || "cargo";
-const commandArgs = relayServerBinary
-  ? []
-  : [
-      "run",
-      "--release",
-      "--manifest-path",
-      path.join(packageRoot, "Cargo.toml"),
-      "-p",
-      "relay-server",
-    ];
 if (relayServerBinary) {
   console.log(`sealwire: starting bundled relay-server binary ${relayServerBinary}`);
 } else {
-  console.warn("sealwire: starting relay-server via cargo fallback; install a prebuilt package to avoid Rust/Cargo.");
+  console.log(`sealwire: starting relay-server built from source ${relayServerCommand}`);
 }
 
-const child = spawn(command, commandArgs, {
+const child = spawn(relayServerCommand, [], {
   cwd: userCwd,
   env,
   stdio: "inherit",
@@ -378,7 +369,7 @@ function parseArgs(argv) {
  */
 function runCloudActivate({
   brokerConfig,
-  relayServerBinary,
+  relayServerCommand,
   accessKey,
   accessKeyFile,
   baseEnv,
@@ -410,24 +401,10 @@ function runCloudActivate({
     preflightEnv[CLOUD_ACCESS_KEY_FILE_ENV] = accessKeyFile;
   }
 
-  const command = relayServerBinary || "cargo";
-  const commandArgs = relayServerBinary
-    ? ["cloud-activate"]
-    : [
-        "run",
-        "--release",
-        "--manifest-path",
-        path.join(packageRoot, "Cargo.toml"),
-        "-p",
-        "relay-server",
-        "--",
-        "cloud-activate",
-      ];
-
   console.log(
     `sealwire: checking SealWire Cloud access for ${brokerConfig.controlUrl}`
   );
-  const result = spawnSync(command, commandArgs, {
+  const result = spawnSync(relayServerCommand, ["cloud-activate"], {
     cwd: userCwd,
     env: preflightEnv,
     encoding: "utf8",
@@ -522,24 +499,12 @@ function runCloudUnbind() {
   };
   stripActivationSecrets(env);
 
-  const command = relayServerBinary || "cargo";
-  const commandArgs = relayServerBinary
-    ? ["cloud-access-release"]
-    : [
-        "run",
-        "--release",
-        "--manifest-path",
-        path.join(packageRoot, "Cargo.toml"),
-        "-p",
-        "relay-server",
-        "--",
-        "cloud-access-release",
-      ];
+  const command = relayServerBinary || buildRelayServerFromSource(env);
 
   console.log(
     `sealwire: unbinding cloud access for ${brokerConfig.controlUrl} (does not start the local relay)`
   );
-  const result = spawnSync(command, commandArgs, {
+  const result = spawnSync(command, ["cloud-access-release"], {
     cwd: userCwd,
     env,
     stdio: "inherit",
@@ -564,26 +529,15 @@ function runMigrateStorage() {
       "No prebuilt relay-server binary was found, and Rust/Cargo is required for the source fallback."
     );
   }
+  const env = {
+    ...process.env,
+    CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || defaultCargoTargetDir(),
+  };
+  const command = relayServerBinary || buildRelayServerFromSource(env);
   const subcommand = ["migrate-storage", ...(args.finish ? ["--finish"] : [])];
-  const command = relayServerBinary || "cargo";
-  const commandArgs = relayServerBinary
-    ? subcommand
-    : [
-        "run",
-        "--release",
-        "--manifest-path",
-        path.join(packageRoot, "Cargo.toml"),
-        "-p",
-        "relay-server",
-        "--",
-        ...subcommand,
-      ];
-  const result = spawnSync(command, commandArgs, {
+  const result = spawnSync(command, subcommand, {
     cwd: userCwd,
-    env: {
-      ...process.env,
-      CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || defaultCargoTargetDir(),
-    },
+    env,
     stdio: "inherit",
   });
   if (result.error) {
@@ -663,8 +617,65 @@ function ensureCommand(command, message) {
 }
 
 function hasCommand(command) {
-  const result = spawnSync(command, ["--version"], { stdio: "ignore" });
+  // Not the user's folder: cargo would read its `.cargo/config.toml` even for `--version`.
+  const result = spawnSync(command, ["--version"], { cwd: packageRoot, stdio: "ignore" });
   return result.error?.code !== "ENOENT";
+}
+
+// Cargo obeys `.cargo/config.toml` (`rustc-wrapper`, `runner`) in its cwd, so it must never
+// run in the user's folder; `cargo run` would start the relay in cargo's cwd, hence build-then-run.
+function buildRelayServerFromSource(env) {
+  console.warn("sealwire: building relay-server from source with cargo; install a prebuilt package to avoid Rust/Cargo.");
+  // A build target (CARGO_BUILD_TARGET, `build.target`) moves the binary, so cargo says where
+  // it is; progress still reaches the user on stderr.
+  const result = spawnSync(
+    "cargo",
+    [
+      "build",
+      "--release",
+      "--message-format=json-render-diagnostics",
+      "--manifest-path",
+      path.join(packageRoot, "Cargo.toml"),
+      "-p",
+      "relay-server",
+    ],
+    {
+      cwd: packageRoot,
+      encoding: "utf8",
+      env,
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["inherit", "pipe", "inherit"],
+    }
+  );
+  if (result.error || result.status !== 0) {
+    console.error(`sealwire: cargo build failed${result.error ? `: ${result.error.message}` : ""}`);
+    process.exit(result.status || 1);
+  }
+  const executable = builtRelayServerPath(result.stdout);
+  if (!executable) {
+    console.error("sealwire: cargo build did not report a relay-server binary");
+    process.exit(1);
+  }
+  return executable;
+}
+
+function builtRelayServerPath(cargoJson) {
+  for (const line of String(cargoJson).split("\n")) {
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (
+      message?.reason === "compiler-artifact" &&
+      message.target?.name === "relay-server" &&
+      message.executable
+    ) {
+      return message.executable;
+    }
+  }
+  return null;
 }
 
 function isCiEnvironment() {
