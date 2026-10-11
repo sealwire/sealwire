@@ -15,6 +15,7 @@ node_modules/
 /playwright-report
 /test-results
 /artifacts/e2e
+/artifacts/remote-slash-keyboard/
 # Generated at release time; a dev build lists the private crate's dependencies.
 /THIRD_PARTY_NOTICES.txt
 

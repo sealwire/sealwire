@@ -3,7 +3,8 @@
 // Playwright's WebKit port catches layout and engine regressions, but it is not the
 // WebKit build shipped inside iOS. This manual test uses Apple's SafariDriver and an
 // actual Simulator. It exercises the native pointer/touch event chain and proves the
-// selected command becomes a composer pill.
+// selected command becomes a composer pill. SafariDriver suppresses the software
+// keyboard, so this checks native touch and DOM focus, not iOS keyboard geometry.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -18,6 +19,7 @@ import {
 } from "./browser-remote-composer-commands-e2e.mjs";
 import { getFreePort } from "./e2e/harness/ports.mjs";
 import { startStaticServer } from "./e2e/harness/static-server.mjs";
+import { installEncryptedMock, pinRelayVerifyKey } from "./e2e/harness/encrypted-broker-mock.mjs";
 
 const ROOT = process.cwd();
 const WEB_ROOT = path.join(ROOT, "web");
@@ -144,9 +146,15 @@ async function loadRemoteFixture(driverOrigin, sessionId, origin) {
   await execute(
     driverOrigin,
     sessionId,
+    `${await readFile(path.join(ROOT, "node_modules/tweetnacl/nacl-fast.min.js"), "utf8")}\n(${installEncryptedMock.toString()})(); return true;`
+  );
+  await execute(
+    driverOrigin,
+    sessionId,
     `return (${installFakeRelay.toString()})(arguments[0]);`,
     [REMOTE_COMPOSER_FIXTURE]
   );
+  await execute(driverOrigin, sessionId, `(${pinRelayVerifyKey.toString()})(); return true;`);
   await waitFor(
     () => execute(driverOrigin, sessionId, "return window.__agentRelaySecretReady === true;"),
     "the fake relay secret"
@@ -191,17 +199,20 @@ async function openProviderMenu(driverOrigin, sessionId) {
        data: "/rev",
      }));
      input.focus();
-     window.__iosCommandEvents = [];
-     for (const type of ["pointerdown", "pointerup", "pointercancel", "touchstart", "touchend", "touchcancel", "click"]) {
-       document.addEventListener(type, (event) => {
-         window.__iosCommandEvents.push({
-           type,
-           target: event.target?.className || "",
-           tag: event.target?.tagName || "",
-           pointerType: event.pointerType || "",
-         });
-       }, true);
+     if (!window.__iosCommandEvents) {
+       for (const type of ["pointerdown", "pointerup", "pointercancel", "touchstart", "touchend", "touchcancel", "click"]) {
+         document.addEventListener(type, (event) => {
+           window.__iosCommandEvents.push({
+             type,
+             target: event.target?.className || "",
+             tag: event.target?.tagName || "",
+             pointerType: event.pointerType || "",
+             trusted: event.isTrusted,
+           });
+         }, true);
+       }
      }
+     window.__iosCommandEvents = [];
      return true;`
   );
   return waitFor(
@@ -252,6 +263,77 @@ async function tapProviderCommand(driverOrigin, sessionId) {
   );
 }
 
+async function tapPillPart(driverOrigin, sessionId, selector) {
+  await execute(driverOrigin, sessionId, "window.__iosCommandEvents = []; return true;");
+  const point = await execute(driverOrigin, sessionId, `const part = document.querySelector(arguments[0]);
+    const box = part.getBoundingClientRect();
+    const x = Math.round(box.left + box.width / 2), y = Math.round(box.top + box.height / 2);
+    return { x, y, hittable: part.closest('button').contains(document.elementFromPoint(x, y)) };`, [selector]);
+  assert.equal(point.hittable, true, `${selector} is not covered — ${JSON.stringify(point)}`);
+  // Element-click rejects these non-interactive spans. iOS SafariDriver maps a
+  // mouse source to native touch; assertNativeTouch verifies the received events.
+  await command(driverOrigin, sessionId, "/actions", { body: { actions: [{
+    type: "pointer", id: "pill-tap", parameters: { pointerType: "mouse" }, actions: [
+      { type: "pointerMove", duration: 0, origin: "viewport", x: point.x, y: point.y },
+      { type: "pointerDown", button: 0 },
+      { type: "pointerUp", button: 0 },
+    ],
+  }] } });
+  await command(driverOrigin, sessionId, "/actions", { method: "DELETE" });
+}
+
+function assertNativeTouch(events, label) {
+  const pointerEvents = events.filter((event) => event.type === "pointerdown" || event.type === "pointerup");
+  console.log(`${label}: ${JSON.stringify(pointerEvents)}`);
+  for (const type of ["pointerdown", "pointerup"]) {
+    assert.equal(pointerEvents.filter((event) => event.type === type).length, 1,
+      `${label}: each native ${type} is recorded exactly once`);
+    assert.ok(pointerEvents.some((event) => event.type === type && event.pointerType === "touch"
+      && event.trusted && String(event.target).includes("composer-command")),
+    `${label}: trusted ${type} must take the touch path — ${JSON.stringify(events)}`);
+  }
+}
+
+async function assertSlashMenu(driverOrigin, sessionId, udid) {
+  const read = (script) => execute(driverOrigin, sessionId, script);
+  await tapElement(driverOrigin, sessionId, "#remote-message-input");
+  // Seed the draft like the provider-tap fixture; this is not a keyboard input test.
+  await read(`const input = document.querySelector('#remote-message-input');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '/');
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: '/' }));
+    return true;`);
+  await waitFor(() => read(`return document.querySelector('.composer-command-expand')
+    && document.activeElement?.id === 'remote-message-input';`), "slash commands retaining input focus");
+  if (process.env.IOS_SCREENSHOT) {
+    run("xcrun", ["simctl", "io", udid, "screenshot", process.env.IOS_SCREENSHOT.replace(/\.png$/, "-menu.png")]);
+  }
+
+  assert.equal(await read("return document.activeElement?.id;"), "remote-message-input", "opening the menu keeps typing focus");
+  for (const selector of [".composer-command-row", ".composer-command-expand"]) {
+    await execute(driverOrigin, sessionId, `const row = document.querySelector(arguments[0]);
+      const menu = row.closest('.composer-command-menu');
+      menu.scrollTop += row.getBoundingClientRect().top - menu.getBoundingClientRect().top - 8;
+      return true;`, [selector]);
+    const box = await execute(driverOrigin, sessionId, `const row = document.querySelector(arguments[0]);
+      const r = row.getBoundingClientRect();
+      const menu = row.closest('.composer-command-menu').getBoundingClientRect();
+      return { top: menu.top, bottom: menu.bottom, viewportTop: visualViewport.offsetTop,
+        viewportBottom: visualViewport.offsetTop + visualViewport.height,
+        rowTop: r.top, rowBottom: r.bottom,
+        hittable: row.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) };`, [selector]);
+    assert.ok(box.top >= box.viewportTop && box.bottom <= box.viewportBottom,
+      `the complete menu fits the native Safari viewport — ${JSON.stringify(box)}`);
+    assert.ok(box.rowTop >= box.top && box.rowBottom <= box.bottom && box.hittable,
+      `${selector} is readable and tappable while the input is focused — ${JSON.stringify(box)}`);
+  }
+  if (process.env.IOS_SCREENSHOT) {
+    run("xcrun", ["simctl", "io", udid, "screenshot", process.env.IOS_SCREENSHOT.replace(/\.png$/, "-focused.png")]);
+  }
+  await tapElement(driverOrigin, sessionId, ".composer-command-expand");
+  await waitFor(() => read(`return document.querySelector('.composer-command-expand')?.getAttribute('aria-expanded') === 'true'
+    && document.activeElement?.matches('.composer-command-expand');`), "expanding without focusing the composer");
+}
+
 async function main() {
   if (process.platform !== "darwin") {
     console.log("ios-remote-composer-commands-e2e SKIPPED — iOS Simulator requires macOS and Xcode");
@@ -276,7 +358,7 @@ async function main() {
     indexFile: "remote.html",
     pathAliases: {
       "/manifest.webmanifest": "remote-manifest.webmanifest",
-      "/static/remote-sw.js": "remote-sw.js",
+      "/sw.js": "remote-sw.js",
     },
     stripStaticPrefix: true,
   });
@@ -306,6 +388,12 @@ async function main() {
     sessionId = session.sessionId;
     const origin = `http://127.0.0.1:${server.port}`;
     await loadRemoteFixture(driverOrigin, sessionId, origin);
+    if (await execute(driverOrigin, sessionId, "return Boolean(document.querySelector('.ios-install-hint__close'));")) {
+      await tapElement(driverOrigin, sessionId, ".ios-install-hint__close");
+      await waitFor(() => execute(driverOrigin, sessionId, "return !document.querySelector('#ios-install-hint');"),
+        "the install hint to stop covering the composer");
+    }
+    await assertSlashMenu(driverOrigin, sessionId, simulator.udid);
     const rows = await openProviderMenu(driverOrigin, sessionId);
     assert.deepEqual(
       rows.map((row) => row.text.split("\n")[0]),
@@ -316,19 +404,17 @@ async function main() {
     assert.deepEqual(selected.pills, ["$review"], "the iOS tap commits the provider skill");
     assert.equal(selected.value, "", "the selected command text is consumed");
     assert.equal(selected.menuOpen, false, "the command menu closes after the iOS tap");
-    assert.ok(
-      selected.events.some(
-        (event) => event.type === "pointerdown" && String(event.target).includes("composer-command")
-      ),
-      `the tap reached the command row through Mobile Safari's pointer chain — ${JSON.stringify(selected.events)}`
-    );
+    assert.notEqual(await execute(driverOrigin, sessionId, "return document.activeElement?.id;"),
+      "remote-message-input", "picking the skill does not reopen the keyboard");
+    assertNativeTouch(selected.events, "select provider command");
 
     for (const selector of [".composer-command-pill-label", ".composer-command-pill-clear"]) {
-      await tapElement(driverOrigin, sessionId, selector);
+      await tapPillPart(driverOrigin, sessionId, selector);
       await waitFor(
         () => execute(driverOrigin, sessionId, "return !document.querySelector('.composer-command-pill');"),
         `removing the pill through ${selector}`
       );
+      assertNativeTouch(await execute(driverOrigin, sessionId, "return window.__iosCommandEvents;"), selector);
       if (selector === ".composer-command-pill-label") {
         await openProviderMenu(driverOrigin, sessionId);
         await tapProviderCommand(driverOrigin, sessionId);
@@ -342,6 +428,18 @@ async function main() {
       `ios-remote-composer-commands-e2e OK — ${simulator.name} (${simulator.udid}) selected and removed $review`
     );
   } catch (error) {
+    if (sessionId) {
+      console.error(await execute(driverOrigin, sessionId, `return {
+        draft: document.querySelector('#remote-message-input')?.value,
+        focused: document.activeElement?.outerHTML?.slice(0, 500),
+        rows: document.querySelectorAll('.composer-command-row').length,
+        finePointer: matchMedia('(pointer: fine)').matches,
+        viewport: { top: visualViewport.offsetTop, height: visualViewport.height }
+      };`).catch(() => null));
+      if (process.env.IOS_SCREENSHOT) {
+        run("xcrun", ["simctl", "io", simulator.udid, "screenshot", process.env.IOS_SCREENSHOT.replace(/\.png$/, "-failure.png")]);
+      }
+    }
     if (driverOutput.trim()) console.error(driverOutput.trim());
     throw error;
   } finally {
