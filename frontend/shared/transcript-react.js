@@ -18,7 +18,7 @@ import {
 } from "./transcript-scroll-adjust.js";
 import { ASK_SVG, CHECK_SVG, COPY_SVG, FORK_SVG, SPARKLES_SVG } from "../svg.js";
 import { approvalKindLabel } from "./approval-labels.js";
-import { approvalTitle } from "./approval-view.js";
+import { approvalTitle, visibleCommand, visibleText } from "./approval-view.js";
 import {
   askUserDraftKey,
   readAskUserDraft,
@@ -3014,17 +3014,20 @@ export function ApprovalCard({ approval, options = null }) {
   const rawKey = id ? `approval:${id}:raw` : "";
   const approvalKind = approvalKindLabel(approval.kind);
   const title = approvalTitle(approval);
-  const command = approval.command || "";
+  const command = visibleCommand(approval.command || "");
+  const detail = visibleText(approval.detail || "");
+  const cwd = visibleCommand(approval.cwd || "");
+  const contextPreview = visibleText(approval.context_preview || "");
   const permissionsJson = approval.requested_permissions
-    ? JSON.stringify(approval.requested_permissions, null, 2)
+    ? visibleText(JSON.stringify(approval.requested_permissions, null, 2))
     : "";
   // With a command on screen the context is its echo (Claude's input JSON), so it
   // goes behind "raw input"; without one it IS the subject (a diff, a plan).
-  const subject = command || approval.context_preview || "";
-  const raw = [command ? approval.context_preview : "", permissionsJson].filter(Boolean).join("\n\n");
+  const subject = command || contextPreview;
+  const raw = [command ? contextPreview : "", permissionsJson].filter(Boolean).join("\n\n");
   // No key means no toggle, so nothing may be hidden behind one.
   const rawOpen = Boolean(raw) && (!rawKey || Boolean(expandedKeys?.has(rawKey)));
-  const showFallbackCopy = !approval.detail && !subject;
+  const showFallbackCopy = !detail && !subject;
 
   return h(
     "article",
@@ -3047,12 +3050,12 @@ export function ApprovalCard({ approval, options = null }) {
           approvalKind ? h("span", { className: "approval-kind" }, approvalKind) : null,
           title ? h("span", { className: "approval-title" }, title) : null
         ),
-        approval.detail ? h("p", { className: "approval-copy" }, approval.detail) : null,
+        detail ? h("p", { className: "approval-copy" }, detail) : null,
         // No provider name: the card carries no provider field to name one.
         showFallbackCopy
           ? h("p", { className: "approval-copy" }, "The agent is waiting for a remote approval.")
           : null,
-        subject || approval.cwd || raw
+        subject || cwd || raw
           ? h(
               "div",
               { className: "approval-subject" },
@@ -3080,17 +3083,17 @@ export function ApprovalCard({ approval, options = null }) {
                       value: subject,
                     })
                   : null,
-              approval.cwd || (raw && rawKey)
+              cwd || (raw && rawKey)
                 ? h(
                     "div",
                     { className: "approval-subject-meta" },
-                    approval.cwd
+                    cwd
                       ? h(
                           "span",
                           // The exact path, never clipped: it is the blast radius being authorised.
-                          { className: "approval-scope-chip", title: `Working directory: ${approval.cwd}` },
+                          { className: "approval-scope-chip", title: `Working directory: ${cwd}` },
                           h("span", { className: "approval-scope-label" }, "in"),
-                          h("span", { className: "approval-scope-path" }, approval.cwd)
+                          h("span", { className: "approval-scope-path" }, cwd)
                         )
                       : null,
                     raw && rawKey

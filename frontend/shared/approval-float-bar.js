@@ -1,7 +1,12 @@
 import React from "react";
 
 import { findScrollContainer } from "./scroll-to-bottom-core.js";
-import { approvalFloatName, approvalFloatSubject, isApprovalCardOffscreen } from "./approval-view.js";
+import {
+  approvalFloatMoreLines,
+  approvalFloatName,
+  approvalFloatSubject,
+  isApprovalCardOffscreen,
+} from "./approval-view.js";
 import { applyTranscriptScrollAction } from "./transcript-scroll.js";
 
 const h = React.createElement;
@@ -92,6 +97,7 @@ export function ApprovalFloatBar({ approval }) {
 
   if (!approval) return null;
   const subject = approvalFloatSubject(approval);
+  const moreLines = approvalFloatMoreLines(approval);
 
   return h(
     "div",
@@ -108,6 +114,9 @@ export function ApprovalFloatBar({ approval }) {
       h("span", { "aria-hidden": "true", className: "approval-float-dot" }),
       h("span", { className: "approval-float-name" }, approvalFloatName(approval)),
       h("span", { className: "approval-float-subject", title: subject }, subject),
+      moreLines > 0
+        ? h("span", { className: "approval-float-more" }, `+${moreLines} ${moreLines === 1 ? "line" : "lines"}`)
+        : null,
       h(
         "button",
         {

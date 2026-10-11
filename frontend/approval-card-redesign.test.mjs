@@ -5,7 +5,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { ApprovalCard } from "./shared/transcript-react.js";
 import { TranscriptState } from "./shared/conversation.js";
-import { approvalFloatName, approvalFloatSubject, isApprovalCardOffscreen } from "./shared/approval-view.js";
+import {
+  approvalFloatMoreLines,
+  approvalFloatName,
+  approvalFloatSubject,
+  isApprovalCardOffscreen,
+  visibleText,
+} from "./shared/approval-view.js";
 
 // Design 20a: the approval is the only card in the conversation. The command
 // shows once, the raw payload sits behind "raw input", buttons rank primary →
@@ -103,6 +109,134 @@ test("the float bar names the tool and previews the command's first line", () =>
   );
   assert.equal(approvalFloatSubject({ command: "a\nb" }), "a");
   assert.equal(approvalFloatSubject({ summary: "Edit 1 file" }), "Edit 1 file");
+});
+
+// The bar's Approve button works without the card on screen, so the bar has to say
+// when the first line is not the whole command.
+test("the float bar says how many command lines it is not showing", () => {
+  assert.equal(approvalFloatMoreLines({ command: "echo ok" }), 0);
+  assert.equal(approvalFloatMoreLines({ command: "echo ok\nrm -rf /" }), 1);
+  assert.equal(approvalFloatMoreLines({ command: "a\n\n  \nb\nc\n" }), 2, "blank lines do not count");
+  assert.equal(approvalFloatMoreLines({ summary: "Edit 1 file" }), 0);
+
+  const hidden = { ...CLAUDE_BASH, command: "echo ok\nrm -rf /" };
+  const markup = renderToStaticMarkup(h(TranscriptState, { approval: hidden, entries: [] }));
+  assert.match(markup, /class="approval-float-more"[^>]*>\+1 line</);
+  assert.doesNotMatch(markup, /approval-float-subject[^>]*>[^<]*rm -rf/, "the subject stays the first line");
+
+  const shown = renderToStaticMarkup(h(TranscriptState, { approval: CLAUDE_BASH, entries: [] }));
+  assert.doesNotMatch(shown, /approval-float-more/, "a one-line command needs no marker");
+});
+
+// A bidi override reorders what is on screen; a zero-width character hides a split in
+// a word. Neither changes what the shell runs, so both must be visible on the card.
+test("direction overrides and zero-width characters are shown as escapes, not applied", () => {
+  assert.equal(visibleText("echo \u202eok"), "echo \\u202eok");
+  assert.equal(visibleText("rm\u200b -rf"), "rm\\u200b -rf");
+  assert.equal(visibleText("plain ascii, tabs\tand\nnewlines"), "plain ascii, tabs\tand\nnewlines");
+  assert.equal(visibleText("中文 and émoji 🎉 stay"), "中文 and émoji 🎉 stay");
+
+  assert.equal(approvalFloatSubject({ command: "echo \u202eok" }), "echo \\u202eok");
+
+  const spoofed = {
+    ...CLAUDE_BASH,
+    command: "echo \u202eok",
+    detail: "harmless\u200b",
+    cwd: "/tmp/safe\u2066/x",
+  };
+  const markup = render(spoofed);
+  assert.doesNotMatch(markup, /[\u202e\u200b\u2066]/, "no invisible control character reaches the card");
+  assert.match(markup, /echo \\u202eok/);
+  assert.match(markup, /harmless\\u200b/);
+  assert.match(markup, /\/tmp\/safe\\u2066\/x/);
+
+  const floatMarkup = renderToStaticMarkup(h(TranscriptState, { approval: spoofed, entries: [] }));
+  assert.doesNotMatch(floatMarkup, /[\u202e\u200b\u2066]/, "nor the float bar");
+});
+
+// `./safe` and `./safe` + a tag character are different files that render the same.
+test("every character that renders as nothing is shown, including ones outside the BMP", () => {
+  for (const [raw, shown] of [
+    ["./safe\u{e0061}", "./safe\\u{e0061}"],
+    ["./safe\u{e0100}", "./safe\\u{e0100}"],
+    ["x\ufe0f", "x\\ufe0f"],
+    ["x\u034f", "x\\u034f"],
+    ["x\u3164", "x\\u3164"],
+    ["// safe\u2028run()", "// safe\\u2028run()"],
+    ["a\u2029b", "a\\u2029b"],
+    ["rm\b\b", "rm\\u0008\\u0008"],
+    ["\u001b[2Kok", "\\u001b[2Kok"],
+    ["a\rb", "a\\u000db"],
+  ]) {
+    assert.equal(visibleText(raw), shown, JSON.stringify(raw));
+  }
+  assert.equal(
+    visibleText("line one\r\nline two"),
+    "line one\\u000d\nline two",
+    "sh, bash and zsh keep the CR of CRLF inside the word"
+  );
+
+  const markup = render({ ...CLAUDE_BASH, command: "./safe\u{e0061}" });
+  assert.doesNotMatch(markup, /\u{e0061}/u);
+  assert.match(markup, /\.\/safe\\u\{e0061\}/);
+});
+
+// A space other than U+0020 looks like one, but the shell keeps it inside the word.
+test("spaces other than the ASCII space are shown as escapes", () => {
+  assert.equal(visibleText("./safe\u00a0x"), "./safe\\u00a0x");
+  assert.equal(visibleText("a\u3000b"), "a\\u3000b");
+  assert.equal(visibleText("a b\tc"), "a b\tc");
+});
+
+// trim() deletes U+FEFF, U+2028, a lone \r and the like, so the bar would show `./safe`
+// for `./safe` + U+FEFF, a different file.
+test("the float bar escapes before it trims, so nothing at the ends of the command is lost", () => {
+  for (const [command, shown] of [
+    ["./safe\ufeff", "./safe\\ufeff"],
+    ["\ufeff./safe", "\\ufeff./safe"],
+    ["./safe\u2028", "./safe\\u2028"],
+    ["./safe\u2029", "./safe\\u2029"],
+    ["./safe\f", "./safe\\u000c"],
+    ["./safe\r", "./safe\\u000d"],
+    ["./safe\r\n", "./safe\\u000d"],
+    ["./safe\u00a0", "./safe\\u00a0"],
+    ["\n \t ls -la\n", "ls -la"],
+  ]) {
+    assert.equal(approvalFloatSubject({ command }), shown, JSON.stringify(command));
+  }
+  assert.equal(approvalFloatSubject({ summary: "Edit\ufeff" }), "Edit\\ufeff");
+  assert.equal(approvalFloatSubject({ summary: "\nStep one\nStep two" }), "Step one", "the bar has room for one line");
+  assert.equal(approvalFloatMoreLines({ command: "echo ok\n\ufeff" }), 1, "a line of only U+FEFF still counts");
+  assert.equal(approvalFloatMoreLines({ command: "echo ok\r\nls\r\n" }), 1);
+
+  const markup = renderToStaticMarkup(
+    h(TranscriptState, { approval: { ...CLAUDE_BASH, command: "./safe\ufeff" }, entries: [] })
+  );
+  assert.match(markup, /class="approval-float-subject"[^>]*>\.\/safe\\ufeff</);
+});
+
+// A quoted or backslash-escaped tab or space is part of the word to the shell, but a tab
+// looks like spaces and a space at the end of a line looks like nothing.
+test("commands show tabs and line-end spaces as escapes; prose and diffs keep their tabs", () => {
+  for (const [command, shown] of [
+    ["'./safe\tx'", "'./safe\\u0009x'"],
+    ["./safe\\ ", "./safe\\\\u0020"],
+    ["./safe\\\t", "./safe\\\\u0009"],
+    ["./safe\\ \nls", "./safe\\\\u0020"],
+  ]) {
+    assert.equal(approvalFloatSubject({ command }), shown, JSON.stringify(command));
+  }
+
+  const card = render({ ...CLAUDE_BASH, command: "'./safe\tx'\necho ok \nls", cwd: "/tmp/a\tb" });
+  assert.doesNotMatch(card, /\t/, "no raw tab anywhere on a command card");
+  assert.match(card, /\.\/safe\\u0009x/);
+  assert.match(card, /echo ok\\u0020\n/);
+  assert.match(card, /\/tmp\/a\\u0009b/);
+
+  const diff = "func main() {\n\tfmt.Println()\n}";
+  const preview = render({ ...CLAUDE_BASH, command: "", context_preview: diff, detail: "Edit\tmain.go" });
+  assert.match(preview, /\n\tfmt\.Println/, "a diff keeps its indentation");
+  assert.match(preview, /Edit\tmain\.go/);
 });
 
 test("the float bar shows only when the card is (nearly) out of view", () => {

@@ -1194,6 +1194,7 @@ button.tool-run-row:focus-visible {
 .approval-scope-path {
   font-family: var(--font-mono);
   min-width: 0;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -1346,10 +1347,19 @@ button.tool-run-row:focus-visible {
   min-width: 4em;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre;
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   color: var(--text-3);
+}
+
+.approval-float-more {
+  flex: none;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-strong);
+  color: var(--warn-fg);
 }
 
 .approval-float .approval-float-approve {
