@@ -38,6 +38,37 @@ use crate::public_control::{
 
 const RATE_LIMIT_CHURN_TEST_KEYS: usize = 1_024;
 
+#[test]
+fn publish_log_fields_are_bounded_without_changing_payload() {
+    for value in ["a".repeat(60_000), "中🦀".repeat(8_000)] {
+        let prefix: String = value.chars().take(64).collect();
+        let payload = json!({"kind": value});
+        assert_eq!(
+            summarize_published_payload(&payload),
+            format!("kind={prefix}")
+        );
+        assert_eq!(payload["kind"], value);
+
+        let payload = json!({
+            "kind": "encrypted_session_snapshot",
+            "target_peer_id": value,
+            "device_id": value,
+        });
+        assert_eq!(
+            summarize_published_payload(&payload),
+            format!("kind=encrypted_session_snapshot target_peer_id={prefix} device_id={prefix}")
+        );
+        let payload = json!({
+            "kind": "targeted_messages",
+            "messages": [{"payload": {"kind": value}}],
+        });
+        assert_eq!(
+            summarize_published_payload(&payload),
+            format!("kind=targeted_messages target_count=1 inner_kinds={prefix}")
+        );
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn stalled_socket_writes_time_out() {
     let mut sender = Box::pin(futures_util::sink::unfold(

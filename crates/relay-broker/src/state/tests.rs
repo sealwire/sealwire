@@ -381,6 +381,40 @@ impl UsageEventSink for CollectingSink {
 }
 
 #[tokio::test]
+async fn usage_kind_is_bounded_but_forwarded_payload_is_preserved() {
+    let sink = Arc::new(CollectingSink::default());
+    let state = BrokerState::with_event_sink(sink.clone());
+    let _relay = state
+        .join("room-a", "relay-1", PeerRole::Relay, None, None)
+        .await
+        .unwrap();
+    let mut surface = state
+        .join("room-a", "phone-1", PeerRole::Surface, None, None)
+        .await
+        .unwrap();
+    let kind = "中🦀".repeat(1_000);
+    let payload = json!({"kind": kind, "target_peer_id": "phone-1"});
+    state
+        .publish("room-a", "relay-1", payload.clone())
+        .await
+        .unwrap();
+
+    let forwarded = decode(surface.receiver.recv().await.unwrap());
+    assert!(
+        matches!(forwarded, ServerMessage::Message { payload: actual, .. } if actual == payload)
+    );
+    let events = sink.events.lock().unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.event == UsageEventKind::Publish)
+        .unwrap();
+    assert_eq!(
+        event.payload_kind.as_deref(),
+        Some("中🦀".repeat(32).as_str())
+    );
+}
+
+#[tokio::test]
 async fn records_usage_events_for_connect_publish_and_disconnect() {
     let sink = Arc::new(CollectingSink::default());
     let state = BrokerState::with_event_sink(sink.clone());

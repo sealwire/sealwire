@@ -485,6 +485,14 @@ async fn reject_banned_ips(
     next.run(request).await
 }
 
+fn log_field(value: &str) -> &str {
+    let end = value
+        .char_indices()
+        .nth(64)
+        .map_or(value.len(), |(index, _)| index);
+    &value[..end]
+}
+
 fn summarize_published_payload(payload: &serde_json::Value) -> String {
     let kind = payload
         .get("kind")
@@ -497,6 +505,7 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
                 .get("snapshot")
                 .and_then(|snapshot| snapshot.get("active_thread_id"))
                 .and_then(serde_json::Value::as_str)
+                .map(log_field)
                 .unwrap_or("-"),
             payload
                 .get("snapshot")
@@ -524,6 +533,7 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
                         .get("payload")
                         .and_then(|payload| payload.get("kind"))
                         .and_then(serde_json::Value::as_str)
+                        .map(log_field)
                 })
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
@@ -535,7 +545,7 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
                 if inner_kinds.is_empty() {
                     "-"
                 } else {
-                    inner_kinds.as_str()
+                    log_field(&inner_kinds)
                 }
             )
         }
@@ -568,6 +578,7 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
                 payload
                     .get("action")
                     .and_then(serde_json::Value::as_str)
+                    .map(log_field)
                     .unwrap_or("-"),
                 payload
                     .get("ok")
@@ -580,6 +591,7 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
                     .get("thread_transcript")
                     .and_then(|page| page.get("prev_cursor"))
                     .and_then(serde_json::Value::as_str)
+                    .map(log_field)
                     .unwrap_or("-"),
             )
         }
@@ -588,10 +600,12 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
             payload
                 .get("target_peer_id")
                 .and_then(serde_json::Value::as_str)
+                .map(log_field)
                 .unwrap_or("-"),
             payload
                 .get("device_id")
                 .and_then(serde_json::Value::as_str)
+                .map(log_field)
                 .unwrap_or("-"),
         ),
         "encrypted_remote_action_result" => format!(
@@ -599,14 +613,17 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
             payload
                 .get("action_id")
                 .and_then(serde_json::Value::as_str)
+                .map(log_field)
                 .unwrap_or("-"),
             payload
                 .get("target_peer_id")
                 .and_then(serde_json::Value::as_str)
+                .map(log_field)
                 .unwrap_or("-"),
             payload
                 .get("device_id")
                 .and_then(serde_json::Value::as_str)
+                .map(log_field)
                 .unwrap_or("-"),
         ),
         "encrypted_pairing_result" => format!(
@@ -614,13 +631,15 @@ fn summarize_published_payload(payload: &serde_json::Value) -> String {
             payload
                 .get("pairing_id")
                 .and_then(serde_json::Value::as_str)
+                .map(log_field)
                 .unwrap_or("-"),
             payload
                 .get("target_peer_id")
                 .and_then(serde_json::Value::as_str)
+                .map(log_field)
                 .unwrap_or("-"),
         ),
-        other => format!("kind={other}"),
+        other => format!("kind={}", log_field(other)),
     }
 }
 
@@ -3773,7 +3792,7 @@ async fn handle_socket(
                                         warn!(
                                             channel_id,
                                             peer_id,
-                                            %error,
+                                            error = %log_field(&error),
                                             payload = %payload_summary,
                                             "failed to publish message"
                                         );
@@ -3813,7 +3832,7 @@ async fn handle_socket(
                                 break;
                             }
                             Err(error) => {
-                                debug!(channel_id, peer_id, %error, "rejecting invalid client frame");
+                                debug!(channel_id, peer_id, error = %log_field(&error.to_string()), "rejecting invalid client frame");
                                 let _ = send_message(
                                     &state.hardening.publish_metrics,
                                     &mut sender,

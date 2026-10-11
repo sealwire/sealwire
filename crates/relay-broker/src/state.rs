@@ -501,7 +501,7 @@ impl BrokerState {
         }
         let sender_role = sender_handle.role;
         let sender_device_id = sender_handle.device_id.clone();
-        let outbound_payload_kind = payload_kind(&payload).to_string();
+        let outbound_payload_kind = crate::log_field(payload_kind(&payload)).to_string();
 
         // Built now (while the sender is known) but only recorded once the
         // publish is accepted below, so the usage stream counts delivered
@@ -533,7 +533,7 @@ impl BrokerState {
         let inner_kinds = targeted
             .messages
             .iter()
-            .map(|message| payload_kind(&message.payload).to_string())
+            .map(|message| crate::log_field(payload_kind(&message.payload)).to_string())
             .collect::<Vec<_>>()
             .join(",");
         let mut delivered_count = 0usize;
@@ -545,7 +545,7 @@ impl BrokerState {
                 warn!(
                     channel_id,
                     from_peer_id,
-                    target_peer_id = %message.target_peer_id,
+                    target_peer_id = %crate::log_field(&message.target_peer_id),
                     "broker targeted publish target is not connected"
                 );
                 continue;
@@ -570,7 +570,7 @@ impl BrokerState {
                 warn!(
                     channel_id,
                     from_peer_id,
-                    target_peer_id = %message.target_peer_id,
+                    target_peer_id = %crate::log_field(&message.target_peer_id),
                     "broker targeted publish queue is full or closed"
                 );
             }
@@ -582,7 +582,7 @@ impl BrokerState {
             delivered_count,
             missing_target_count,
             failed_count,
-            inner_kinds = %inner_kinds,
+            inner_kinds = %crate::log_field(&inner_kinds),
             "broker targeted publish fanout"
         );
         Ok(())
