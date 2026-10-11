@@ -1196,12 +1196,12 @@ test("old pairing links without pairing_join_ticket are rejected with a clear er
   const { parsePairingPayload } = await import("./crypto.js");
   const payload = {
     broker_channel_id: "dev-room",
-    broker_url: "ws://192.168.1.105:8788",
-    expires_at: 1774731071,
-    pairing_id: "pair-z55kwjolad",
-    pairing_secret: "PdNAR62HZGWivFxf7Wo25rlGFxWH8PSD",
+    broker_url: "wss://broker.example.test",
+    expires_at: 4_102_444_800,
+    pairing_id: "pair-test-fixture",
+    pairing_secret: "test-pairing-secret-not-for-real-use",
     relay_peer_id: "local-relay",
-    relay_verify_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    relay_verify_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     security_mode: "private",
     version: 1,
   };
@@ -1217,11 +1217,11 @@ test("a pairing link without the relay identity key must be paired again", async
   const { parsePairingPayload } = await import("./crypto.js");
   const payload = {
     broker_channel_id: "dev-room",
-    broker_url: "ws://192.168.1.105:8788",
-    expires_at: 1774731071,
-    pairing_id: "pair-z55kwjolad",
+    broker_url: "wss://broker.example.test",
+    expires_at: 4_102_444_800,
+    pairing_id: "pair-test-fixture",
     pairing_join_ticket: "join-ticket",
-    pairing_secret: "PdNAR62HZGWivFxf7Wo25rlGFxWH8PSD",
+    pairing_secret: "test-pairing-secret-not-for-real-use",
     relay_peer_id: "local-relay",
     security_mode: "private",
     version: 1,
