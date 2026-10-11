@@ -19,6 +19,7 @@ fn app_state(plane: PublicControlPlane, config: BrokerHardeningConfig) -> Broker
             byte_limiter: Default::default(),
             publish_metrics: Default::default(),
             connection_tracker: Default::default(),
+            tenant_connection_tracker: Default::default(),
         },
         public_monitoring: Default::default(),
         access: Arc::new(OpenAccessStrategy),
