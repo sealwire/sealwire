@@ -3,6 +3,7 @@ mod activation;
 mod auth;
 mod credentials;
 mod crypto;
+mod env_secret;
 mod lifecycle;
 mod protocol;
 mod remote_actions;
@@ -14,6 +15,8 @@ mod writer;
 pub use access_release::run_cloud_access_release;
 #[cfg(test)]
 pub(crate) use access_release::with_test_control_challenge;
+#[cfg(test)]
+pub(crate) use env_secret::forget_consumed_secret_env;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -56,6 +59,7 @@ use self::auth::{
     RELAY_BROKER_CONTROL_URL_ENV, RELAY_BROKER_RELAY_ID_ENV, RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV,
 };
 use self::crypto::{decrypt_json, encrypt_json, EncryptedEnvelope};
+use self::env_secret::consume_secret_env;
 use self::lifecycle::{bearer_fingerprint, BrokerLifecycleLock, RegistrationIdentity};
 #[cfg(test)]
 use self::protocol::summarize_thread_transcript_response;
@@ -241,6 +245,9 @@ pub fn capture_and_scrub_activation_for_normal_start() -> BrokerStartupContext {
         CloudRegistrationRequirement::None
     };
     scrub_all_cloud_activation_env_for_normal_start();
+    // Providers are spawned before the broker task first reads its config.
+    consume_secret_env(relay_broker::join_ticket::JOIN_TICKET_SECRET_ENV);
+    consume_secret_env(RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV);
     BrokerStartupContext { cloud_registration }
 }
 
@@ -966,9 +973,9 @@ impl BrokerConfig {
             std::env::var("RELAY_BROKER_CHANNEL_ID").ok(),
             std::env::var("RELAY_BROKER_PEER_ID").ok(),
             std::env::var(BROKER_AUTH_MODE_ENV).ok(),
-            std::env::var(relay_broker::join_ticket::JOIN_TICKET_SECRET_ENV).ok(),
+            consume_secret_env(relay_broker::join_ticket::JOIN_TICKET_SECRET_ENV),
             std::env::var(RELAY_BROKER_RELAY_ID_ENV).ok(),
-            std::env::var(RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV).ok(),
+            consume_secret_env(RELAY_BROKER_RELAY_REFRESH_TOKEN_ENV),
             None,
             std::env::var(self::auth::RELAY_BROKER_DEVICE_JOIN_TTL_SECS_ENV).ok(),
             startup_context,

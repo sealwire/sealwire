@@ -48,6 +48,7 @@ impl EnvStringGuard {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
         }
+        crate::broker::forget_consumed_secret_env(key);
         Self { key, previous }
     }
 }
@@ -58,6 +59,7 @@ impl Drop for EnvStringGuard {
             Some(previous) => std::env::set_var(self.key, previous),
             None => std::env::remove_var(self.key),
         }
+        crate::broker::forget_consumed_secret_env(self.key);
     }
 }
 
@@ -8814,3 +8816,74 @@ async fn a_second_phone_on_a_decided_pairing_qr_is_told_to_use_a_new_one() {
     }
 }
 mod request_replay;
+
+#[tokio::test]
+async fn broker_config_from_env_removes_the_secrets_from_the_process_environment() {
+    // Provider processes inherit the relay's environment, so a secret left in it is one
+    // `env` away from any agent. Reading the config must take the secrets out.
+    let _state = crate::state_paths::env_lock();
+    let _url = EnvStringGuard::set("RELAY_BROKER_URL", None);
+    let _secret = EnvStringGuard::set(
+        "RELAY_BROKER_TICKET_SECRET",
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d"),
+    );
+    let _refresh = EnvStringGuard::set(
+        "RELAY_BROKER_RELAY_REFRESH_TOKEN",
+        Some("relay-refresh-env"),
+    );
+
+    let config = BrokerConfig::from_env()
+        .await
+        .expect("no broker url just disables the broker");
+    assert!(config.is_none());
+    assert!(
+        std::env::var_os("RELAY_BROKER_TICKET_SECRET").is_none(),
+        "RELAY_BROKER_TICKET_SECRET must not stay in the environment after it was read"
+    );
+    assert!(
+        std::env::var_os("RELAY_BROKER_RELAY_REFRESH_TOKEN").is_none(),
+        "RELAY_BROKER_RELAY_REFRESH_TOKEN must not stay in the environment after it was read"
+    );
+}
+
+#[tokio::test]
+async fn startup_scrub_takes_the_broker_secrets_out_before_providers_and_the_broker_still_starts() {
+    // `AppState::new` spawns the providers before the broker task first reads its config,
+    // so the startup scrub `main` runs ahead of it is the last point the secrets can go.
+    let _cloud = cloud_env_lock().lock().expect("cloud env lock");
+    let _state = crate::state_paths::env_lock();
+    let home = tempfile::tempdir().expect("temp home");
+    let _home = crate::state_paths::EnvVarGuard::set("HOME", Some(home.path()));
+    let _db = crate::state_paths::EnvVarGuard::set("RELAY_STATE_DB", None);
+    let _url = EnvStringGuard::set("RELAY_BROKER_URL", Some("ws://127.0.0.1:9/ws"));
+    let _public = EnvStringGuard::set("RELAY_BROKER_PUBLIC_URL", None);
+    let _control = EnvStringGuard::set("RELAY_BROKER_CONTROL_URL", None);
+    let _channel = EnvStringGuard::set("RELAY_BROKER_CHANNEL_ID", Some("room-scrub"));
+    let _peer = EnvStringGuard::set("RELAY_BROKER_PEER_ID", Some("relay-scrub"));
+    let _mode = EnvStringGuard::set("RELAY_BROKER_AUTH_MODE", Some("self_hosted"));
+    let _relay = EnvStringGuard::set("RELAY_BROKER_RELAY_ID", None);
+    let _ttl = EnvStringGuard::set("RELAY_BROKER_DEVICE_JOIN_TTL_SECS", None);
+    let _secret = EnvStringGuard::set(
+        "RELAY_BROKER_TICKET_SECRET",
+        Some("test-broker-ticket-secret-a3f76b4c2089d15e6b0fa873c4e9521d"),
+    );
+    let _refresh = EnvStringGuard::set(
+        "RELAY_BROKER_RELAY_REFRESH_TOKEN",
+        Some("relay-refresh-env"),
+    );
+
+    let _startup = crate::broker::capture_and_scrub_activation_for_normal_start();
+    for key in [
+        "RELAY_BROKER_TICKET_SECRET",
+        "RELAY_BROKER_RELAY_REFRESH_TOKEN",
+    ] {
+        assert!(
+            std::env::var_os(key).is_none(),
+            "{key} must be out of the environment before any provider is spawned"
+        );
+    }
+    BrokerConfig::from_env()
+        .await
+        .expect("broker config after the startup scrub")
+        .expect("the self-hosted broker must still get its ticket secret");
+}

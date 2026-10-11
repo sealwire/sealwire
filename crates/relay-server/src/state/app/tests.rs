@@ -29155,6 +29155,7 @@ mod double_approve_race {
 
         for (key, _) in broker_env {
             std::env::remove_var(key);
+            crate::broker::forget_consumed_secret_env(key);
         }
         std::env::remove_var("RELAY_STATE_DB");
 
