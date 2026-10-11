@@ -66,7 +66,7 @@ import {
 } from "./file-change-diff.js";
 import { transcriptRowKey } from "./transcript-row-key.js";
 import { isFailedTranscriptEntry, isPartialTranscriptEntry } from "./transcript-entry-details-state.js";
-import { renderMarkdown, renderStreamingMarkdown } from "./markdown.js";
+import { MarkdownEditorLinksContext, renderMarkdown, renderStreamingMarkdown } from "./markdown.js";
 import { didPrependOlderTranscript } from "./transcript-scroll.js";
 import { getTranscriptScrollController } from "./transcript-scroll-controller.js";
 
@@ -3730,9 +3730,13 @@ export function TranscriptContent({
   });
 
   return h(
-    CardBodyContext.Provider,
-    { value: cardBodies },
-    h(TranscriptViewport, { nodes, sentinel, askUserFooter, selectionToolbar })
+    MarkdownEditorLinksContext.Provider,
+    { value: options?.openFileLinksInEditor === true },
+    h(
+      CardBodyContext.Provider,
+      { value: cardBodies },
+      h(TranscriptViewport, { nodes, sentinel, askUserFooter, selectionToolbar })
+    )
   );
 }
 

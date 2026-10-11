@@ -25,6 +25,15 @@ global.document = dom.window.document;
 global.HTMLElement = dom.window.HTMLElement;
 global.Node = dom.window.Node;
 global.CustomEvent = dom.window.CustomEvent;
+global.ResizeObserver = class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+global.IntersectionObserver = class {
+  observe() {}
+  disconnect() {}
+};
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const React = (await import("react")).default;
@@ -149,4 +158,41 @@ test("an active session still renders the transcript pane (sessionView non-null 
 
   act(() => root.unmount());
   host.remove();
+});
+
+test("remote transcript file links copy relay paths instead of opening a local editor", async () => {
+  const copied = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text) => copied.push(text) },
+  });
+  const { caught, host, root } = mount(baseProps({
+    session: {
+      active_thread_id: "thread-1",
+      current_cwd: "/relay/repo",
+      provider: "claude",
+      transcript: [{
+        item_id: "file-links",
+        kind: "agent_text",
+        status: "completed",
+        text: "[absolute](/relay/repo/a.js:10) [relative](src/a.js:3)",
+      }],
+    },
+    sessionView: { approval: null, canCompose: true, canWrite: true },
+  }));
+  try {
+    assert.equal(caught, null);
+    assert.equal(host.querySelectorAll('a[href^="vscode:"]').length, 0);
+    const links = host.querySelectorAll('.markdown-file-link[role="button"]');
+    assert.equal(links.length, 2);
+    await act(async () => {
+      links[0].click();
+      links[1].dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    assert.deepEqual(copied, ["/relay/repo/a.js:10", "src/a.js:3"]);
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+    delete navigator.clipboard;
+  }
 });

@@ -101,6 +101,19 @@ function renderTranscriptPaneMarkup(props) {
   return renderToStaticMarkup(h(TranscriptPane, props));
 }
 
+test("transcript file links require an explicit local opt-in and never infer a worktree from the session directory", () => {
+  const entries = [{ item_id: "file-reference", kind: "agent_text", status: "completed", text: "[source](src/lib.rs:33) [absolute](/worktrees/fix/src/lib.rs:33)" }];
+  for (const cwd of ["/repo/a", "/repo/b"]) {
+    const markup = renderTranscriptContentMarkup(entries, null, { currentCwd: cwd });
+    assert.doesNotMatch(markup, /vscode:/);
+    assert.match(markup, /Copy path: \/worktrees\/fix\/src\/lib.rs:33/);
+    const localMarkup = renderTranscriptContentMarkup(entries, null, { currentCwd: cwd, openFileLinksInEditor: true });
+    assert.match(localMarkup, /href="vscode:\/\/file\/worktrees\/fix\/src\/lib.rs:33"/);
+    assert.match(localMarkup, /Copy path: src\/lib.rs:33/);
+    assert.ok(!localMarkup.includes(`vscode://file${cwd}`));
+  }
+});
+
 test("TranscriptContent does not reserve a viewport-fraction bottom spacer mid-turn (bottom-follow)", () => {
   // Bottom-follow never top-anchors a sent message, so the `data-bottom-spacer`
   // hook for the 60vh CSS reserve must not be emitted — even when the latest

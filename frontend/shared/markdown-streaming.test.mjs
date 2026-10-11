@@ -510,10 +510,10 @@ test("[streaming] http(s)/mailto links go through untouched", () => {
   assert.match(html, /href="mailto:a@b\.c"/);
 });
 
-test("[streaming] file paths copy while fragment and query URLs stay links", () => {
+test("[streaming] file paths copy by default while fragment and query URLs stay links", () => {
   const html = renderStreaming("[frag](#section) [rel](/local/path) [q](?query=1)");
   assert.match(html, /href="#section"/);
-  assert.match(html, /<span[^>]*role="button"[^>]*aria-label="Copy path: \/local\/path"[^>]*>rel<\/span>/);
+  assert.match(html, /aria-label="Copy path: \/local\/path"/);
   assert.doesNotMatch(html, /href="\/local\/path"/);
   assert.match(html, /href="\?query=1"/);
 });

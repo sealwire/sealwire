@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   renderMarkdown,
+  MarkdownEditorLinksContext,
   __clearMarkdownCacheForTests,
   __getMarkdownCacheSizeForTests,
   __test__,
@@ -12,10 +13,10 @@ import {
 
 const h = React.createElement;
 
-function render(text) {
+function render(text, openFileLinksInEditor = false) {
   const node = renderMarkdown(text);
   if (node == null || node === "") return "";
-  return renderToStaticMarkup(h(React.Fragment, null, node));
+  return renderToStaticMarkup(h(MarkdownEditorLinksContext.Provider, { value: openFileLinksInEditor }, node));
 }
 
 // -- Token rendering --------------------------------------------------------
@@ -118,19 +119,69 @@ test("http(s)/mailto links go through untouched", () => {
   assert.match(html, /href="mailto:a@b\.c"/);
 });
 
-test("file references render as copy buttons instead of relative website links", () => {
-  for (const path of [
-    "/Users/luchi/project/README.md:12",
-    "frontend/shared/markdown.js#L75",
-    "../README.md",
-    "README.md:12:3",
-    "C:/project/README.md:12",
-    String.raw`C:\repo\README.md:12`,
+test("absolute file references open in VS Code at their line and column when enabled", () => {
+  for (const [path, expected] of [
+    ["/Users/luchi/project/README.md:12", "/Users/luchi/project/README.md:12"],
+    ["/repo/frontend/shared/markdown.js#L75", "/repo/frontend/shared/markdown.js:75"],
+    ["/repo/README.md:12:3", "/repo/README.md:12:3"],
+    ["C:/project/README.md:12", "/C:/project/README.md:12"],
+    [String.raw`C:\repo\README.md:12`, "/C:/repo/README.md:12"],
   ]) {
-    const html = render(`[file](${path})`);
-    assert.match(html, /<span[^>]*role="button"[^>]*tabindex="0"[^>]*class="markdown-file-link"/);
-    assert.ok(html.includes(`aria-label="Copy path: ${path}"`));
-    assert.doesNotMatch(html, /href=|target=|node=/);
+    const html = render(`[file](${path})`, true);
+    assert.ok(html.includes(`href="vscode://file${expected}"`), html);
+    assert.ok(html.includes(`aria-label="Open in VS Code: ${path}"`));
+    assert.match(html, /target="_blank"/);
+    assert.doesNotMatch(html, /<span|node=/);
+  }
+});
+
+test("absolute file links encode URL metacharacters and Windows paths", () => {
+  assert.ok(render("[file](<C:/My Project/src/My File.js:12:3>)", true).includes(
+    'href="vscode://file/C:/My%20Project/src/My%20File.js:12:3"',
+  ));
+  assert.ok(render("[file](/tmp/a%23b%3Fc%25d.txt:4)", true).includes(
+    'href="vscode://file/tmp/a%23b%3Fc%25d.txt:4"',
+  ));
+  assert.ok(render("[file](/tmp/a%23L12)", true).includes('href="vscode://file/tmp/a%23L12"'));
+  assert.ok(render("[file](/tmp/100%done.txt)", true).includes('href="vscode://file/tmp/100%25done.txt"'));
+});
+
+test("cached markdown respects each surface's editor link opt-in", () => {
+  const text = "[file](/repo/src/index.js:7)";
+  assert.ok(render(text, true).includes('href="vscode://file/repo/src/index.js:7"'));
+  assert.match(render(text), /aria-label="Copy path: \/repo\/src\/index.js:7"/);
+  assert.doesNotMatch(render(text), /href=/);
+});
+
+test("relative and ambiguous file references copy their paths even when editor links are enabled", () => {
+  for (const path of [
+    "src/index.js:7", "README.md:12:3", "../README.md", "~/a.js:3",
+    "a.js:10-20", "src/a.js:10-20", "/repo/a.js:10-20", "C:/repo/a.js:10-20",
+    "example.com:8080", "/repo/a.js#unknown",
+  ]) {
+    const html = render(`[file](${path})`, true);
+    assert.match(html, /role="button"/);
+    assert.ok(html.includes(`aria-label="Copy path: ${path}"`), html);
+    assert.doesNotMatch(html, /href=/);
+  }
+});
+
+test("desktop WebViews retain path copying even when the local surface enables editor links", () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "isTauri");
+  Object.defineProperty(globalThis, "isTauri", { configurable: true, value: true });
+  try {
+    const html = render("[file](/repo/a.js:3)", true);
+    assert.match(html, /aria-label="Copy path: \/repo\/a.js:3"/);
+    assert.doesNotMatch(html, /href=/);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "isTauri", previous);
+    else delete globalThis.isTauri;
+  }
+});
+
+test("agent-authored editor commands remain blocked", () => {
+  for (const href of ["vscode://settings/editor.wordWrap", "vscode://file/tmp/file", "cursor://command/foo"]) {
+    assert.match(render(`[file](${href})`), /href="#blocked"/);
   }
 });
 
