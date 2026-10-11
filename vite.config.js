@@ -116,6 +116,9 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: vitePort,
+    // Vite's default CORS admits every localhost origin, and the relay trusts loopback
+    // cross-port requests carrying the CSRF header, so any local page could drive the API.
+    cors: false,
     proxy: {
       "/api": {
         target: `http://127.0.0.1:${relayPort}`,
