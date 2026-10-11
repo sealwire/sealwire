@@ -37,18 +37,15 @@ export async function openSessionsDrawer(page, { timeoutMs = DEFAULT_TIMEOUT_MS 
     // Hold it: the render that closes it again lands a beat later, so sampling
     // once would pass either way.
     const held = await page
-      .waitForFunction(
+      .evaluate(
         () =>
           new Promise((resolve) => {
             setTimeout(
               () => resolve(Boolean(document.querySelector(".sidebar-drawer")?.open)),
               250
             );
-          }),
-        undefined,
-        { timeout: 2000 }
+          })
       )
-      .then(() => true)
       .catch(() => false);
     if (held) {
       return;
