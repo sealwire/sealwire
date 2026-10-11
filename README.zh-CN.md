@@ -26,6 +26,10 @@
   <img src="docs/images/desktop-home.png" alt="桌面上的 Sealwire：侧边栏和标签页里是 Claude Code、Codex 与 Cursor 会话，中间是对话，以及它改动的具体代码行" width="100%">
 </p>
 
+<p align="center">
+  <a href="https://youtu.be/38TT8iX9Oqw">观看演示视频（YouTube）</a>
+</p>
+
 Sealwire 把 Claude Code、Codex、Cursor、OpenCode 和 Pi 收进同一个简洁界面。在书桌前开工，用手机盯进度，在沙发上批准下一步。智能体跑在你自己的电脑上、紧挨着你的代码 —— Sealwire 本身看不到那些内容。
 
 - **所有智能体，一处搞定。** Claude Code、Codex、Cursor、OpenCode、Pi 并排出现在同一窗口、同一套操作里。每个任务用你顺手的那个，项目做到一半也能切换。

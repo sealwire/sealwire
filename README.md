@@ -26,6 +26,10 @@
   <img src="docs/images/desktop-home.png" alt="Sealwire on the desktop: Claude Code, Codex and Cursor sessions in the sidebar and tabs, the conversation, and the exact lines it changed" width="100%">
 </p>
 
+<p align="center">
+  <a href="https://youtu.be/5hJVa5XMAmY">Watch the demo on YouTube</a>
+</p>
+
 Sealwire puts Claude Code, Codex, Cursor, OpenCode and Pi behind one simple screen. Start
 work at your desk, check on it from your phone, approve the next step from the
 couch. The agents run on your computer, next to your code — Sealwire itself never
