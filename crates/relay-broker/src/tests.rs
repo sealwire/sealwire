@@ -5889,6 +5889,54 @@ async fn tenant_quota_uses_the_access_account_across_rooms() {
     );
 }
 
+#[tokio::test]
+async fn tenant_surface_limit_follows_the_verified_device_allowance() {
+    for device_limit in [2, 10] {
+        let access = ScriptedAccessStrategy {
+            device_limit: Some(device_limit),
+            quota_key: Some("license-account-a".into()),
+            ..ScriptedAccessStrategy::allow()
+        };
+        let address = serve_router(app_with_access_strategy_parts(
+            BrokerState::default(),
+            test_web_root(),
+            BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
+            BrokerHardeningConfig {
+                max_surface_connections_per_tenant: 1,
+                ..BrokerHardeningConfig::default()
+            },
+            SecurityHeadersConfig::default(),
+            Arc::new(access),
+            None,
+            OriginGuard::disabled(),
+        ))
+        .await;
+        let url = websocket_url(
+            address,
+            "room-a",
+            protocol::PeerRole::Surface,
+            None,
+            JoinTicketClaims::device_surface_join("room-a", "device-a", None),
+        );
+        let mut sockets = Vec::new();
+        for _ in 0..device_limit * 2 {
+            let (mut socket, _) = connect_async(&url).await.unwrap();
+            assert!(matches!(
+                next_server_message(&mut socket).await,
+                ServerMessage::Welcome { .. }
+            ));
+            sockets.push(socket);
+        }
+        let (mut excess, _) = connect_async(&url).await.unwrap();
+        assert!(
+            matches!(next_server_message(&mut excess).await, ServerMessage::Error { code, message } if code == "rate_limited" && message.contains("tenant"))
+        );
+        for mut socket in sockets {
+            socket.close(None).await.unwrap();
+        }
+    }
+}
+
 #[test]
 fn tenant_permits_bound_relay_overlap_and_remove_idle_tenants() {
     let tracker = TenantConnectionTracker::default();

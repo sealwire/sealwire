@@ -203,7 +203,8 @@ pub enum EnrollmentBindDecision {
 /// Outcome of device-grant authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceAccessDecision {
-    /// Cap on active devices for this relay. `None` means uncapped.
+    /// Cap on active devices for this relay; socket joins share twice this allowance.
+    /// `None` leaves devices uncapped and uses the broker's surface connection limit.
     pub device_limit: Option<u32>,
 }
 

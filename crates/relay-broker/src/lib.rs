@@ -3359,7 +3359,7 @@ async fn handle_socket(
     // target a victim. Self-host / open mode has no registration table — strategy
     // still runs with the room id as a neutral key (OpenAccess allows;
     // Unavailable fails closed). Missing registration in public mode fails closed.
-    let tenant_key =
+    let (tenant_key, surface_limit) =
         match authorize_verified_join_access(&state, remote_addr.ip(), &channel_id, &verified_join)
             .await
         {
@@ -3495,7 +3495,7 @@ async fn handle_socket(
     let _tenant_permit = match state.hardening.tenant_connection_tracker.try_acquire(
         tenant_key,
         query.role,
-        state.hardening.config.max_surface_connections_per_tenant,
+        surface_limit,
     ) {
         Ok(permit) => permit,
         Err(message) => {
@@ -4420,7 +4420,7 @@ async fn authorize_verified_join_access(
     remote_ip: IpAddr,
     broker_room_id: &str,
     verified: &VerifiedBrokerJoin,
-) -> Result<String, &'static str> {
+) -> Result<(String, usize), &'static str> {
     let relay_id = match state.join_verifier.public_control_plane() {
         Some(control_plane) => match control_plane.relay_id_for_broker_room(broker_room_id).await {
             Some(relay_id) => relay_id,
@@ -4434,7 +4434,7 @@ async fn authorize_verified_join_access(
         None => broker_room_id.to_string(),
     };
 
-    match verified.kind {
+    let device_limit = match verified.kind {
         JoinTicketKind::RelayJoin => {
             let ctx = AccessRequestContext::new(remote_ip, AccessOperation::RelaySocketJoin);
             state
@@ -4445,6 +4445,7 @@ async fn authorize_verified_join_access(
                     denial.log_internal();
                     "relay access denied for socket join"
                 })?;
+            None
         }
         JoinTicketKind::DeviceSurfaceJoin | JoinTicketKind::PairingSurfaceJoin => {
             let ctx = AccessRequestContext::new(remote_ip, AccessOperation::DeviceSocketJoin);
@@ -4455,17 +4456,23 @@ async fn authorize_verified_join_access(
                 .map_err(|denial| {
                     denial.log_internal();
                     "device access denied for socket join"
-                })?;
+                })?
+                .device_limit
         }
-    }
-    match state.access.relay_quota_key(&relay_id).await {
-        Ok(Some(key)) => Ok(format!("account:{key}")),
-        Ok(None) => Ok(format!("relay:{relay_id}")),
+    };
+    let tenant_key = match state.access.relay_quota_key(&relay_id).await {
+        Ok(Some(key)) => format!("account:{key}"),
+        Ok(None) => format!("relay:{relay_id}"),
         Err(denial) => {
             denial.log_internal();
-            Err("tenant identity unavailable for socket join")
+            return Err("tenant identity unavailable for socket join");
         }
-    }
+    };
+    let surface_limit = device_limit.map_or(
+        state.hardening.config.max_surface_connections_per_tenant,
+        |limit| (limit as usize).saturating_mul(2),
+    );
+    Ok((tenant_key, surface_limit))
 }
 
 fn public_api_auth_failure(message: &str) -> bool {
