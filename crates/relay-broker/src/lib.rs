@@ -4960,12 +4960,19 @@ async fn with_security_headers(
     response
 }
 
+const IOS_APP_ORIGIN: &str = "capacitor://localhost";
+
 fn authorize_websocket_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
     // TODO: Split websocket browser/native policies more explicitly. For now, only
     // reject requests that explicitly present a mismatched browser Origin.
     let Some(origin) = header_origin(headers, header::ORIGIN) else {
         return Ok(());
     };
+    // The iOS app's bundled page. No website can present a capacitor: origin, so this
+    // admits nothing beyond what an Origin-less native client already gets.
+    if origin == IOS_APP_ORIGIN {
+        return Ok(());
+    }
     let Some(expected_origin) = request_origin(headers, None) else {
         return Err(StatusCode::FORBIDDEN);
     };

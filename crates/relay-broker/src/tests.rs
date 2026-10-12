@@ -1134,6 +1134,34 @@ async fn websocket_allows_same_origin_when_origin_is_present() {
 }
 
 #[tokio::test]
+async fn websocket_allows_the_ios_app_origin() {
+    let address = spawn_app().await;
+    let url = websocket_url(
+        address,
+        "room-a",
+        protocol::PeerRole::Surface,
+        None,
+        JoinTicketClaims::pairing_surface_join("room-a", "pair-ios-app", u64::MAX),
+    );
+    let mut request = url
+        .into_client_request()
+        .expect("websocket request should build");
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("capacitor://localhost"),
+    );
+
+    let (mut socket, _) = connect_async(request)
+        .await
+        .expect("the iOS app's bundled page should be allowed to connect");
+    let welcome = next_server_message(&mut socket).await;
+    match welcome {
+        ServerMessage::Welcome { peer_id, .. } => assert!(peer_id.starts_with("surface-")),
+        other => panic!("unexpected welcome frame: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn websocket_relays_messages_between_peers() {
     let address = spawn_app().await;
     let relay_url = websocket_url(
