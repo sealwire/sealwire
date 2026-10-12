@@ -20,6 +20,7 @@ import {
   workspaceRepairHint,
   workspaceRepairSummary,
 } from "./workspace-repair.js";
+import { surfaceText } from "./surface-wording.js";
 
 // Nothing is claiming the banner. Every branch returns this SHAPE (never a subset) so
 // the renderer can read `repair`/`summaryTitle` without guarding each field.
@@ -139,7 +140,7 @@ export function selectDeviceChromeRenderModel(currentState) {
   const emptyMessage = !currentState.remoteAuth && !showPairingCard
     ? currentState.relayDirectory?.length
       ? "Open one of your relays from home or the sidebar to enter its remote surface."
-      : "No paired remote device is stored in this browser yet."
+      : surfaceText("No paired remote device is stored in this browser yet.")
     : null;
 
   const cards = [];
@@ -393,7 +394,7 @@ function remoteAccessLabel(currentState) {
   }
 
   if (selectedRelayNeedsRepair(currentState)) {
-    return "This browser still knows this relay, but its local encrypted credentials are unavailable. Pair it again on this device to restore remote access.";
+    return surfaceText("This browser still knows this relay, but its local encrypted credentials are unavailable. Pair it again on this device to restore remote access.");
   }
 
   if (!currentState.session?.active_thread_id) {
@@ -405,7 +406,7 @@ function remoteAccessLabel(currentState) {
   }
 
   if (!currentState.remoteAuth.sessionClaimExpiresAt) {
-    return "Ready to type from this browser";
+    return surfaceText("Ready to type from this browser");
   }
 
   return `Ready here until ${formatTimestamp(currentState.remoteAuth.sessionClaimExpiresAt)}`;
@@ -444,18 +445,18 @@ function workspaceTitle(currentState) {
     return currentState.remoteAuth.relayLabel || "Remote surface ready";
   }
   if (currentState.pairingTicket) {
-    return currentState.pairingPhase === "error" ? "Pairing failed" : "Pairing this browser";
+    return currentState.pairingPhase === "error" ? "Pairing failed" : surfaceText("Pairing this browser");
   }
   if (currentState.relayDirectory?.length) {
     return "My relays";
   }
-  return currentState.clientAuth ? "No relays yet" : "Pair this browser";
+  return currentState.clientAuth ? "No relays yet" : surfaceText("Pair this browser");
 }
 
 function workspaceSubtitle(currentState) {
   if (currentState.remoteAuth) {
     if (selectedRelayNeedsRepair(currentState)) {
-      return "Local encrypted credentials are unavailable in this browser. Pair this relay again on this device to restore remote access.";
+      return surfaceText("Local encrypted credentials are unavailable in this browser. Pair this relay again on this device to restore remote access.");
     }
     return "Remote device paired. Start a session, open one from history, or wait for a live session.";
   }
@@ -463,10 +464,10 @@ function workspaceSubtitle(currentState) {
     return pairingCopy(currentState);
   }
   if (currentState.relayDirectory?.length) {
-    return "This browser already has access to one or more relays. Open one from the home view or sidebar, or pair another from your local relay.";
+    return surfaceText("This browser already has access to one or more relays. Open one from the home view or sidebar, or pair another from your local relay.");
   }
   return currentState.clientAuth
-    ? "This browser has a client identity but no relay grants yet. Pair a relay from your local machine to add one here."
+    ? surfaceText("This browser has a client identity but no relay grants yet. Pair a relay from your local machine to add one here.")
     : "Open a pairing QR from your local relay to control Codex remotely.";
 }
 
@@ -525,7 +526,7 @@ function pairingHeading(currentState) {
   if (currentState.pairingPhase === "requesting") {
     return "Waiting for local approval";
   }
-  return "Pairing this browser";
+  return surfaceText("Pairing this browser");
 }
 
 function pairingCopy(currentState) {
@@ -533,7 +534,7 @@ function pairingCopy(currentState) {
     return currentState.pairingError || "Pairing could not complete. Retry from this page or rescan the QR.";
   }
   if (currentState.pairingPhase === "requesting") {
-    return "This browser sent its device key to the local relay. Approve it there only if the computer shows the same fingerprint.";
+    return surfaceText("This browser sent its device key to the local relay. Approve it there only if the computer shows the same fingerprint.");
   }
   return "This page is connecting to the broker with the scanned pairing ticket. You should not need to press Pair again.";
 }

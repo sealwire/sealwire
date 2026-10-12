@@ -24,6 +24,7 @@ import {
 } from "./surface-state.js";
 import { currentRelayBinding, sendBrokerFrame } from "./broker-client.js";
 import { relayError } from "../shared/transcript-protocol.js";
+import { surfaceText } from "./surface-wording.js";
 
 // One deadline for every action. Not because they are all quick — the relay still
 // awaits list_threads and send_message in its single receive loop, and a cold Codex
@@ -102,7 +103,7 @@ export async function ensureRemoteClaim({
   syncAfterClaim = false,
 } = {}) {
   if (!state.remoteAuth) {
-    throw new Error("this browser is not paired yet");
+    throw new Error(surfaceText("this browser is not paired yet"));
   }
   if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
     throw new Error("broker socket is not connected");
@@ -584,7 +585,7 @@ function rejectPendingAction(actionId, error) {
 
 async function decryptPayloadWithDeviceTokens(envelope) {
   if (!state.remoteAuth) {
-    throw new Error("this browser is not paired yet");
+    throw new Error(surfaceText("this browser is not paired yet"));
   }
 
   return decryptJson(state.remoteAuth.payloadSecret, envelope);
@@ -592,7 +593,7 @@ async function decryptPayloadWithDeviceTokens(envelope) {
 
 async function dispatchRemoteAction(actionType, request) {
   if (!state.remoteAuth) {
-    throw new Error("this browser is not paired yet");
+    throw new Error(surfaceText("this browser is not paired yet"));
   }
   if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
     throw new Error("broker socket is not connected");
@@ -620,7 +621,7 @@ async function dispatchRemoteAction(actionType, request) {
 
 export async function dispatchRemoteActionWithoutReply(actionType, request) {
   if (!state.remoteAuth) {
-    throw new Error("this browser is not paired yet");
+    throw new Error(surfaceText("this browser is not paired yet"));
   }
   const socket = state.socket;
   if (requiresSessionClaim(actionType)) {

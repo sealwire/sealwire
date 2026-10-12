@@ -283,6 +283,7 @@ import { layoutThreadIds } from "../shared/tab-layout.js";
 import { createThreadSkillsStore, skillForSend } from "../shared/thread-skills.js";
 import { sessionViewContextKey } from "../shared/session-view-state.js";
 import { BOOT_RESTORE_REASON, useRemoteSessionTabs } from "./session-tabs-host.js";
+import { surfaceText } from "./surface-wording.js";
 
 const h = React.createElement;
 const LIVE_TRANSCRIPT_DETAIL_REFRESH_MS = 1000;
@@ -1062,10 +1063,10 @@ function RemoteApp() {
     messagePlaceholder: !hasRelay
       ? currentState.relayDirectory?.length
         ? "Open a relay before sending messages."
-        : "Pair this browser before sending messages."
+        : surfaceText("Pair this browser before sending messages.")
       : hasUsableRelay
         ? "Start or open a remote session first."
-        : "Local credentials are unavailable. Pair this relay again in this browser.",
+        : surfaceText("Local credentials are unavailable. Pair this relay again in this browser."),
     sendPending: composerSendPending,
   };
   const transcriptDetailEntries = buildExpandedTranscriptDetailEntries(currentState, {

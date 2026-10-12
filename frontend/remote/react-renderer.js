@@ -4,6 +4,7 @@ import { ConversationHeadingBody } from "../shared/conversation-header.js";
 export { ConversationComposer as Composer } from "../shared/composer.js";
 export { SessionSettingsFields } from "../shared/session-settings-fields.js";
 import { formatTimestamp, shortId } from "./utils.js";
+import { surfaceText } from "./surface-wording.js";
 
 const h = React.createElement;
 
@@ -44,10 +45,10 @@ function relaySubtitle(relay) {
   }
 
   if (relay.needsLocalRePairing) {
-    return "Local credentials are missing in this browser. Pair this relay again to restore encrypted access.";
+    return surfaceText("Local credentials are missing in this browser. Pair this relay again to restore encrypted access.");
   }
 
-  return "Grant exists, but this browser does not have local encrypted access yet.";
+  return surfaceText("Grant exists, but this browser does not have local encrypted access yet.");
 }
 
 function InfoIcon() {
@@ -86,7 +87,7 @@ export function WorkspaceHeading({ header, statusBadge, onOpenInfo, titleNode = 
             id: "remote-workspace-title",
             title: header?.titleTitle || "",
           },
-          header?.title || "Pair this browser"
+          header?.title || surfaceText("Pair this browser")
         ),
     statusNode: showStatus
       ? h(
@@ -330,8 +331,8 @@ export function RelayHomeState({ clientAuth, nicknames, onRenameRelay, onSelectR
         "p",
         null,
         clientAuth
-          ? "This browser has a client identity but no relay grants yet. Open a new QR code from a local relay to add one here."
-          : "Open a pairing QR code from your local relay to add your first remote surface to this browser."
+          ? surfaceText("This browser has a client identity but no relay grants yet. Open a new QR code from a local relay to add one here.")
+          : surfaceText("Open a pairing QR code from your local relay to add your first remote surface to this browser.")
       )
     );
   }
@@ -347,7 +348,7 @@ export function RelayHomeState({ clientAuth, nicknames, onRenameRelay, onSelectR
       h(
         "p",
         null,
-        "This browser already has access to one or more relays. Open one below, or pair another from your local machine."
+        surfaceText("This browser already has access to one or more relays. Open one below, or pair another from your local machine.")
       )
     ),
     h(
@@ -379,14 +380,14 @@ function RelayHomeCard({ nickname, onRenameRelay, onSelectRelay, relay }) {
   const subtitle = relay.hasLocalProfile
     ? relay.deviceLabel || relay.deviceId
     : relay.needsLocalRePairing
-      ? "Local credentials are missing in this browser. Pair this relay again to restore remote access."
-      : "This browser can see the grant, but it does not have local encrypted access for this relay yet.";
+      ? surfaceText("Local credentials are missing in this browser. Pair this relay again to restore remote access.")
+      : surfaceText("This browser can see the grant, but it does not have local encrypted access for this relay yet.");
   const meta = relay.grantedAt ? `Granted ${formatTimestamp(relay.grantedAt)}` : null;
   const cta = relay.hasLocalProfile
     ? "Open relay"
     : relay.needsLocalRePairing
-      ? "Re-pair in this browser"
-      : "Pair again in this browser";
+      ? surfaceText("Re-pair in this browser")
+      : surfaceText("Pair again in this browser");
 
   const canRename = Boolean(onRenameRelay && relay.relayId);
   const [editing, setEditing] = React.useState(false);
@@ -518,7 +519,7 @@ export function MissingCredentialsState({ remoteAuth }) {
     h(
       "p",
       null,
-      `${relayLabel} is still known to this browser, but its local encrypted credentials are unavailable.`
+      relayLabel + surfaceText(" is still known to this browser, but its local encrypted credentials are unavailable.")
     ),
     h("p", null, "Pair this relay again on this device to restore remote access.")
   );
