@@ -15,6 +15,7 @@ const WEB_DIR = fileURLToPath(new URL("../web", import.meta.url));
 const SCREENSHOT = process.env.DESKTOP_STARTUP_SCREENSHOT || "";
 
 const STARTING = { phase: "starting", logs: [] };
+const STOPPED = { phase: "stopped", logs: [] };
 const FAILED = {
   phase: "failed",
   message:
@@ -94,7 +95,7 @@ async function main() {
   const { browser, context } = await launchBrowser();
   const pageErrors = [];
   try {
-    await context.addInitScript(installTauriStub, { desktop_status: STARTING, desktop_retry: null });
+    await context.addInitScript(installTauriStub, { desktop_status: STARTING, desktop_start: null });
     const page = await context.newPage();
     attachPageDebugLogging(page, "desktop-startup");
     page.on("pageerror", (error) => pageErrors.push(error));
@@ -105,8 +106,14 @@ async function main() {
     assert.equal(await invokeCount(page, "desktop_status"), 1, "status is read once on load");
     assert.equal(await invokeCount(page, "plugin:event|listen"), 1, "status updates are subscribed");
     assert.match(await page.textContent(".startup-title"), /Starting Sealwire/);
-    assert.equal(await page.$(".startup-retry"), null, "no retry while starting");
+    assert.equal(await page.$(".startup-start"), null, "nothing to start while starting");
     assert.equal(await page.$("input, select"), null, "the startup page asks nothing of the user");
+
+    // No relay running: the app waits for the user instead of starting one.
+    await emit(page, STOPPED);
+    await waitForState(page, "stopped");
+    assert.match(await page.textContent(".startup-title"), /isn't running/);
+    assert.equal(await page.textContent(".startup-start"), "Start Sealwire");
 
     await emit(page, FAILED);
     await waitForState(page, "failed");
@@ -119,13 +126,13 @@ async function main() {
       await page.screenshot({ path: SCREENSHOT });
     }
 
-    await page.click(".startup-retry");
+    await page.click(".startup-start");
     await page.waitForFunction(
-      () => (window.__invokeLog || []).some((entry) => entry.cmd === "desktop_retry"),
+      () => (window.__invokeLog || []).some((entry) => entry.cmd === "desktop_start"),
       undefined,
       { timeout: TIMEOUT_MS }
     );
-    assert.equal(await page.isDisabled(".startup-retry"), true, "retry cannot be sent twice");
+    assert.equal(await page.isDisabled(".startup-start"), true, "start cannot be sent twice");
 
     await emit(page, STARTING);
     await waitForState(page, "starting");

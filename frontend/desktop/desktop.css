@@ -41,7 +41,7 @@
   font-size: var(--text-body);
 }
 
-.startup[data-state="failed"] .startup-title {
+.startup:is([data-state="failed"], [data-state="stopped"]) .startup-title {
   color: var(--text-1);
   font-size: var(--text-md);
   font-weight: var(--weight-strong);
@@ -55,7 +55,7 @@
   overflow-wrap: anywhere;
 }
 
-.startup-retry {
+.startup-start {
   margin-top: 4px;
   font-size: var(--text-ui);
 }

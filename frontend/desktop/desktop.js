@@ -23,8 +23,8 @@ function render(status) {
       el("img", { className: "startup-mark", alt: "", src: "/sealwire_mark.png" }),
       el("p", { className: "startup-title", role: "status" }, [view.title]),
       view.detail ? el("p", { className: "startup-detail" }, [view.detail]) : null,
-      view.canRetry
-        ? el("button", { className: "startup-retry", type: "button", onclick: retry }, ["Try again"])
+      view.canStart
+        ? el("button", { className: "startup-start", type: "button", onclick: start }, ["Start Sealwire"])
         : null,
       view.logs.length
         ? el("details", { className: "startup-logs" }, [
@@ -36,10 +36,10 @@ function render(status) {
   );
 }
 
-async function retry(event) {
+async function start(event) {
   event.currentTarget.disabled = true;
   try {
-    await invoke("desktop_retry");
+    await invoke("desktop_start");
   } catch (error) {
     render({ phase: "failed", message: formatError(error), logs: [] });
   }

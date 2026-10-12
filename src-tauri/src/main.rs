@@ -11,7 +11,7 @@ use std::{
 };
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::{TrayIconBuilder, TrayIconEvent},
     webview::NewWindowResponse,
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, Wry,
 };
@@ -28,6 +28,9 @@ const STATUS_EVENT: &str = "desktop://status";
 const TRAY_ID: &str = "sealwire-tray";
 const TRAY_OPEN_ID: &str = "open";
 const TRAY_QUIT_ID: &str = "quit";
+const TRAY_RELAY_ID: &str = "relay";
+// How often a window with no relay looks for one started elsewhere.
+const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const SETTINGS_TABS: [(&str, &str); 3] = [
     ("providers", "Providers"),
     ("devices", "Devices"),
@@ -58,6 +61,8 @@ enum Phase {
     Ready {
         port: u16,
     },
+    /// Nothing running, and the app waits to be asked rather than starting one.
+    Stopped,
     Failed {
         message: String,
     },
@@ -131,17 +136,40 @@ impl Supervisor {
         logs.push_back(line.into());
     }
 
+    fn phase(&self) -> Phase {
+        self.phase.lock().unwrap().clone()
+    }
+
     fn set_phase(&self, app: &AppHandle, phase: Phase) {
-        *self.phase.lock().unwrap() = phase.clone();
-        let _ = app.emit(STATUS_EVENT, self.status());
+        *self.phase.lock().unwrap() = phase;
+        self.publish(app);
+    }
+
+    /// Moves to `next` only from a phase `from` accepts, so a background check that
+    /// raced a click cannot undo what the click started.
+    fn advance(&self, app: &AppHandle, from: impl Fn(&Phase) -> bool, next: Phase) -> bool {
+        {
+            let mut phase = self.phase.lock().unwrap();
+            if !from(&phase) {
+                return false;
+            }
+            *phase = next;
+        }
+        self.publish(app);
+        true
+    }
+
+    fn publish(&self, app: &AppHandle) {
+        let status = self.status();
+        let _ = app.emit(STATUS_EVENT, &status);
+        sync_tray(app, &status.phase, self.owns_relay());
         let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
             return;
         };
-        let target = match phase {
+        let target = match status.phase {
             Phase::Ready { port } => Url::parse(&local_url(port)).ok(),
-            // A relay that dies takes the page with it; bring back the startup
-            // page so the reason and a retry button are on screen.
-            Phase::Failed { .. } => self.startup_page.lock().unwrap().clone(),
+            // Without a relay the page is dead; the startup page says why and offers Start.
+            Phase::Stopped | Phase::Failed { .. } => self.startup_page.lock().unwrap().clone(),
             Phase::Starting => None,
         };
         if let Some(target) = target {
@@ -151,15 +179,13 @@ impl Supervisor {
         }
     }
 
-    fn retry_after_failure(&self) -> bool {
-        let mut phase = self.phase.lock().unwrap();
-        if matches!(*phase, Phase::Failed { .. }) {
-            *phase = Phase::Starting;
-            self.logs.lock().unwrap().clear();
-            true
-        } else {
-            false
-        }
+    fn begin_start(&self, app: &AppHandle) -> bool {
+        self.logs.lock().unwrap().clear();
+        self.advance(app, is_idle, Phase::Starting)
+    }
+
+    fn owns_relay(&self) -> bool {
+        self.relay.lock().unwrap().is_some()
     }
 
     fn replace_relay(&self, relay: OwnedRelay) -> Option<OwnedRelay> {
@@ -197,28 +223,78 @@ fn desktop_status(supervisor: State<'_, Arc<Supervisor>>) -> DesktopStatus {
 }
 
 #[tauri::command]
-fn desktop_retry(app: AppHandle, supervisor: State<'_, Arc<Supervisor>>) {
-    if supervisor.retry_after_failure() {
-        let _ = app.emit(STATUS_EVENT, supervisor.status());
-        connect(app, supervisor.inner().clone());
+fn desktop_start(app: AppHandle, supervisor: State<'_, Arc<Supervisor>>) {
+    start_relay(app, supervisor.inner().clone());
+}
+
+fn is_idle(phase: &Phase) -> bool {
+    matches!(phase, Phase::Stopped | Phase::Failed { .. })
+}
+
+fn shared_state_db() -> PathBuf {
+    state_db_path(std::env::var_os("RELAY_STATE_DB"), &relay_cwd())
+}
+
+/// Shows the relay that owns the shared database when there is one, as a localhost
+/// tab would, and keeps looking while there is none so dev:full is picked up by itself.
+fn watch_for_relay(app: AppHandle, supervisor: Arc<Supervisor>) {
+    std::thread::spawn(move || {
+        let state_db = shared_state_db();
+        match running_relay_port(&state_db) {
+            Some(port) => supervisor.set_phase(&app, Phase::Ready { port }),
+            None => supervisor.set_phase(&app, Phase::Stopped),
+        }
+        loop {
+            std::thread::sleep(WATCH_INTERVAL);
+            if is_idle(&supervisor.phase()) {
+                if let Some(port) = running_relay_port(&state_db) {
+                    supervisor.advance(&app, is_idle, Phase::Ready { port });
+                }
+            }
+        }
+    });
+}
+
+/// A relay started elsewhere is not watched; this notices it has gone once someone
+/// reaches for the menu, so Start is offered again.
+fn recheck_relay(app: &AppHandle) {
+    let Some(supervisor) = app.try_state::<Arc<Supervisor>>() else {
+        return;
+    };
+    let supervisor = supervisor.inner().clone();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Phase::Ready { port } = supervisor.phase() {
+            if !supervisor.owns_relay() && probe_health(port).is_none() {
+                supervisor.advance(&app, |now| *now == Phase::Ready { port }, Phase::Stopped);
+            }
+        }
+    });
+}
+
+fn start_relay(app: AppHandle, supervisor: Arc<Supervisor>) {
+    if supervisor.begin_start(&app) {
+        std::thread::spawn(move || start_blocking(&app, &supervisor));
     }
 }
 
-fn connect(app: AppHandle, supervisor: Arc<Supervisor>) {
-    std::thread::spawn(move || connect_blocking(&app, &supervisor));
+fn stop_relay(app: AppHandle, supervisor: Arc<Supervisor>) {
+    std::thread::spawn(move || {
+        if let Some(relay) = supervisor.take_relay() {
+            relay.stop();
+            supervisor.set_phase(&app, Phase::Stopped);
+        }
+    });
 }
 
-/// Shows the relay that owns the shared database if one is running, as a browser
-/// tab on localhost would; otherwise starts one the way `npx sealwire local` does.
-fn connect_blocking(app: &AppHandle, supervisor: &Arc<Supervisor>) {
-    let cwd = relay_cwd();
-    let state_db = state_db_path(std::env::var_os("RELAY_STATE_DB"), &cwd);
-    if let Some(port) = running_relay_port(&state_db) {
-        supervisor.push_log(format!("using the relay already running on port {port}"));
+/// Starts the bundled relay the way `npx sealwire local` does.
+fn start_blocking(app: &AppHandle, supervisor: &Arc<Supervisor>) {
+    // One may have come up since the last look; starting a second would only hit its lock.
+    if let Some(port) = running_relay_port(&shared_state_db()) {
         supervisor.set_phase(app, Phase::Ready { port });
         return;
     }
-
+    let cwd = relay_cwd();
     let port = match pick_port(DEFAULT_PORT) {
         Ok(port) => port,
         Err(error) => return supervisor.set_phase(app, Phase::Failed { message: error }),
@@ -582,6 +658,7 @@ fn build_main_window(app: &tauri::App) -> tauri::Result<Url> {
 enum TrayAction {
     Open,
     Quit,
+    Relay,
     Settings(&'static str),
     Theme(&'static str),
 }
@@ -597,6 +674,7 @@ fn tray_action(id: &str) -> Option<TrayAction> {
         Some(("theme", theme)) => pick(THEMES, theme).map(TrayAction::Theme),
         _ if id == TRAY_OPEN_ID => Some(TrayAction::Open),
         _ if id == TRAY_QUIT_ID => Some(TrayAction::Quit),
+        _ if id == TRAY_RELAY_ID => Some(TrayAction::Relay),
         _ => None,
     }
 }
@@ -616,6 +694,46 @@ fn page_theme(result: &str) -> &'static str {
         .map(|(value, _)| value)
         .find(|value| *value == stored)
         .unwrap_or(DEFAULT_THEME)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelayAction {
+    Start,
+    Stop,
+}
+
+struct RelayItem {
+    label: String,
+    action: Option<RelayAction>,
+}
+
+fn relay_item(phase: &Phase, owned: bool) -> RelayItem {
+    let (label, action) = match phase {
+        Phase::Stopped | Phase::Failed { .. } => {
+            ("Start Sealwire".to_string(), Some(RelayAction::Start))
+        }
+        Phase::Ready { .. } if owned => ("Stop Sealwire".to_string(), Some(RelayAction::Stop)),
+        Phase::Ready { port } => (format!("Sealwire is already running (port {port})"), None),
+        Phase::Starting => ("Starting Sealwire…".to_string(), None),
+    };
+    RelayItem { label, action }
+}
+
+struct TrayItems {
+    relay: MenuItem<Wry>,
+    settings: Submenu<Wry>,
+}
+
+fn sync_tray(app: &AppHandle, phase: &Phase, owned: bool) {
+    if let Some(items) = app.try_state::<TrayItems>() {
+        let item = relay_item(phase, owned);
+        let _ = items.relay.set_text(item.label);
+        let _ = items.relay.set_enabled(item.action.is_some());
+        // Settings lives in the relay's page, so there is nothing to open without one.
+        let _ = items
+            .settings
+            .set_enabled(matches!(phase, Phase::Ready { .. }));
+    }
 }
 
 struct ThemeMenu(Vec<CheckMenuItem<Wry>>);
@@ -652,6 +770,17 @@ fn on_tray_menu(app: &AppHandle, id: &str) {
     match tray_action(id) {
         Some(TrayAction::Open) => show_main_window(app),
         Some(TrayAction::Quit) => app.exit(0),
+        Some(TrayAction::Relay) => {
+            let Some(supervisor) = app.try_state::<Arc<Supervisor>>() else {
+                return;
+            };
+            let supervisor = supervisor.inner().clone();
+            match relay_item(&supervisor.phase(), supervisor.owns_relay()).action {
+                Some(RelayAction::Start) => start_relay(app.clone(), supervisor),
+                Some(RelayAction::Stop) => stop_relay(app.clone(), supervisor),
+                None => {}
+            }
+        }
         Some(TrayAction::Settings(tab)) => {
             show_main_window(app);
             run_page_command(
@@ -674,6 +803,13 @@ fn on_tray_menu(app: &AppHandle, id: &str) {
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, TRAY_OPEN_ID, "Open Sealwire", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit Sealwire", true, None::<&str>)?;
+    let relay = MenuItem::with_id(
+        app,
+        TRAY_RELAY_ID,
+        relay_item(&Phase::Starting, false).label,
+        false,
+        None::<&str>,
+    )?;
     let tabs = SETTINGS_TABS
         .into_iter()
         .map(|(tab, label)| {
@@ -709,28 +845,37 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .collect();
     settings_items.push(&settings_separator);
     settings_items.push(&theme_menu);
-    let settings = Submenu::with_items(app, "Settings", true, &settings_items)?;
+    let settings = Submenu::with_items(app, "Settings", false, &settings_items)?;
+    let relay_separator = PredefinedMenuItem::separator(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &settings, &separator, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open,
+            &relay,
+            &relay_separator,
+            &settings,
+            &separator,
+            &quit,
+        ],
+    )?;
     app.manage(ThemeMenu(themes));
+    app.manage(TrayItems { relay, settings });
 
     // A template image is drawn from its alpha alone, so the opaque app icon would
     // render as a solid disc; the tray needs its own cut-out silhouette.
     TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(true)
         .tooltip("Sealwire")
         .icon(tauri::include_image!("icons/tray.png"))
         .icon_as_template(true)
         .on_menu_event(|app, event| on_tray_menu(app, event.id().as_ref()))
-        .on_tray_icon_event(|tray, event| match event {
-            TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } => show_main_window(tray.app_handle()),
-            TrayIconEvent::Enter { .. } => refresh_theme_checks(tray.app_handle()),
-            _ => {}
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Enter { .. } = event {
+                refresh_theme_checks(tray.app_handle());
+                recheck_relay(tray.app_handle());
+            }
         })
         .build(app)?;
     Ok(())
@@ -831,13 +976,13 @@ fn strip_ansi(text: &str) -> String {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![desktop_status, desktop_retry])
+        .invoke_handler(tauri::generate_handler![desktop_status, desktop_start])
         .setup(|app| {
             let supervisor = Arc::new(Supervisor::default());
             app.manage(supervisor.clone());
             *supervisor.startup_page.lock().unwrap() = Some(build_main_window(app)?);
             setup_tray(app)?;
-            connect(app.handle().clone(), supervisor);
+            watch_for_relay(app.handle().clone(), supervisor);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -934,6 +1079,43 @@ mod tests {
                 "{target} must not replace the app"
             );
         }
+    }
+
+    // Only a relay this app started may be stopped from here; one started elsewhere
+    // (dev:full, `npx sealwire`) is shown but left alone.
+    #[test]
+    fn the_relay_menu_item_follows_who_runs_the_relay() {
+        let ready = Phase::Ready { port: 8787 };
+        let item = |phase: &Phase, owned| {
+            let item = relay_item(phase, owned);
+            (item.label, item.action)
+        };
+        assert_eq!(
+            item(&Phase::Stopped, false),
+            ("Start Sealwire".to_string(), Some(RelayAction::Start))
+        );
+        assert_eq!(
+            item(
+                &Phase::Failed {
+                    message: "x".into()
+                },
+                false
+            ),
+            ("Start Sealwire".to_string(), Some(RelayAction::Start))
+        );
+        assert_eq!(
+            item(&ready, true),
+            ("Stop Sealwire".to_string(), Some(RelayAction::Stop))
+        );
+        assert_eq!(
+            item(&ready, false),
+            ("Sealwire is already running (port 8787)".to_string(), None)
+        );
+        assert_eq!(
+            item(&Phase::Starting, false),
+            ("Starting Sealwire…".to_string(), None)
+        );
+        assert!(matches!(tray_action("relay"), Some(TrayAction::Relay)));
     }
 
     #[test]
@@ -1195,6 +1377,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ready).unwrap(),
             serde_json::json!({"phase": "ready", "port": 8787, "logs": []})
+        );
+        let stopped = DesktopStatus {
+            phase: Phase::Stopped,
+            logs: vec![],
+        };
+        assert_eq!(
+            serde_json::to_value(stopped).unwrap(),
+            serde_json::json!({"phase": "stopped", "logs": []})
         );
     }
 

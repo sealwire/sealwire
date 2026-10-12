@@ -78,10 +78,12 @@ enrollment credentials and limits registrations per credential. See the
 
 The macOS desktop app is available as a preview. It opens the same local page as
 `npx sealwire local` in its own window, with a menu-bar icon, and uses the same
-saved state. If a relay is already running, the app shows that one; otherwise it
-starts one and stops it when you quit. The app does not set up remote access
-itself: start the relay with `npx sealwire cloud` and the app shows that relay.
-See the [README](README.md) for an overview.
+saved state. If a relay is already running, the app shows that one. Otherwise
+start the relay bundled with the app from its window or its menu-bar menu; the
+app stops that one when you quit and never touches a relay started elsewhere.
+The app does not set up remote access itself: start the relay with
+`npx sealwire cloud` and the app shows that relay. See the [README](README.md)
+for an overview.
 
 ## Common options
 
