@@ -1,0 +1,22 @@
+{
+  "appId": "dev.sealwire.mobile",
+  "appName": "Sealwire",
+  "webDir": "www",
+  "backgroundColor": "#ffffff",
+  "ios": {
+    "contentInset": "never",
+    "scrollEnabled": false
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    },
+    "CapacitorCookies": {
+      "enabled": true
+    },
+    "Keyboard": {
+      "resize": "native",
+      "autoBackdropColor": "dom"
+    }
+  }
+}

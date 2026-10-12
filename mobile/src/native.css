@@ -1,0 +1,23 @@
+/* Interface text is not selectable in the app; what the user reads or types still is. */
+html[data-native-app] body {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html[data-native-app] :is(input, textarea, [contenteditable="true"], .message-body, pre, code) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* The page runs edge to edge (viewport-fit=cover), so bars extend under the clock
+   and home indicator the way native navigation bars do. */
+html[data-native-app] .chat-header {
+  padding-top: calc(14px + env(safe-area-inset-top));
+}
+
+html[data-native-app] .app-shell[data-remote-nav-mode="drawer"] .sidebar {
+  padding-top: calc(16px + env(safe-area-inset-top));
+  padding-bottom: calc(16px + env(safe-area-inset-bottom));
+}

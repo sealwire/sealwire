@@ -25,6 +25,8 @@ export default [
       // without it, so linting it locally only produces noise CI never sees —
       // and noise in a tripwire is how a real `no-undef` gets scrolled past.
       "design/**",
+      "mobile/www/**",
+      "mobile/ios/**",
       "**/*.min.js",
     ],
   },

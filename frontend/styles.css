@@ -5546,11 +5546,12 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
     overflow-y: auto;
     overflow-x: hidden;
     padding: 16px;
-    box-shadow: var(--shadow-lg);
     transform: translateX(-100%);
     transition: transform 140ms ease;
   }
+  /* Only while open: parked off-screen, the shadow still spills a grey band onto the page's left edge. */
   .app-shell[data-remote-nav-mode="drawer"][data-remote-nav-state="open"] .sidebar {
+    box-shadow: var(--shadow-lg);
     transform: translateX(0);
   }
   .app-shell[data-remote-nav-mode="drawer"] .remote-nav-backdrop {
