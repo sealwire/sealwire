@@ -14,6 +14,8 @@ import {
 } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { hasPrivateCrate } from "./private-crate.mjs";
+import { relayBuildArgs } from "./tauri-relay-build.mjs";
 import { selectWorkerFiles } from "./tauri-worker-files.mjs";
 
 const NODE_VERSION = process.env.TAURI_NODE_VERSION || "v22.23.3";
@@ -23,10 +25,23 @@ const RELAY_SIDECAR = "relay-server";
 const release = process.argv.includes("--release");
 const targetTriple = resolveTargetTriple();
 const profile = release ? "release" : "debug";
-const buildArgs = ["build", "-p", RELAY_SIDECAR];
-if (release) {
-  buildArgs.push("--release");
+const privateCrate = hasPrivateCrate(process.cwd());
+let buildArgs;
+try {
+  buildArgs = relayBuildArgs({
+    release,
+    privateCrate,
+    publicOnly: process.env.RELAY_PUBLIC_ONLY === "1",
+  });
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
 }
+console.log(
+  privateCrate
+    ? "tauri: building the bundled relay with the private crate"
+    : "tauri: building the bundled relay from the stub — task lists and task teams are off",
+);
 
 run(process.execPath, ["scripts/generate-third-party-notices.mjs", "--desktop"]);
 run("cargo", buildArgs);

@@ -6,8 +6,12 @@ import {
   collectInstalledNpmNotices, collectRustNotices, formatNotices, NOTICE_FILE,
   parseNotices, prebuiltNoticeRecords,
 } from "./third-party-notices.mjs";
+import { hasPrivateCrate } from "./private-crate.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
+// Swapped in, the private crate needs test-only deps the public lock lacks; this
+// output is never committed and with-private.sh puts the lock back afterwards.
+const rustLock = { locked: !hasPrivateCrate(root) };
 const args = process.argv.slice(2);
 const workerRoot = args[args.indexOf("--worker") + 1];
 if (args.includes("--worker")) {
@@ -25,10 +29,10 @@ if (args.includes("--worker")) {
     const prebuilt = prebuiltNoticeRecords(root);
     if (prebuilt.length) records.push(...prebuilt);
     else {
-      records.push(...collectRustNotices(root));
+      records.push(...collectRustNotices(root, undefined, rustLock));
     }
   } else {
-    records.push(...collectRustNotices(root));
+    records.push(...collectRustNotices(root, undefined, rustLock));
     if (args.includes("--desktop")) {
       records.push(...collectRustNotices(root, "src-tauri/Cargo.toml"));
     }

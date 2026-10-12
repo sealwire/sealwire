@@ -45,7 +45,8 @@ private task product.
 ## Running without it
 
 You do not need the private crate to develop on this repository, but you do have
-to say so. The dev loops (`npm run dev:full`, `dev:restart`) route through
+to say so. The dev loops (`npm run dev:full`, `dev:restart`) and the desktop
+release build (`npm run desktop:build`) route through
 `scripts/with-private.sh`, which **refuses** when no private checkout is present
 rather than starting quietly without it: those are the scripts that launch long
 running task work, and a relay that came up looking perfectly healthy while
@@ -53,6 +54,7 @@ refusing every start is the worse failure. Opt out explicitly:
 
 ```bash
 RELAY_PUBLIC_ONLY=1 npm run dev:full
+RELAY_PUBLIC_ONLY=1 npm run desktop:build
 ```
 
 ## How the two halves are told apart

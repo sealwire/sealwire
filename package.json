@@ -49,7 +49,7 @@
     "dev:restart:cloud": "scripts/with-private.sh sh scripts/restart-dev-cloud.sh",
     "dev:restart:cloud:pg": "scripts/with-private.sh sh scripts/restart-dev-cloud-pg.sh",
     "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build",
+    "desktop:build": "scripts/with-private.sh tauri build",
     "desktop:prepare-sidecar": "node scripts/tauri-prepare-sidecar.mjs",
     "desktop:check": "node scripts/tauri-before-build.mjs && cargo check --manifest-path src-tauri/Cargo.toml",
     "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml",

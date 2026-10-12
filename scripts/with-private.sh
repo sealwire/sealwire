@@ -72,6 +72,9 @@ fi
 # The tell is the stub's own marker file, exactly as `dev-full.mjs:150` and
 # `check-no-private.sh` use it: anything unexpected in that directory reads as
 # "not the stub" and gets recovered, so it fails closed.
+#
+# A live run (a running dev:full) looks the same as a killed one, so a second command
+# here pulls the private sources out from under it: run that one from another checkout.
 if [[ ! -f "$target/STUB" ]]; then
   echo "with-private: $target is not the stub — a previous run was killed before it could restore. Recovering from git." >&2
   rm -rf "$target"

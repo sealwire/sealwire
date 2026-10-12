@@ -99,3 +99,12 @@ test("the price table compiled into the relay ships with LiteLLM's own copyright
   assert.match(text, /Copyright \(c\) 2023 Berri AI/);
   assert.match(text, /Permission is hereby granted/);
 });
+
+// The public Cargo.lock lacks the private crate's test-only deps, so with that crate
+// swapped in a locked `cargo metadata` fails and the desktop build stops before
+// compiling. with-private.sh restores the lock afterwards.
+test("Rust notices stay locked unless the private crate is swapped in", async () => {
+  const { rustMetadataArgs } = await import("./third-party-notices.mjs");
+  assert.deepEqual(rustMetadataArgs({ locked: true }), ["metadata", "--locked", "--format-version", "1"]);
+  assert.deepEqual(rustMetadataArgs({ locked: false }), ["metadata", "--format-version", "1"]);
+});

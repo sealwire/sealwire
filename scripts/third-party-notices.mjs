@@ -231,8 +231,12 @@ export function collectFrontendNotices(moduleIdIterable, projectRoot = defaultRo
   return { records, packages: packages.size, grammars: [...grammarNames].sort() };
 }
 
-export function collectRustNotices(cwd, manifestPath) {
-  const args = ["metadata", "--locked", "--format-version", "1"];
+export function rustMetadataArgs({ locked }) {
+  return ["metadata", ...(locked ? ["--locked"] : []), "--format-version", "1"];
+}
+
+export function collectRustNotices(cwd, manifestPath, { locked = true } = {}) {
+  const args = rustMetadataArgs({ locked });
   if (manifestPath) {
     args.push("--manifest-path", manifestPath);
     const host = spawnSync("rustc", ["--print", "host-tuple"], { encoding: "utf8" });
