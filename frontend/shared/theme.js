@@ -1,5 +1,6 @@
 const STORAGE_KEY = "agent-relay.theme";
 const DEFAULT_THEME = "light";
+export const THEME_CHANGED_EVENT = "sealwire:theme-changed";
 
 export function getStoredTheme() {
   try {
@@ -34,4 +35,5 @@ export function setStoredTheme(value) {
     }
   } catch {}
   applyResolved();
+  window.dispatchEvent(new window.Event(THEME_CHANGED_EVENT));
 }

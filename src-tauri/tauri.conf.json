@@ -10,18 +10,7 @@
     "frontendDist": "../web"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "Sealwire",
-        "url": "desktop.html",
-        "width": 1180,
-        "height": 760,
-        "minWidth": 860,
-        "minHeight": 620,
-        "resizable": true
-      }
-    ]
+    "windows": []
   },
   "bundle": {
     "active": true,

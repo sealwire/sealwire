@@ -141,6 +141,8 @@ import {
   renderPairingApprovalModal,
 } from "./local/render-security.js";
 import { createSettingsController } from "./local/settings-controller.js";
+import { listenForDesktopCommands } from "./local/desktop-commands.js";
+import { setStoredTheme } from "./shared/theme.js";
 import { createSessionRenderer } from "./local/render-session.js";
 import { createSessionController } from "./local/session-controller.js";
 import {
@@ -547,6 +549,7 @@ const settings = createSettingsController({
   loadBuildInfo: () => fetchBuildInfo("relay"),
   readDevices: () => devicesCache.current(),
 });
+listenForDesktopCommands(window, { openSettings: settings.open, setTheme: setStoredTheme });
 
 // Archive/delete remove a row from the authoritative list; the search slice holds its
 // own copy and has to be swept too.

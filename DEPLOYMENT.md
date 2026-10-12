@@ -76,9 +76,12 @@ enrollment credentials and limits registrations per credential. See the
 
 ## Desktop app
 
-The macOS desktop app is available as a preview. It provides a menu-bar icon and
-windows for your local workspace and remote sessions. See the
-[README](README.md) for an overview.
+The macOS desktop app is available as a preview. It opens the same local page as
+`npx sealwire local` in its own window, with a menu-bar icon, and uses the same
+saved state. If a relay is already running, the app shows that one; otherwise it
+starts one and stops it when you quit. The app does not set up remote access
+itself: start the relay with `npx sealwire cloud` and the app shows that relay.
+See the [README](README.md) for an overview.
 
 ## Common options
 

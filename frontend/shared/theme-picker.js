@@ -1,6 +1,6 @@
 import React from "react";
 
-import { getStoredTheme, setStoredTheme } from "./theme.js";
+import { getStoredTheme, setStoredTheme, THEME_CHANGED_EVENT } from "./theme.js";
 
 const h = React.createElement;
 const OPTIONS = [
@@ -11,6 +11,13 @@ const OPTIONS = [
 
 export function ThemePicker({ onChange } = {}) {
   const [value, setValue] = React.useState(getStoredTheme);
+
+  // The desktop app's menu bar can change the theme while this picker is mounted.
+  React.useEffect(() => {
+    const sync = () => setValue(getStoredTheme());
+    window.addEventListener(THEME_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(THEME_CHANGED_EVENT, sync);
+  }, []);
 
   const handle = (next) => {
     if (next === value) return;

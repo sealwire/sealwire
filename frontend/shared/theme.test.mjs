@@ -11,7 +11,8 @@ const KEY = "agent-relay.theme";
 
 function fakeWindow({ stored, osLight }) {
   const store = new Map(stored == null ? [] : [[KEY, stored]]);
-  return {
+  return Object.assign(new EventTarget(), {
+    Event,
     localStorage: {
       getItem: (k) => (store.has(k) ? store.get(k) : null),
       setItem: (k, v) => store.set(k, String(v)),
@@ -19,7 +20,7 @@ function fakeWindow({ stored, osLight }) {
     },
     matchMedia: () => ({ matches: osLight, addEventListener() {} }),
     store,
-  };
+  });
 }
 
 function runInit(win) {

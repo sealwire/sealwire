@@ -1,388 +1,89 @@
-/*
- * Desktop launcher/control shell.
- *
- * Base element styles, design tokens (:root + [data-theme="light"]) and theme
- * switching all come from the shared web design system (frontend/styles.css +
- * theme-init.js, linked in desktop.html). This file only styles the .desktop-*
- * shell chrome, using the same semantic tokens as the web UI so the launcher
- * stays visually unified with it and inherits dark/light automatically.
- *
- * Everything is scoped under .desktop-shell to avoid colliding with shared
- * component classes (e.g. .field) that also live in styles.css.
- */
+/* Startup page shown while the relay comes up. Tokens come from the shared
+ * styles.css, so it sits on the same ground as the local page it hands over to. */
 
-.desktop-shell {
-  min-height: 100vh;
-  display: grid;
-  grid-template-rows: auto 1fr;
-  background: var(--bg-base);
-  color: var(--text-1);
-  font-family: var(--font-sans);
-}
-
-.desktop-shell .desktop-header {
+.startup {
+  min-height: 100dvh;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 18px 24px;
-  background: var(--bg-surface);
-  color: var(--text-1);
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.desktop-shell .desktop-brand {
-  display: flex;
-  align-items: center;
+  justify-content: center;
   gap: 12px;
-  min-width: 0;
+  padding: 32px;
+  text-align: center;
+  background: var(--surface-0);
+  color: var(--text-1);
 }
 
-.desktop-shell .desktop-logo {
-  width: 34px;
-  height: 34px;
+.startup-mark {
+  width: 44px;
+  height: 44px;
   object-fit: contain;
 }
 
-.desktop-shell .desktop-title {
-  display: grid;
-  gap: 2px;
+.startup[data-state="starting"] .startup-mark {
+  animation: startup-breathe 1.6s ease-in-out infinite;
 }
 
-.desktop-shell .desktop-title strong {
+@keyframes startup-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startup[data-state="starting"] .startup-mark {
+    animation: none;
+  }
+}
+
+.startup-title {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-body);
+}
+
+.startup[data-state="failed"] .startup-title {
+  color: var(--text-1);
   font-size: var(--text-md);
   font-weight: var(--weight-strong);
 }
 
-.desktop-shell .desktop-title span {
-  color: var(--text-3);
-  font-size: var(--text-sm);
-}
-
-.desktop-shell .status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 30px;
-  padding: 5px 10px;
-  border-radius: var(--r-pill);
-  background: var(--status-neutral-bg);
-  color: var(--text-2);
-  font-size: var(--text-ui);
-  white-space: nowrap;
-}
-
-.desktop-shell .status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--r-pill);
-  background: var(--text-3);
-}
-
-.desktop-shell .status-pill[data-running="true"] .status-dot {
-  background: var(--ok-fg);
-}
-
-.desktop-shell .status-pill[data-starting="true"] .status-dot {
-  background: var(--warn-fg);
-}
-
-.desktop-shell .desktop-main {
-  display: grid;
-  grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
-  gap: 0;
-  min-height: 0;
-}
-
-.desktop-shell .control-pane {
-  display: grid;
-  align-content: start;
-  gap: 20px;
-  padding: 24px;
-  background: var(--bg-surface);
-  border-right: 1px solid var(--border-soft);
-  overflow: auto;
-}
-
-.desktop-shell .surface-pane {
-  display: grid;
-  grid-template-rows: auto 1fr;
-  min-width: 0;
-  min-height: 0;
-  background: var(--bg-base);
-}
-
-.desktop-shell .section {
-  display: grid;
-  gap: 12px;
-}
-
-.desktop-shell .section-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--text-2);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-strong);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.desktop-shell .field {
-  display: grid;
-  gap: 6px;
-}
-
-.desktop-shell .field label,
-.desktop-shell .field-label {
-  color: var(--text-3);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-strong);
-}
-
-.desktop-shell .input-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
-
-.desktop-shell .desktop-input {
-  width: 100%;
-  min-height: 38px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--r-md);
-  padding: 8px 10px;
-  background: var(--bg-base);
-  color: var(--text-1);
-  transition: border-color 0.15s ease;
-}
-
-.desktop-shell .desktop-input:focus {
-  border-color: var(--accent);
-  outline: 3px solid var(--accent-soft-bg);
-  outline-offset: 0;
-}
-
-.desktop-shell .desktop-input:disabled {
-  opacity: 0.55;
-}
-
-.desktop-shell .segmented {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--r-md);
-  background: var(--bg-base);
-}
-
-.desktop-shell .segment-button {
-  min-height: 34px;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--text-2);
-  cursor: pointer;
-  font-size: var(--text-ui);
-  font-weight: var(--weight-strong);
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-
-.desktop-shell .segment-button:hover {
-  background: var(--bg-hover);
-}
-
-.desktop-shell .segment-button[aria-pressed="true"] {
-  background: var(--accent);
-  color: var(--accent-on);
-}
-
-.desktop-shell .button-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.desktop-shell .desktop-button {
-  min-height: 38px;
-  border-radius: var(--r-md);
-  padding: 8px 12px;
-  background: var(--accent);
-  color: var(--accent-on);
-  cursor: pointer;
-  font-weight: var(--weight-strong);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
-}
-
-.desktop-shell .desktop-button:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-
-.desktop-shell .desktop-button.secondary {
-  background: var(--bg-elevated);
-  color: var(--text-1);
-  border: 1px solid var(--border-soft);
-}
-
-.desktop-shell .desktop-button.secondary:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
-.desktop-shell .desktop-button.danger {
-  background: var(--err-bg);
-  color: var(--err-fg);
-  border: 1px solid transparent;
-}
-
-.desktop-shell .desktop-button.danger:hover:not(:disabled) {
-  border-color: var(--err-fg);
-}
-
-.desktop-shell .desktop-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.desktop-shell .url-list {
-  display: grid;
-  gap: 8px;
-}
-
-.desktop-shell .url-row {
-  display: grid;
-  grid-template-columns: 72px minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-  color: var(--text-2);
-  font-size: var(--text-sm);
-}
-
-.desktop-shell .url-row code {
-  overflow: hidden;
-  padding: 6px 8px;
-  border-radius: var(--r-sm);
-  background: var(--bg-elevated);
-  color: var(--text-1);
-  font-family: var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.desktop-shell .surface-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 18px 22px;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.desktop-shell .surface-actions h1 {
+.startup-detail {
   margin: 0;
-  font-size: var(--text-lg);
-  color: var(--text-1);
-}
-
-.desktop-shell .surface-copy {
-  margin: 4px 0 0;
-  color: var(--text-3);
-  font-size: var(--text-ui);
-}
-
-.desktop-shell .provider-pane {
-  min-height: 0;
-  overflow: auto;
-  padding: 18px 22px;
-  display: grid;
-  gap: 12px;
-  align-content: start;
-}
-
-.desktop-shell .error-banner {
-  padding: 10px 12px;
-  border-radius: var(--r-md);
-  background: var(--err-bg);
-  color: var(--err-fg);
-  font-size: var(--text-ui);
-  font-weight: var(--weight-strong);
-}
-
-.desktop-shell .broker-toggle {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 4px 0 10px;
-  cursor: pointer;
-}
-
-.desktop-shell .broker-toggle input {
-  margin-top: 2px;
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
-.desktop-shell .broker-toggle-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: var(--text-ui);
-  color: var(--text-1);
-}
-
-.desktop-shell .broker-toggle-hint {
-  font-size: var(--text-xs);
-  color: var(--text-3);
-}
-
-.desktop-shell .broker-detail {
-  display: grid;
-  gap: 12px;
-  transition: opacity 0.15s ease;
-}
-
-.desktop-shell .broker-detail[data-broker-off="true"] {
-  opacity: 0.45;
-}
-
-.desktop-shell .broker-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 0;
-  font-size: var(--text-ui);
+  max-width: 560px;
   color: var(--text-2);
+  font-size: var(--text-ui);
+  overflow-wrap: anywhere;
 }
 
-.desktop-shell .broker-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
+.startup-retry {
+  margin-top: 4px;
+  font-size: var(--text-ui);
 }
 
-.broker-dot-disabled {
-  background-color: var(--text-faint);
+.startup-logs {
+  width: min(720px, 100%);
+  margin-top: 8px;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  text-align: left;
 }
 
-.broker-dot-connecting {
-  background-color: var(--accent);
-  animation: pulse 1.5s ease-in-out infinite;
+.startup-logs summary {
+  cursor: pointer;
+  text-align: center;
 }
 
-.broker-dot-connected {
-  background-color: var(--ok-fg);
-}
-
-.broker-dot-offline {
-  background-color: var(--err-fg);
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+.startup-logs pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

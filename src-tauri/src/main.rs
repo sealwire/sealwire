@@ -1,959 +1,477 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
-    collections::{hash_map::DefaultHasher, VecDeque},
+    collections::VecDeque,
     ffi::OsString,
-    fs,
-    hash::{Hash, Hasher},
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
+    io::{BufRead, BufReader, Read},
+    net::{Ipv4Addr, SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    process::{Command, Stdio},
+    sync::{mpsc, Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
-};
-use tauri_plugin_shell::{
-    process::{CommandChild, CommandEvent},
-    ShellExt,
+    webview::NewWindowResponse,
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, Wry,
 };
 use url::Url;
 
-const HOSTED_BROKER_URL: &str = "wss://app.sealwire.dev";
-const LOG_LIMIT: usize = 400;
+// Same default as `npx sealwire`. Keeping it stable also keeps the page's saved
+// settings, which the webview stores per origin (port included).
+const DEFAULT_PORT: u16 = 8787;
+const LOG_LIMIT: usize = 200;
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
+// The relay stops its agents before exiting; past this it is killed outright.
+const STOP_GRACE: Duration = Duration::from_secs(5);
+const STATUS_EVENT: &str = "desktop://status";
 const TRAY_ID: &str = "sealwire-tray";
-const TRAY_OPEN_LOCAL_ID: &str = "open-local";
-const TRAY_OPEN_REMOTE_ID: &str = "open-remote";
-const TRAY_OPEN_LAUNCHER_ID: &str = "open-launcher";
+const TRAY_OPEN_ID: &str = "open";
 const TRAY_QUIT_ID: &str = "quit";
-// Window labels. Windows in IPC_WINDOW_LABELS load the Tauri UI (desktop.html) and
-// therefore depend on IPC + dialog capabilities: in Tauri v2 a window that matches
-// no capability opens with NO IPC access, so its controls silently do nothing.
-// Every label here MUST appear in capabilities/default.json's `windows` list —
-// enforced by test `tauri_ipc_windows_are_capability_covered`. (Product windows
-// created by open_surface_window load an External http(s) URL and talk to the relay
-// directly, so they need no Tauri capability and are intentionally not listed.)
+const SETTINGS_TABS: [(&str, &str); 3] = [
+    ("providers", "Providers"),
+    ("devices", "Devices"),
+    ("access", "Access"),
+];
+const THEMES: [(&str, &str); 3] = [("auto", "Auto"), ("light", "Light"), ("dark", "Dark")];
+const DEFAULT_THEME: &str = "light";
+const THEME_STORAGE_KEY: &str = "agent-relay.theme";
+const DESKTOP_COMMAND_EVENT: &str = "sealwire:desktop-command";
 const MAIN_WINDOW_LABEL: &str = "main";
-const LAUNCHER_WINDOW_LABEL: &str = "launcher";
+// In Tauri v2 a window no capability names opens with no IPC at all, so the
+// startup page's status/retry calls would silently do nothing.
 #[cfg(test)]
-const IPC_WINDOW_LABELS: &[&str] = &[MAIN_WINDOW_LABEL, LAUNCHER_WINDOW_LABEL];
-// Tauri flattens externalBin next to the executable by basename; the shell
-// plugin resolves .sidecar(name) as <exe_dir>/name verbatim. Must be the bare
-// basename (NOT "binaries/relay-server", which would resolve to a missing
-// <exe_dir>/binaries/relay-server and fail to spawn with ENOENT).
+const IPC_WINDOW_LABELS: &[&str] = &[MAIN_WINDOW_LABEL];
+// Tauri flattens externalBin next to the executable by basename, so this must be
+// a bare basename.
 const RELAY_SIDECAR: &str = "relay-server";
+// The installed localhost web app's theme_color, which is what its title bar shows;
+// dark reads right above the page in either theme.
+#[cfg(target_os = "macos")]
+const TITLE_BAR_COLOR: tauri::webview::Color = tauri::webview::Color(0x17, 0x17, 0x17, 0xff);
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DesktopConfig {
-    workspace_dir: String,
-    preferred_port: u16,
-    broker_mode: BrokerMode,
-    custom_broker_url: String,
-    /// The selected broker provider, remembered independently of the on/off
-    /// (broker_mode == LocalOnly). Turning the broker off must not forget whether
-    /// the user chose the official or a self-hosted broker — otherwise turning it
-    /// back on could silently connect to a different trust boundary. Optional for
-    /// backward compatibility with pre-existing configs; sanitize_config fills it
-    /// in (migrating from broker_mode when absent).
-    #[serde(default)]
-    broker_provider: Option<BrokerProvider>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-enum BrokerMode {
-    LocalOnly,
-    Hosted,
-    Custom,
-}
-
-/// Which broker the user picked (independent of on/off). Persisted so disabling
-/// the broker and re-enabling it later keeps the same provider.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-enum BrokerProvider {
-    Hosted,
-    Custom,
-}
-
-/// Resolve the persisted broker provider so `broker_mode` and `broker_provider`
-/// can never disagree:
-/// - When the broker is ON (Hosted/Custom), the provider IS that mode.
-/// - When OFF (LocalOnly), trust an explicit remembered provider; otherwise
-///   migrate a legacy config — a retained self-hosted `custom_broker_url` means
-///   the user had configured a self-hosted broker, so migrate to Custom rather
-///   than silently defaulting to the official (external) broker. Only a truly
-///   blank local-only config defaults to Hosted.
-fn resolve_broker_provider(
-    broker_mode: &BrokerMode,
-    provider: Option<BrokerProvider>,
-    custom_broker_url: &str,
-) -> BrokerProvider {
-    match broker_mode {
-        BrokerMode::Hosted => BrokerProvider::Hosted,
-        BrokerMode::Custom => BrokerProvider::Custom,
-        BrokerMode::LocalOnly => match provider {
-            Some(provider) => provider,
-            None if custom_broker_url.trim().is_empty() => BrokerProvider::Hosted,
-            None => BrokerProvider::Custom,
-        },
-    }
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "phase", rename_all = "camelCase")]
+enum Phase {
+    #[default]
+    Starting,
+    Ready {
+        port: u16,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct DesktopStatus {
-    config: DesktopConfig,
-    relay: RelayStatus,
-    logs: Vec<LogEntry>,
+    #[serde(flatten)]
+    phase: Phase,
+    logs: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RelayStatus {
-    running: bool,
-    ready: bool,
-    provider_status: Vec<ProviderStatusRow>,
-    pid: Option<u32>,
-    port: Option<u16>,
-    local_url: Option<String>,
-    remote_url: Option<String>,
-    broker_url: Option<String>,
-    broker_label: String,
-    broker_status: Option<String>, // "disabled"/"connecting"/"connected"/"offline"
-    workspace_dir: Option<String>,
-    started_at_ms: Option<u128>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LogEntry {
-    timestamp_ms: u128,
-    stream: String,
-    message: String,
-}
-
-/// One provider row surfaced to the launcher (mirrors relay-server's
-/// `ProviderStatusView`). Serialized camelCase for the webview; the incoming
-/// relay JSON is snake_case and parsed by hand in `parse_provider_status`.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ProviderStatusRow {
-    provider: String,
-    display_name: String,
-    status: String,
-    connected: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-}
-
-struct RelayProcess {
-    child: CommandChild,
+/// A relay this app started. A relay that was already running is used, never owned,
+/// so quitting the app leaves it alone.
+struct OwnedRelay {
     pid: u32,
-    port: u16,
-    ready: bool,
-    provider_status: Vec<ProviderStatusRow>,
-    broker_url: Option<String>,
-    broker_label: String,
-    workspace_dir: String,
-    started_at_ms: u128,
+    exited: mpsc::Receiver<()>,
 }
 
-struct RelaySupervisor {
-    config_path: PathBuf,
-    config: Mutex<DesktopConfig>,
-    logs: Mutex<VecDeque<LogEntry>>,
-    process: Mutex<Option<RelayProcess>>,
-}
-
-impl RelaySupervisor {
-    fn new(app: &AppHandle) -> Result<Self, String> {
-        let config_dir = app
-            .path()
-            .app_config_dir()
-            .map_err(|error| format!("failed to resolve app config directory: {error}"))?;
-        fs::create_dir_all(&config_dir)
-            .map_err(|error| format!("failed to create app config directory: {error}"))?;
-        let config_path = config_dir.join("desktop-config.json");
-        let default_config = default_config(app);
-        let config = load_config(&config_path, default_config)?;
-
-        Ok(Self {
-            config_path,
-            config: Mutex::new(config),
-            logs: Mutex::new(VecDeque::with_capacity(LOG_LIMIT)),
-            process: Mutex::new(None),
-        })
+impl OwnedRelay {
+    /// SIGTERM first, as `npx sealwire` forwards Ctrl-C, so the relay can stop its agents.
+    fn stop(self) {
+        signal(self.pid, false);
+        if self.exited.recv_timeout(STOP_GRACE).is_err() {
+            signal(self.pid, true);
+        }
     }
+}
 
+#[cfg(unix)]
+fn signal(pid: u32, kill: bool) {
+    let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
+    // SAFETY: plain kill(2) on a pid this process spawned and has not reaped yet.
+    unsafe {
+        libc::kill(pid as libc::pid_t, signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn signal(pid: u32, _kill: bool) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status();
+}
+
+#[derive(Default)]
+struct Supervisor {
+    phase: Mutex<Phase>,
+    logs: Mutex<VecDeque<String>>,
+    relay: Mutex<Option<OwnedRelay>>,
+    startup_page: Mutex<Option<Url>>,
+}
+
+impl Supervisor {
     fn status(&self) -> DesktopStatus {
-        let config = self
-            .config
-            .lock()
-            .expect("desktop config lock should not be poisoned")
-            .clone();
-        let relay = self
-            .process
-            .lock()
-            .expect("relay process lock should not be poisoned")
-            .as_ref()
-            .map(RelayStatus::from_process)
-            .unwrap_or_else(RelayStatus::stopped);
-        let logs = self
-            .logs
-            .lock()
-            .expect("relay log lock should not be poisoned")
-            .iter()
-            .cloned()
-            .collect();
-
         DesktopStatus {
-            config,
-            relay,
-            logs,
+            phase: self.phase.lock().unwrap().clone(),
+            logs: self.recent_logs(),
         }
     }
 
-    fn current_config(&self) -> DesktopConfig {
-        self.config
-            .lock()
-            .expect("desktop config lock should not be poisoned")
-            .clone()
+    fn recent_logs(&self) -> Vec<String> {
+        self.logs.lock().unwrap().iter().cloned().collect()
     }
 
-    fn save_config(&self, config: DesktopConfig) -> Result<(), String> {
-        let serialized = serde_json::to_string_pretty(&config)
-            .map_err(|error| format!("failed to serialize desktop config: {error}"))?;
-        // Write atomically (temp file → sync → rename) so a crash or a concurrent
-        // reader never sees a truncated/half-written config.
-        let temp_path = self.config_path.with_extension("json.tmp");
-        fs::write(&temp_path, format!("{serialized}\n"))
-            .map_err(|error| format!("failed to write temp desktop config: {error}"))?;
-        if let Ok(file) = std::fs::File::open(&temp_path) {
-            let _ = file.sync_all();
+    fn push_log(&self, line: impl Into<String>) {
+        let mut logs = self.logs.lock().unwrap();
+        if logs.len() >= LOG_LIMIT {
+            logs.pop_front();
         }
-        fs::rename(&temp_path, &self.config_path)
-            .map_err(|error| format!("failed to rename desktop config: {error}"))?;
-        *self
-            .config
-            .lock()
-            .expect("desktop config lock should not be poisoned") = config;
-        Ok(())
+        logs.push_back(line.into());
     }
 
-    fn replace_process(&self, process: RelayProcess) -> Option<RelayProcess> {
-        self.process
-            .lock()
-            .expect("relay process lock should not be poisoned")
-            .replace(process)
-    }
-
-    fn take_process(&self) -> Option<RelayProcess> {
-        self.process
-            .lock()
-            .expect("relay process lock should not be poisoned")
-            .take()
-    }
-
-    fn clear_process_if_pid(&self, pid: u32) {
-        let mut process = self
-            .process
-            .lock()
-            .expect("relay process lock should not be poisoned");
-        if process.as_ref().is_some_and(|current| current.pid == pid) {
-            *process = None;
-        }
-    }
-
-    /// Marks the tracked process ready once its port accepts connections.
-    /// Returns true only on the transition (so callers log/emit exactly once).
-    fn mark_ready(&self, pid: u32) -> bool {
-        let mut process = self
-            .process
-            .lock()
-            .expect("relay process lock should not be poisoned");
-        if let Some(current) = process.as_mut() {
-            if current.pid == pid && !current.ready {
-                current.ready = true;
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Pushes the authoritative relay status to the UI. Backend-driven state
-    /// changes (ready, exit) happen outside any command, so they must be
-    /// broadcast explicitly — a `desktop://relay-log` append alone would leave
-    /// `state.status.relay` stale (Open buttons stuck, crashes unnoticed).
-    fn emit_status(&self, app: &AppHandle) {
-        let _ = app.emit("desktop://relay-status", self.status());
-    }
-
-    /// True while `pid` is still the tracked relay (so a poll loop knows to stop
-    /// once its process is replaced/terminated).
-    fn is_current_pid(&self, pid: u32) -> bool {
-        self.process
-            .lock()
-            .expect("relay process lock should not be poisoned")
-            .as_ref()
-            .is_some_and(|current| current.pid == pid)
-    }
-
-    /// Stores the latest provider health for `pid`. Returns true only when it
-    /// actually changed (so the caller emits a status event only on a delta).
-    fn set_provider_status(&self, pid: u32, rows: Vec<ProviderStatusRow>) -> bool {
-        let mut process = self
-            .process
-            .lock()
-            .expect("relay process lock should not be poisoned");
-        if let Some(current) = process.as_mut() {
-            if current.pid == pid && current.provider_status != rows {
-                current.provider_status = rows;
-                return true;
-            }
-        }
-        false
-    }
-
-    fn push_log(
-        &self,
-        app: Option<&AppHandle>,
-        stream: impl Into<String>,
-        message: impl Into<String>,
-    ) {
-        let entry = LogEntry {
-            timestamp_ms: now_ms(),
-            stream: stream.into(),
-            message: message.into(),
+    fn set_phase(&self, app: &AppHandle, phase: Phase) {
+        *self.phase.lock().unwrap() = phase.clone();
+        let _ = app.emit(STATUS_EVENT, self.status());
+        let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+            return;
         };
-
-        {
-            let mut logs = self
-                .logs
-                .lock()
-                .expect("relay log lock should not be poisoned");
-            if logs.len() >= LOG_LIMIT {
-                logs.pop_front();
+        let target = match phase {
+            Phase::Ready { port } => Url::parse(&local_url(port)).ok(),
+            // A relay that dies takes the page with it; bring back the startup
+            // page so the reason and a retry button are on screen.
+            Phase::Failed { .. } => self.startup_page.lock().unwrap().clone(),
+            Phase::Starting => None,
+        };
+        if let Some(target) = target {
+            if window.url().ok().as_ref() != Some(&target) {
+                let _ = window.navigate(target);
             }
-            logs.push_back(entry.clone());
-        }
-
-        if let Some(app) = app {
-            let _ = app.emit("desktop://relay-log", entry);
-        }
-    }
-}
-
-impl RelayStatus {
-    fn stopped() -> Self {
-        Self {
-            running: false,
-            ready: false,
-            provider_status: Vec::new(),
-            pid: None,
-            port: None,
-            local_url: None,
-            remote_url: None,
-            broker_url: None,
-            broker_label: "Stopped".to_string(),
-            broker_status: Some("disabled".to_string()),
-            workspace_dir: None,
-            started_at_ms: None,
         }
     }
 
-    fn from_process(process: &RelayProcess) -> Self {
-        // Phase 1: broker_status is set based on broker_url presence. Phase 2 will
-        // update this in real-time as the broker connection state changes.
-        let broker_status = if process.broker_url.is_some() {
-            Some("connecting".to_string())
+    fn retry_after_failure(&self) -> bool {
+        let mut phase = self.phase.lock().unwrap();
+        if matches!(*phase, Phase::Failed { .. }) {
+            *phase = Phase::Starting;
+            self.logs.lock().unwrap().clear();
+            true
         } else {
-            Some("disabled".to_string())
-        };
-        Self {
-            running: true,
-            ready: process.ready,
-            provider_status: process.provider_status.clone(),
-            pid: Some(process.pid),
-            port: Some(process.port),
-            local_url: Some(local_url(process.port)),
-            remote_url: Some(remote_url(process.port)),
-            broker_url: process.broker_url.clone(),
-            broker_label: process.broker_label.clone(),
-            broker_status,
-            workspace_dir: Some(process.workspace_dir.clone()),
-            started_at_ms: Some(process.started_at_ms),
+            false
         }
     }
-}
 
-#[tauri::command]
-async fn desktop_status(
-    supervisor: State<'_, Arc<RelaySupervisor>>,
-) -> Result<DesktopStatus, String> {
-    Ok(supervisor.status())
-}
-
-#[tauri::command]
-async fn desktop_restart(
-    app: AppHandle,
-    supervisor: State<'_, Arc<RelaySupervisor>>,
-    input: DesktopConfig,
-) -> Result<DesktopStatus, String> {
-    start_relay(app, supervisor.inner().clone(), Some(input)).await?;
-    Ok(supervisor.status())
-}
-
-#[tauri::command]
-async fn desktop_stop_relay(
-    app: AppHandle,
-    supervisor: State<'_, Arc<RelaySupervisor>>,
-) -> Result<DesktopStatus, String> {
-    stop_relay(&app, supervisor.inner());
-    Ok(supervisor.status())
-}
-
-/// Resolve the (window label, title, url) for a product surface. Shared by the
-/// IPC command and the tray so the two can never route "remote" to different
-/// windows. These surfaces load an External http URL and talk to the relay
-/// directly, so their windows need no Tauri capability (see IPC_WINDOW_LABELS).
-fn surface_target(
-    surface: &str,
-    port: u16,
-) -> Result<(&'static str, &'static str, String), String> {
-    match surface {
-        "local" => Ok(("sealwire-local", "Sealwire Local", local_url(port))),
-        "remote" => Ok(("sealwire-remote", "Sealwire Remote", remote_url(port))),
-        _ => Err(format!("unknown surface: {surface}")),
+    fn replace_relay(&self, relay: OwnedRelay) -> Option<OwnedRelay> {
+        self.relay.lock().unwrap().replace(relay)
     }
-}
 
-/// The port a product surface may open on, or an error explaining why not. A
-/// surface must not open until the relay is `ready` — `port` is `Some` as soon
-/// as the process is spawned, but during the ready-poll it is not yet accepting
-/// connections, so opening then lands the webview on a connection-error page.
-/// The launcher UI already gates its Open buttons on `ready`; the tray "Open
-/// Remote" item has no such gate, so the invariant lives here for both callers.
-fn surface_ready_port(relay: &RelayStatus) -> Result<u16, String> {
-    if !relay.running {
-        return Err("relay is not running".to_string());
+    fn take_relay(&self) -> Option<OwnedRelay> {
+        self.relay.lock().unwrap().take()
     }
-    if !relay.ready {
-        return Err("relay is still starting".to_string());
-    }
-    relay.port.ok_or_else(|| "relay is not running".to_string())
-}
 
-/// Open (or focus) a product surface window for the running relay. Errors if the
-/// relay is not ready yet or the surface name is unknown.
-fn open_surface(
-    app: &AppHandle,
-    supervisor: &RelaySupervisor,
-    surface: &str,
-) -> Result<(), String> {
-    let port = surface_ready_port(&supervisor.status().relay)?;
-    let (label, title, url) = surface_target(surface, port)?;
-    open_surface_window(app, label, title, &url)
-}
-
-#[tauri::command]
-async fn desktop_open_surface(
-    app: AppHandle,
-    supervisor: State<'_, Arc<RelaySupervisor>>,
-    surface: String,
-) -> Result<(), String> {
-    open_surface(&app, &supervisor, &surface)
-}
-
-async fn start_relay(
-    app: AppHandle,
-    supervisor: Arc<RelaySupervisor>,
-    next_config: Option<DesktopConfig>,
-) -> Result<(), String> {
-    let config = sanitize_config(
-        next_config.unwrap_or_else(|| supervisor.current_config()),
-        &app,
-    )?;
-    let broker = broker_runtime_config(&config)?;
-    let workspace = PathBuf::from(&config.workspace_dir);
-    ensure_workspace(&workspace)?;
-
-    supervisor.save_config(config.clone())?;
-    // F3: stop any running relay BEFORE picking a port, so the preferred port it
-    // was holding is released and can be reused instead of drifting each restart.
-    if let Some(previous) = supervisor.take_process() {
-        let _ = previous.child.kill();
-    }
-    let port = pick_port(config.preferred_port)?;
-
-    let envs = relay_env(&app, &workspace, port, broker.as_ref())?;
-    let command = app
-        .shell()
-        .sidecar(RELAY_SIDECAR)
-        .map_err(|error| format!("failed to resolve relay-server sidecar: {error}"))?
-        .env_clear()
-        .envs(envs)
-        .current_dir(&workspace);
-    let (mut rx, child) = command
-        .spawn()
-        .map_err(|error| format!("failed to start relay-server sidecar: {error}"))?;
-    let pid = child.pid();
-    let process = RelayProcess {
-        child,
-        pid,
-        port,
-        ready: false,
-        provider_status: Vec::new(),
-        broker_url: broker.as_ref().map(|value| value.websocket_url.clone()),
-        broker_label: broker
+    fn owns(&self, pid: u32) -> bool {
+        self.relay
+            .lock()
+            .unwrap()
             .as_ref()
-            .map(|value| value.label.clone())
-            .unwrap_or_else(|| "Local only".to_string()),
-        workspace_dir: workspace.display().to_string(),
-        started_at_ms: now_ms(),
-    };
-    // F5: don't leak a process a concurrent start may have slipped into the slot.
-    if let Some(orphan) = supervisor.replace_process(process) {
-        let _ = orphan.child.kill();
+            .is_some_and(|relay| relay.pid == pid)
     }
-    supervisor.push_log(
-        Some(&app),
-        "relay",
-        format!("started relay-server pid {pid} on http://127.0.0.1:{port}"),
-    );
-    // Broadcast running=true, ready=false (covers the auto-start-on-launch case
-    // where the UI's initial fetch can race ahead of the spawned process).
-    supervisor.emit_status(&app);
 
-    // F4 + provider panel: once the port accepts connections, flip the surface
-    // buttons on, then poll the relay's /api/session provider health so the
-    // launcher's Providers panel reflects which providers came up (or failed).
-    let ready_app = app.clone();
-    let ready_supervisor = supervisor.clone();
-    std::thread::spawn(move || {
-        let mut became_ready = false;
-        for _ in 0..100 {
-            if port_is_ready(port) {
-                became_ready = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(150));
+    /// Drops `pid` if it is still the owned relay. False means it was stopped on
+    /// purpose (quit, timeout) and its exit is not a failure to report.
+    fn forget(&self, pid: u32) -> bool {
+        let mut relay = self.relay.lock().unwrap();
+        if relay.as_ref().is_some_and(|current| current.pid == pid) {
+            *relay = None;
+            true
+        } else {
+            false
         }
-        if !became_ready {
-            ready_supervisor.push_log(
-                Some(&ready_app),
-                "error",
-                format!("relay-server pid {pid} did not accept connections within timeout"),
+    }
+}
+
+#[tauri::command]
+fn desktop_status(supervisor: State<'_, Arc<Supervisor>>) -> DesktopStatus {
+    supervisor.status()
+}
+
+#[tauri::command]
+fn desktop_retry(app: AppHandle, supervisor: State<'_, Arc<Supervisor>>) {
+    if supervisor.retry_after_failure() {
+        let _ = app.emit(STATUS_EVENT, supervisor.status());
+        connect(app, supervisor.inner().clone());
+    }
+}
+
+fn connect(app: AppHandle, supervisor: Arc<Supervisor>) {
+    std::thread::spawn(move || connect_blocking(&app, &supervisor));
+}
+
+/// Shows the relay that owns the shared database if one is running, as a browser
+/// tab on localhost would; otherwise starts one the way `npx sealwire local` does.
+fn connect_blocking(app: &AppHandle, supervisor: &Arc<Supervisor>) {
+    let cwd = relay_cwd();
+    let state_db = state_db_path(std::env::var_os("RELAY_STATE_DB"), &cwd);
+    if let Some(port) = running_relay_port(&state_db) {
+        supervisor.push_log(format!("using the relay already running on port {port}"));
+        supervisor.set_phase(app, Phase::Ready { port });
+        return;
+    }
+
+    let port = match pick_port(DEFAULT_PORT) {
+        Ok(port) => port,
+        Err(error) => return supervisor.set_phase(app, Phase::Failed { message: error }),
+    };
+    let launch_id = launch_id();
+    let pid = match spawn_relay(app, supervisor, &cwd, port, &launch_id) {
+        Ok(pid) => pid,
+        Err(error) => return supervisor.set_phase(app, Phase::Failed { message: error }),
+    };
+
+    // Waiting for our own launch id, not just an open port, so a different server
+    // that grabbed the port in the meantime is never mistaken for this relay.
+    let deadline = Instant::now() + READY_TIMEOUT;
+    while supervisor.owns(pid) {
+        if probe_health(port)
+            .is_some_and(|health| health.launch_id.as_deref() == Some(launch_id.as_str()))
+        {
+            supervisor.set_phase(app, Phase::Ready { port });
+            return;
+        }
+        if Instant::now() >= deadline {
+            if let Some(relay) = supervisor.take_relay() {
+                relay.stop();
+            }
+            supervisor.set_phase(
+                app,
+                Phase::Failed {
+                    message: "Sealwire did not start within a minute.".to_string(),
+                },
             );
             return;
         }
-        if ready_supervisor.mark_ready(pid) {
-            ready_supervisor.push_log(
-                Some(&ready_app),
-                "relay",
-                format!("relay-server pid {pid} is ready on http://127.0.0.1:{port}"),
-            );
-        }
-        // Land the main window on the live local product the moment the relay is
-        // up, instead of leaving it on the launcher config. This runs inside every
-        // start_relay (including Save & Restart), so a port change re-points the
-        // window automatically. Navigating to the external local URL drops Tauri
-        // IPC for this window — intentional: the product is a plain web app; the
-        // relay-lifecycle IPC lives in the launcher window (tray → Launcher).
-        if let Some(main) = ready_app.get_webview_window(MAIN_WINDOW_LABEL) {
-            if let Ok(url) = Url::parse(&local_url(port)) {
-                let _ = main.navigate(url);
-            }
-        }
-        // Seed the provider panel immediately, then keep it fresh while this
-        // relay is the tracked process (drops/reconnects stream in).
-        let rows = fetch_provider_status(port);
-        ready_supervisor.set_provider_status(pid, rows);
-        ready_supervisor.emit_status(&ready_app);
-        loop {
-            std::thread::sleep(Duration::from_millis(4000));
-            if !ready_supervisor.is_current_pid(pid) {
-                return;
-            }
-            let rows = fetch_provider_status(port);
-            if ready_supervisor.set_provider_status(pid, rows) {
-                ready_supervisor.emit_status(&ready_app);
-            }
-        }
-    });
-
-    let log_app = app.clone();
-    let log_supervisor = supervisor.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            match event {
-                CommandEvent::Stdout(bytes) => {
-                    for line in decode_lines(bytes) {
-                        log_supervisor.push_log(Some(&log_app), "stdout", line);
-                    }
-                }
-                CommandEvent::Stderr(bytes) => {
-                    for line in decode_lines(bytes) {
-                        log_supervisor.push_log(Some(&log_app), "stderr", line);
-                    }
-                }
-                CommandEvent::Error(error) => {
-                    log_supervisor.push_log(Some(&log_app), "error", error);
-                }
-                CommandEvent::Terminated(payload) => {
-                    log_supervisor.push_log(
-                        Some(&log_app),
-                        "relay",
-                        format!("relay-server pid {pid} exited with code {:?}", payload.code),
-                    );
-                    log_supervisor.clear_process_if_pid(pid);
-                    // Surface running=false so the UI doesn't keep believing a
-                    // crashed/exited relay is still up.
-                    log_supervisor.emit_status(&log_app);
-                    break;
-                }
-                _ => {}
-            }
-        }
-    });
-
-    Ok(())
-}
-
-fn stop_relay(app: &AppHandle, supervisor: &RelaySupervisor) {
-    if let Some(process) = supervisor.take_process() {
-        let pid = process.pid;
-        let _ = process.child.kill();
-        supervisor.push_log(
-            Some(app),
-            "relay",
-            format!("stopped relay-server pid {pid}"),
-        );
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
-fn open_surface_window(
+fn spawn_relay(
     app: &AppHandle,
-    label: &str,
-    title: &str,
-    target: &str,
-) -> Result<(), String> {
-    let parsed = Url::parse(target).map_err(|error| format!("invalid surface URL: {error}"))?;
-    if let Some(window) = app.get_webview_window(label) {
-        window
-            .navigate(parsed)
-            .map_err(|error| format!("failed to navigate {title}: {error}"))?;
-        window
-            .show()
-            .map_err(|error| format!("failed to show {title}: {error}"))?;
-        window
-            .unminimize()
-            .map_err(|error| format!("failed to restore {title}: {error}"))?;
-        window
-            .set_focus()
-            .map_err(|error| format!("failed to focus {title}: {error}"))?;
-        return Ok(());
+    supervisor: &Arc<Supervisor>,
+    cwd: &Path,
+    port: u16,
+    launch_id: &str,
+) -> Result<u32, String> {
+    let envs = relay_env(
+        std::env::vars_os().collect(),
+        port,
+        launch_id,
+        resolve_claude_worker(app).as_deref(),
+        resolve_bundled_node().as_deref(),
+    );
+    let sidecar = std::env::current_exe()
+        .map_err(|error| format!("Could not find the bundled relay-server: {error}"))?
+        .with_file_name(format!("{RELAY_SIDECAR}{}", std::env::consts::EXE_SUFFIX));
+    let mut child = Command::new(&sidecar)
+        .env_clear()
+        .envs(envs)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Could not start {}: {error}", sidecar.display()))?;
+    let pid = child.id();
+    let (exited_tx, exited) = mpsc::channel();
+    if let Some(stale) = supervisor.replace_relay(OwnedRelay { pid, exited }) {
+        stale.stop();
     }
+    supervisor.push_log(format!("started relay-server (pid {pid}) on port {port}"));
 
-    WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
-        .title(title)
-        .inner_size(1320.0, 880.0)
-        .min_inner_size(900.0, 620.0)
-        .build()
-        .map_err(|error| format!("failed to open {title}: {error}"))?;
-    Ok(())
-}
+    let (drained_tx, drained) = mpsc::channel();
+    let stdout = child.stdout.take().expect("relay stdout is piped");
+    let stderr = child.stderr.take().expect("relay stderr is piped");
+    forward_lines(stdout, supervisor.clone(), drained_tx.clone());
+    forward_lines(stderr, supervisor.clone(), drained_tx);
 
-fn show_main_window(app: &AppHandle) -> Result<(), String> {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-        return Err("launcher window is not available".to_string());
-    };
-    window
-        .show()
-        .map_err(|error| format!("failed to show Sealwire: {error}"))?;
-    window
-        .unminimize()
-        .map_err(|error| format!("failed to restore Sealwire: {error}"))?;
-    window
-        .set_focus()
-        .map_err(|error| format!("failed to focus Sealwire: {error}"))
-}
-
-// The main window IS the local product now (it navigates to the relay's local URL
-// on ready — see the ready poll in start_relay), so "open Sealwire" just brings
-// that window to the front. There is no separate product window in the primary
-// flow anymore.
-fn bring_app_to_front(app: &AppHandle) {
-    let _ = show_main_window(app);
-}
-
-// The launcher (workspace / port / broker config + start/stop) is now a dedicated,
-// on-demand window rather than the primary one. It loads the same desktop.html in
-// the Tauri context; its LAUNCHER_WINDOW_LABEL is covered by capabilities/default.json
-// so it keeps IPC access to the relay-lifecycle commands and the file dialog.
-fn show_launcher_window(app: &AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(LAUNCHER_WINDOW_LABEL) {
-        window
-            .show()
-            .map_err(|error| format!("failed to show launcher: {error}"))?;
-        let _ = window.unminimize();
-        return window
-            .set_focus()
-            .map_err(|error| format!("failed to focus launcher: {error}"));
-    }
-    WebviewWindowBuilder::new(
-        app,
-        LAUNCHER_WINDOW_LABEL,
-        WebviewUrl::App("desktop.html".into()),
-    )
-    .title("Sealwire Launcher")
-    .inner_size(1180.0, 760.0)
-    .min_inner_size(860.0, 620.0)
-    .build()
-    .map(|_| ())
-    .map_err(|error| format!("failed to open launcher: {error}"))
-}
-
-fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let open_local =
-        MenuItem::with_id(app, TRAY_OPEN_LOCAL_ID, "Open Sealwire", true, None::<&str>)?;
-    let open_remote =
-        MenuItem::with_id(app, TRAY_OPEN_REMOTE_ID, "Open Remote", true, None::<&str>)?;
-    let open_launcher = MenuItem::with_id(
-        app,
-        TRAY_OPEN_LAUNCHER_ID,
-        "Launcher (advanced)…",
-        true,
-        None::<&str>,
-    )?;
-    let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit Sealwire", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[&open_local, &open_remote, &open_launcher, &separator, &quit],
-    )?;
-
-    // A template image is drawn from its alpha alone, so the opaque app icon would
-    // render as a solid disc; the tray needs its own cut-out silhouette.
-    let tray = TrayIconBuilder::with_id(TRAY_ID)
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .tooltip("Sealwire")
-        .icon(tauri::include_image!("icons/tray.png"))
-        .icon_as_template(true);
-    tray.on_menu_event(|app, event| match event.id().as_ref() {
-        TRAY_OPEN_LOCAL_ID => bring_app_to_front(app),
-        TRAY_OPEN_REMOTE_ID => {
-            if let Some(supervisor) = app.try_state::<Arc<RelaySupervisor>>() {
-                if let Err(error) = open_surface(app, &supervisor, "remote") {
-                    supervisor.push_log(
-                        Some(app),
-                        "desktop",
-                        format!("open remote failed: {error}"),
-                    );
-                }
+    let app = app.clone();
+    let supervisor = supervisor.clone();
+    std::thread::spawn(move || {
+        let code = child.wait().ok().and_then(|status| status.code());
+        let _ = exited_tx.send(());
+        // Let the readers deliver the relay's last words before judging its exit. Not
+        // until EOF: an agent it started can hold its stderr open after it is gone.
+        for _ in 0..2 {
+            if drained.recv_timeout(Duration::from_millis(500)).is_err() {
+                break;
             }
         }
-        TRAY_OPEN_LAUNCHER_ID => {
-            if let Err(error) = show_launcher_window(app) {
-                if let Some(supervisor) = app.try_state::<Arc<RelaySupervisor>>() {
-                    supervisor.push_log(
-                        Some(app),
-                        "desktop",
-                        format!("open launcher failed: {error}"),
-                    );
-                }
-            }
+        supervisor.push_log(format!(
+            "relay-server (pid {pid}) exited with code {code:?}"
+        ));
+        if supervisor.forget(pid) {
+            let message = failure_message(&supervisor.recent_logs(), code);
+            supervisor.set_phase(&app, Phase::Failed { message });
         }
-        TRAY_QUIT_ID => app.exit(0),
-        _ => {}
-    })
-    .on_tray_icon_event(|tray, event| {
-        if let TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            ..
-        } = event
+    });
+    Ok(pid)
+}
+
+fn forward_lines(
+    stream: impl Read + Send + 'static,
+    supervisor: Arc<Supervisor>,
+    drained: mpsc::Sender<()>,
+) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        while reader
+            .read_until(b'\n', &mut line)
+            .is_ok_and(|read| read > 0)
         {
-            bring_app_to_front(tray.app_handle());
+            for text in decode_lines(&line) {
+                supervisor.push_log(text);
+            }
+            line.clear();
         }
+        let _ = drained.send(());
+    });
+}
+
+fn stop_owned_relay(app: &AppHandle) {
+    if let Some(supervisor) = app.try_state::<Arc<Supervisor>>() {
+        if let Some(relay) = supervisor.take_relay() {
+            relay.stop();
+        }
+    }
+}
+
+/// The relay's last own error line names the cause (a lock held by another relay,
+/// state that needs migrating); the exit code alone says nothing.
+fn failure_message(logs: &[String], code: Option<i32>) -> String {
+    logs.iter()
+        .rev()
+        .find(|line| line.starts_with("relay-server:") || line.starts_with("sealwire:"))
+        .cloned()
+        .unwrap_or_else(|| match code {
+            Some(code) => format!("Sealwire stopped unexpectedly (exit code {code})."),
+            None => "Sealwire stopped unexpectedly.".to_string(),
+        })
+}
+
+/// Same rule as relay-server's `state_db_path`: `RELAY_STATE_DB`, else `~/.sealwire/sealwire.db`.
+fn state_db_path(override_value: Option<OsString>, cwd: &Path) -> PathBuf {
+    let explicit = override_value
+        .map(|value| PathBuf::from(value.to_string_lossy().trim()))
+        .filter(|path| !path.as_os_str().is_empty());
+    match explicit {
+        Some(path) => cwd.join(path),
+        None => home_dir()
+            .unwrap_or_else(|| cwd.to_path_buf())
+            .join(".sealwire")
+            .join("sealwire.db"),
+    }
+}
+
+/// The port of a live relay that holds `state_db`, read from the owner file the
+/// relay writes beside its lock. A leftover file from a crashed relay fails the probe.
+fn running_relay_port(state_db: &Path) -> Option<u16> {
+    let identity = std::fs::canonicalize(state_db).unwrap_or_else(|_| state_db.to_path_buf());
+    let mut owner_file = identity.into_os_string();
+    owner_file.push(".owner.json");
+    let port = parse_owner_port(&std::fs::read(owner_file).ok()?)?;
+    probe_health(port).map(|_| port)
+}
+
+fn parse_owner_port(bytes: &[u8]) -> Option<u16> {
+    let json: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    u16::try_from(json.get("port")?.as_u64()?)
+        .ok()
+        .filter(|port| *port != 0)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Health {
+    launch_id: Option<String>,
+}
+
+fn parse_health(body: &str) -> Option<Health> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let data = json.get("data")?;
+    let healthy = json.get("ok")?.as_bool()? && data.get("status")?.as_str()? == "ok";
+    (healthy && data.get("service")?.as_str()? == "relay-server").then(|| Health {
+        launch_id: data
+            .get("launch_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
     })
-    .build(app)?;
-
-    Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct BrokerRuntimeConfig {
-    websocket_url: String,
-    control_url: String,
-    label: String,
-}
-
-fn broker_runtime_config(config: &DesktopConfig) -> Result<Option<BrokerRuntimeConfig>, String> {
-    let value = match config.broker_mode {
-        BrokerMode::LocalOnly => return Ok(None),
-        BrokerMode::Hosted => HOSTED_BROKER_URL,
-        BrokerMode::Custom => config.custom_broker_url.trim(),
-    };
-    if value.is_empty() {
-        return Err("custom broker URL is required".to_string());
-    }
-
-    let mut parsed = Url::parse(value).map_err(|error| format!("invalid broker URL: {error}"))?;
-    parsed.set_path("");
-    parsed.set_query(None);
-    parsed.set_fragment(None);
-
-    let protocol = parsed.scheme().to_ascii_lowercase();
-    if !matches!(protocol.as_str(), "http" | "https" | "ws" | "wss") {
-        return Err("broker URL must start with http://, https://, ws://, or wss://".to_string());
-    }
-
-    let mut control = parsed.clone();
-    let control_scheme = match protocol.as_str() {
-        "ws" => "http",
-        "wss" => "https",
-        _ => protocol.as_str(),
-    };
-    control
-        .set_scheme(control_scheme)
-        .map_err(|_| "failed to normalize broker control URL".to_string())?;
-
-    let mut websocket = parsed;
-    let websocket_scheme = match protocol.as_str() {
-        "http" => "ws",
-        "https" => "wss",
-        _ => protocol.as_str(),
-    };
-    websocket
-        .set_scheme(websocket_scheme)
-        .map_err(|_| "failed to normalize broker websocket URL".to_string())?;
-
-    let websocket_url = strip_trailing_slash(websocket.as_str());
-    let control_url = strip_trailing_slash(control.as_str());
-    let label = if config.broker_mode == BrokerMode::Hosted {
-        "Hosted SealWire Cloud broker".to_string()
-    } else {
-        control_url.clone()
-    };
-
-    Ok(Some(BrokerRuntimeConfig {
-        websocket_url,
-        control_url,
-        label,
-    }))
+fn probe_health(port: u16) -> Option<Health> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(500))
+        .timeout_read(Duration::from_millis(1500))
+        .build();
+    let body = agent
+        .get(&format!("http://127.0.0.1:{port}/api/health"))
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    parse_health(&body)
 }
 
 fn relay_env(
-    app: &AppHandle,
-    workspace: &Path,
+    inherited: Vec<(OsString, OsString)>,
     port: u16,
-    broker: Option<&BrokerRuntimeConfig>,
-) -> Result<Vec<(OsString, OsString)>, String> {
-    let mut envs: Vec<(OsString, OsString)> = std::env::vars_os()
-        .filter(|(key, _)| !is_launcher_managed_env(&key.to_string_lossy()))
+    launch_id: &str,
+    worker: Option<&Path>,
+    bundled_node: Option<&Path>,
+) -> Vec<(OsString, OsString)> {
+    let mut envs: Vec<(OsString, OsString)> = inherited
+        .into_iter()
+        .filter(|(key, _)| !is_scrubbed_env(&key.to_string_lossy()))
         .collect();
+    let has = |envs: &Vec<(OsString, OsString)>, key: &str| envs.iter().any(|(k, _)| k == key);
+    let node = bundled_node.filter(|_| !has(&envs, "CLAUDE_NODE_BINARY"));
+    let current_path = envs
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| value.clone());
 
     upsert_env(&mut envs, "PORT", port.to_string());
     upsert_env(&mut envs, "BIND_HOST", "127.0.0.1");
-    let bundled_node = if std::env::var_os("CLAUDE_NODE_BINARY").is_none() {
-        resolve_bundled_node()
-    } else {
-        None
-    };
-
-    let peer_seed = app
-        .path()
-        .app_config_dir()
-        .ok()
-        .map(|dir| dir.display().to_string())
-        .unwrap_or_else(|| workspace.display().to_string());
-    upsert_env(&mut envs, "RELAY_SECURITY_MODE", "private");
-    upsert_env(
-        &mut envs,
-        "RELAY_BROKER_PEER_ID",
-        default_peer_id(&peer_seed),
-    );
+    upsert_env(&mut envs, "SEALWIRE_LAUNCH_ID", launch_id);
     upsert_env(
         &mut envs,
         "PATH",
-        expanded_path(bundled_node.as_ref().and_then(|node| node.parent())),
+        expanded_path(node.and_then(Path::parent), current_path),
     );
-    // TODO(shared-state): the CLI relay keeps its state in ONE database per machine
-    // (`~/.sealwire/sealwire.db`, see `relay-server`'s `state_paths` module). The
-    // desktop app still has its own `desktop.db` under the picked workspace, so running
-    // the app and `npx sealwire` gives you two separate worlds (different threads,
-    // projects, paired devices, push key).
-    //
-    // Unifying them is NOT just pointing both at one database. One relay per database
-    // is enforced by a real lock (`instance_lock`), and this launcher reacts to a busy
-    // port by picking a free one and spawning a SECOND relay (`pick_port`, below). Point
-    // both at one database and that second relay gets refused by the lock and exits —
-    // surfacing only as a stderr line in the log panel, i.e. "the app just doesn't
-    // start" with no explanation.
-    //
-    // So the prerequisite is making this launcher ATTACH to an already-running relay
-    // (drive the existing port as a client) instead of spawning its own, and only then
-    // sharing the database. Until that exists, keep the deliberate split below.
-    upsert_env(
-        &mut envs,
-        "RELAY_STATE_DB",
-        workspace
-            .join(".sealwire")
-            .join("desktop.db")
-            .display()
-            .to_string(),
-    );
-
-    if std::env::var_os("CLAUDE_WORKER_PATH").is_none() {
-        if let Some(worker) = resolve_claude_worker(app) {
-            upsert_env(
-                &mut envs,
-                "CLAUDE_WORKER_PATH",
-                worker.display().to_string(),
-            );
-        }
+    if let Some(worker) = worker.filter(|_| !has(&envs, "CLAUDE_WORKER_PATH")) {
+        upsert_env(&mut envs, "CLAUDE_WORKER_PATH", worker.as_os_str());
     }
-    if let Some(node) = bundled_node {
-        upsert_env(&mut envs, "CLAUDE_NODE_BINARY", node.display().to_string());
+    if let Some(node) = node {
+        upsert_env(&mut envs, "CLAUDE_NODE_BINARY", node.as_os_str());
     }
-
-    if let Some(broker) = broker {
-        upsert_env(&mut envs, "RELAY_BROKER_URL", broker.websocket_url.clone());
-        upsert_env(
-            &mut envs,
-            "RELAY_BROKER_PUBLIC_URL",
-            broker.websocket_url.clone(),
-        );
-        upsert_env(
-            &mut envs,
-            "RELAY_BROKER_CONTROL_URL",
-            broker.control_url.clone(),
-        );
-        upsert_env(&mut envs, "RELAY_BROKER_AUTH_MODE", "public");
-    }
-
-    Ok(envs)
+    envs
 }
 
-/// Desktop owns broker and bind settings; inherited proxy auth settings would
-/// otherwise prevent its independently configured loopback sidecar from starting.
-fn is_launcher_managed_env(key: &str) -> bool {
-    matches!(
-        key,
-        "AGENT_RELAY_PUBLIC_BROKER_ORIGIN"
-            | "AGENT_RELAY_PUBLIC_BROKER_URL"
-            | "RELAY_API_TOKEN"
-            | "RELAY_ALLOWED_HOSTS"
-            | "RELAY_ALLOW_INSECURE_NO_AUTH"
-            | "RELAY_BROKER_AUTH_MODE"
-            | "RELAY_BROKER_CONTROL_URL"
-            | "RELAY_BROKER_PUBLIC_URL"
-            | "RELAY_BROKER_URL"
-    )
+/// Local only, like `npx sealwire local`: a broker or Cloud setting inherited from
+/// a shell would otherwise put this relay online without anyone asking.
+fn is_scrubbed_env(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    key.starts_with("RELAY_BROKER_")
+        || key.starts_with("RELAY_CLOUD_")
+        || key.starts_with("SEALWIRE_CLOUD_")
+        || matches!(
+            key.as_str(),
+            "AGENT_RELAY_PUBLIC_BROKER_ORIGIN"
+                | "AGENT_RELAY_PUBLIC_BROKER_URL"
+                | "RELAY_LICENSE_CODE"
+                | "RELAY_API_TOKEN"
+                | "RELAY_ALLOWED_HOSTS"
+                | "RELAY_ALLOW_INSECURE_NO_AUTH"
+        )
 }
 
 fn upsert_env(
@@ -966,236 +484,272 @@ fn upsert_env(
     envs.push((key, value.into()));
 }
 
-fn expanded_path(extra_first: Option<&Path>) -> OsString {
+/// Apps opened from Finder get a bare PATH, so the provider CLIs that Homebrew
+/// installs would not be found without these.
+fn expanded_path(extra_first: Option<&Path>, current: Option<OsString>) -> OsString {
     let mut entries = Vec::new();
-    if let Some(path) = extra_first {
-        entries.push(path.to_path_buf());
-    }
-    entries.extend([
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/opt/local/bin"),
-        PathBuf::from("/usr/bin"),
-        PathBuf::from("/bin"),
-    ]);
-    if let Some(current) = std::env::var_os("PATH") {
+    entries.extend(extra_first.map(Path::to_path_buf));
+    entries.extend(
+        [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/opt/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]
+        .map(PathBuf::from),
+    );
+    if let Some(current) = current {
         entries.extend(std::env::split_paths(&current));
     }
-    std::env::join_paths(dedup_paths(entries)).unwrap_or_else(|_| OsString::from("/usr/bin:/bin"))
-}
-
-fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut output = Vec::new();
-    for path in paths {
-        if !output.iter().any(|existing| existing == &path) {
-            output.push(path);
+    let mut unique: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        if !unique.contains(&entry) {
+            unique.push(entry);
         }
     }
-    output
+    std::env::join_paths(unique).unwrap_or_else(|_| OsString::from("/usr/bin:/bin"))
 }
 
-fn sanitize_config(input: DesktopConfig, app: &AppHandle) -> Result<DesktopConfig, String> {
-    let default = default_config(app);
-    let workspace_dir = normalize_workspace(input.workspace_dir, &default.workspace_dir)?;
-    let preferred_port = if input.preferred_port == 0 {
-        default.preferred_port
-    } else {
-        input.preferred_port
-    };
-    let custom_broker_url = input.custom_broker_url.trim().to_string();
-    // Remember the provider independently of on/off, migrating older configs.
-    let broker_provider = Some(resolve_broker_provider(
-        &input.broker_mode,
-        input.broker_provider,
-        &custom_broker_url,
-    ));
-    let config = DesktopConfig {
-        workspace_dir,
-        preferred_port,
-        broker_mode: input.broker_mode,
-        custom_broker_url,
-        broker_provider,
-    };
-    let _ = broker_runtime_config(&config)?;
-    Ok(config)
-}
-
-fn normalize_workspace(input: String, fallback: &str) -> Result<String, String> {
-    let trimmed = input.trim();
-    let path = if trimmed.is_empty() {
-        fallback
-    } else {
-        trimmed
-    };
-    let path = expand_tilde(path);
-    if !path.exists() {
-        return Err(format!("workspace does not exist: {}", path.display()));
+/// The startup page and the relay's own pages; anything else would strand the
+/// window on a page with no way back.
+fn stays_in_window(url: &Url) -> bool {
+    use url::Host;
+    match (url.scheme(), url.host()) {
+        ("tauri" | "about", _) => true,
+        ("http" | "https", Some(Host::Domain(host))) => {
+            matches!(host, "localhost" | "tauri.localhost")
+        }
+        ("http" | "https", Some(Host::Ipv4(ip))) => ip.is_loopback(),
+        ("http" | "https", Some(Host::Ipv6(ip))) => ip.is_loopback(),
+        _ => false,
     }
-    if !path.is_dir() {
-        return Err(format!("workspace is not a directory: {}", path.display()));
-    }
-    Ok(path.display().to_string())
 }
 
-fn expand_tilde(value: &str) -> PathBuf {
-    if value == "~" || value.starts_with("~/") {
-        if let Some(home) = home_dir_from_env() {
-            if value == "~" {
-                return home;
+fn opens_in_browser(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "mailto")
+}
+
+fn open_in_browser(url: &Url) {
+    if opens_in_browser(url) {
+        if let Err(error) = open::that_detached(url.as_str()) {
+            eprintln!("sealwire-desktop: could not open {url}: {error}");
+        }
+    }
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn build_main_window(app: &tauri::App) -> tauri::Result<Url> {
+    let builder = WebviewWindowBuilder::new(
+        app,
+        MAIN_WINDOW_LABEL,
+        WebviewUrl::App("desktop.html".into()),
+    )
+    .title("Sealwire")
+    .inner_size(1280.0, 820.0)
+    .min_inner_size(860.0, 620.0);
+    // A transparent title bar shows the window colour; the title is hidden because
+    // its text follows the system appearance and would be dark on dark.
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Transparent)
+        .hidden_title(true)
+        .background_color(TITLE_BAR_COLOR);
+    let window = builder
+        .on_navigation(|url| {
+            if stays_in_window(url) {
+                return true;
             }
-            return home.join(&value[2..]);
-        }
-    }
-    PathBuf::from(value)
+            open_in_browser(url);
+            false
+        })
+        // The app has no tabs: links that would open one go to the default browser.
+        .on_new_window(|url, _features| {
+            open_in_browser(&url);
+            NewWindowResponse::Deny
+        })
+        .build()?;
+    window.url()
 }
 
-fn ensure_workspace(workspace: &Path) -> Result<(), String> {
-    if !workspace.exists() {
-        return Err(format!("workspace does not exist: {}", workspace.display()));
+enum TrayAction {
+    Open,
+    Quit,
+    Settings(&'static str),
+    Theme(&'static str),
+}
+
+fn tray_action(id: &str) -> Option<TrayAction> {
+    let pick = |list: [(&'static str, &str); 3], wanted: &str| {
+        list.into_iter()
+            .map(|(value, _)| value)
+            .find(|value| *value == wanted)
+    };
+    match id.split_once(':') {
+        Some(("settings", tab)) => pick(SETTINGS_TABS, tab).map(TrayAction::Settings),
+        Some(("theme", theme)) => pick(THEMES, theme).map(TrayAction::Theme),
+        _ if id == TRAY_OPEN_ID => Some(TrayAction::Open),
+        _ if id == TRAY_QUIT_ID => Some(TrayAction::Quit),
+        _ => None,
     }
-    if !workspace.is_dir() {
-        return Err(format!(
-            "workspace is not a directory: {}",
-            workspace.display()
-        ));
+}
+
+fn page_command_script(detail: &serde_json::Value) -> String {
+    format!(
+        "window.dispatchEvent(new CustomEvent({}, {{ detail: {detail} }}))",
+        serde_json::Value::from(DESKTOP_COMMAND_EVENT)
+    )
+}
+
+/// Reads an `eval` result of the page's stored theme the way the page itself does.
+fn page_theme(result: &str) -> &'static str {
+    let stored = serde_json::from_str::<String>(result).unwrap_or_default();
+    THEMES
+        .into_iter()
+        .map(|(value, _)| value)
+        .find(|value| *value == stored)
+        .unwrap_or(DEFAULT_THEME)
+}
+
+struct ThemeMenu(Vec<CheckMenuItem<Wry>>);
+
+fn check_theme(app: &AppHandle, theme: &str) {
+    if let Some(menu) = app.try_state::<ThemeMenu>() {
+        for item in &menu.0 {
+            let _ = item.set_checked(item.id().as_ref() == format!("theme:{theme}"));
+        }
     }
-    fs::create_dir_all(workspace.join(".sealwire"))
-        .map_err(|error| format!("failed to create workspace state directory: {error}"))
+}
+
+/// The page's Settings can change the theme too, so the checkmark is read back from
+/// the page whenever the pointer reaches the icon, before the menu can open.
+fn refresh_theme_checks(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let app = app.clone();
+        let read = format!(
+            "localStorage.getItem({})",
+            serde_json::Value::from(THEME_STORAGE_KEY)
+        );
+        let _ =
+            window.eval_with_callback(read, move |result| check_theme(&app, page_theme(&result)));
+    }
+}
+
+fn run_page_command(app: &AppHandle, detail: serde_json::Value) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.eval(page_command_script(&detail));
+    }
+}
+
+fn on_tray_menu(app: &AppHandle, id: &str) {
+    match tray_action(id) {
+        Some(TrayAction::Open) => show_main_window(app),
+        Some(TrayAction::Quit) => app.exit(0),
+        Some(TrayAction::Settings(tab)) => {
+            show_main_window(app);
+            run_page_command(
+                app,
+                serde_json::json!({"command": "open-settings", "tab": tab}),
+            );
+        }
+        Some(TrayAction::Theme(theme)) => {
+            run_page_command(
+                app,
+                serde_json::json!({"command": "set-theme", "theme": theme}),
+            );
+            // Clicking a check item toggles it, so a re-picked theme would come out unchecked.
+            check_theme(app, theme);
+        }
+        None => {}
+    }
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, TRAY_OPEN_ID, "Open Sealwire", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit Sealwire", true, None::<&str>)?;
+    let tabs = SETTINGS_TABS
+        .into_iter()
+        .map(|(tab, label)| {
+            MenuItem::with_id(app, format!("settings:{tab}"), label, true, None::<&str>)
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let themes = THEMES
+        .into_iter()
+        .map(|(theme, label)| {
+            CheckMenuItem::with_id(
+                app,
+                format!("theme:{theme}"),
+                label,
+                true,
+                theme == DEFAULT_THEME,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let theme_menu = Submenu::with_items(
+        app,
+        "Theme",
+        true,
+        &themes
+            .iter()
+            .map(|item| item as &dyn tauri::menu::IsMenuItem<Wry>)
+            .collect::<Vec<_>>(),
+    )?;
+    let settings_separator = PredefinedMenuItem::separator(app)?;
+    let mut settings_items: Vec<&dyn tauri::menu::IsMenuItem<Wry>> = tabs
+        .iter()
+        .map(|item| item as &dyn tauri::menu::IsMenuItem<Wry>)
+        .collect();
+    settings_items.push(&settings_separator);
+    settings_items.push(&theme_menu);
+    let settings = Submenu::with_items(app, "Settings", true, &settings_items)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&open, &settings, &separator, &quit])?;
+    app.manage(ThemeMenu(themes));
+
+    // A template image is drawn from its alpha alone, so the opaque app icon would
+    // render as a solid disc; the tray needs its own cut-out silhouette.
+    TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .tooltip("Sealwire")
+        .icon(tauri::include_image!("icons/tray.png"))
+        .icon_as_template(true)
+        .on_menu_event(|app, event| on_tray_menu(app, event.id().as_ref()))
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } => show_main_window(tray.app_handle()),
+            TrayIconEvent::Enter { .. } => refresh_theme_checks(tray.app_handle()),
+            _ => {}
+        })
+        .build(app)?;
+    Ok(())
 }
 
 fn pick_port(preferred: u16) -> Result<u16, String> {
-    // A relay we just killed can take a brief moment to release its listening
-    // socket; give the preferred port a short window before drifting away.
-    for attempt in 0..20 {
-        if port_is_available(preferred) {
-            return Ok(preferred);
-        }
-        if attempt + 1 < 20 {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-    for port in 8788..=8877 {
-        if port_is_available(port) {
-            return Ok(port);
-        }
+    if port_is_available(preferred) {
+        return Ok(preferred);
     }
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-        .map_err(|error| format!("failed to allocate a relay port: {error}"))?;
+        .map_err(|error| format!("Could not find a free port for Sealwire: {error}"))?;
     listener
         .local_addr()
         .map(|addr| addr.port())
-        .map_err(|error| format!("failed to inspect allocated relay port: {error}"))
+        .map_err(|error| format!("Could not find a free port for Sealwire: {error}"))
 }
 
 fn port_is_available(port: u16) -> bool {
     TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).is_ok()
-}
-
-fn port_is_ready(port: u16) -> bool {
-    TcpStream::connect_timeout(
-        &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-        Duration::from_millis(250),
-    )
-    .is_ok()
-}
-
-/// Pulls the per-provider health rows out of a relay `/api/session` envelope
-/// (`{ ok, data: { provider_status: [...] } }`). The relay JSON is snake_case,
-/// so fields are read by hand rather than derived, keeping the serialize side
-/// camelCase for the webview. Returns empty on any parse/shape mismatch.
-fn parse_provider_status(body: &str) -> Vec<ProviderStatusRow> {
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
-        return Vec::new();
-    };
-    let Some(array) = json
-        .get("data")
-        .and_then(|data| data.get("provider_status"))
-        .and_then(|value| value.as_array())
-    else {
-        return Vec::new();
-    };
-    array
-        .iter()
-        .filter_map(|row| {
-            Some(ProviderStatusRow {
-                provider: row.get("provider")?.as_str()?.to_string(),
-                display_name: row
-                    .get("display_name")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                status: row.get("status")?.as_str()?.to_string(),
-                connected: row
-                    .get("connected")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false),
-                reason: row
-                    .get("reason")
-                    .and_then(|value| value.as_str())
-                    .map(|value| value.to_string()),
-            })
-        })
-        .collect()
-}
-
-fn fetch_provider_status(port: u16) -> Vec<ProviderStatusRow> {
-    let url = format!("http://127.0.0.1:{port}/api/session");
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_millis(1000))
-        .timeout_read(Duration::from_millis(2000))
-        .build();
-    match agent.get(&url).call() {
-        Ok(response) => response
-            .into_string()
-            .map(|body| parse_provider_status(&body))
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
-}
-
-fn default_config(app: &AppHandle) -> DesktopConfig {
-    let workspace_dir = app
-        .path()
-        .home_dir()
-        .ok()
-        .or_else(home_dir_from_env)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .display()
-        .to_string();
-    DesktopConfig {
-        workspace_dir,
-        preferred_port: 8787,
-        broker_mode: BrokerMode::LocalOnly,
-        custom_broker_url: String::new(),
-        broker_provider: Some(BrokerProvider::Hosted),
-    }
-}
-
-fn load_config(path: &Path, default_config: DesktopConfig) -> Result<DesktopConfig, String> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Ok(default_config);
-    };
-    let parsed: DesktopConfig = serde_json::from_str(&contents)
-        .map_err(|error| format!("failed to parse desktop config: {error}"))?;
-    Ok(DesktopConfig {
-        workspace_dir: if parsed.workspace_dir.trim().is_empty() {
-            default_config.workspace_dir
-        } else {
-            parsed.workspace_dir
-        },
-        preferred_port: if parsed.preferred_port == 0 {
-            default_config.preferred_port
-        } else {
-            parsed.preferred_port
-        },
-        broker_provider: Some(resolve_broker_provider(
-            &parsed.broker_mode,
-            parsed.broker_provider,
-            &parsed.custom_broker_url,
-        )),
-        broker_mode: parsed.broker_mode,
-        custom_broker_url: parsed.custom_broker_url,
-    })
 }
 
 fn resolve_claude_worker(app: &AppHandle) -> Option<PathBuf> {
@@ -1206,81 +760,48 @@ fn resolve_claude_worker(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join("claude-worker").join("worker.mjs"));
     }
-    candidates.push(
-        repo_root
-            .join("src-tauri")
-            .join("resources")
-            .join("claude-worker")
-            .join("worker.mjs"),
-    );
-    candidates.push(repo_root.join("claude-worker").join("worker.mjs"));
+    candidates.push(repo_root.join("src-tauri/resources/claude-worker/worker.mjs"));
+    candidates.push(repo_root.join("claude-worker/worker.mjs"));
     candidates.into_iter().find(|candidate| candidate.exists())
 }
 
 fn resolve_bundled_node() -> Option<PathBuf> {
     let executable = if cfg!(windows) { "node.exe" } else { "node" };
-    let current_exe = std::env::current_exe().ok()?;
-    current_exe
+    std::env::current_exe()
+        .ok()?
         .parent()
         .map(|dir| dir.join(executable))
         .filter(|candidate| candidate.exists())
 }
 
-fn sanitize_peer_id(raw: &str) -> String {
-    raw.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .take(48)
-        .collect()
+fn home_dir() -> Option<PathBuf> {
+    ["HOME", "USERPROFILE"].into_iter().find_map(|key| {
+        std::env::var_os(key)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    })
 }
 
-/// Builds a peer id that is stable for a given install (via `seed`) yet differs
-/// across installs, so distinct desktops don't collide on a shared broker even
-/// when the hostname env is empty (common on macOS).
-fn build_peer_id(host_raw: &str, seed: &str) -> String {
-    let host = sanitize_peer_id(host_raw);
-    let base = if host.is_empty() {
-        "relay".to_string()
-    } else {
-        host
-    };
-    let mut hasher = DefaultHasher::new();
-    seed.hash(&mut hasher);
-    format!("desktop-relay-{base}-{:08x}", hasher.finish() as u32)
+/// New sessions default to the relay's working directory; from Finder there is
+/// no meaningful one, so use home.
+fn relay_cwd() -> PathBuf {
+    home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
-fn default_peer_id(seed: &str) -> String {
-    let host = std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
+fn launch_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    build_peer_id(&host, seed)
-}
-
-fn home_dir_from_env() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
+    format!("desktop-{}-{nanos:x}", std::process::id())
 }
 
 fn local_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/")
 }
 
-fn remote_url(port: u16) -> String {
-    format!("http://127.0.0.1:{port}/static/remote.html")
-}
-
-fn strip_trailing_slash(value: &str) -> String {
-    value.strip_suffix('/').unwrap_or(value).to_string()
-}
-
-fn decode_lines(bytes: Vec<u8>) -> Vec<String> {
-    String::from_utf8_lossy(&bytes)
+fn decode_lines(bytes: &[u8]) -> Vec<String> {
+    strip_ansi(&String::from_utf8_lossy(bytes))
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -1288,43 +809,39 @@ fn decode_lines(bytes: Vec<u8>) -> Vec<String> {
         .collect()
 }
 
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default()
+/// The relay's log lines carry terminal colour codes, which would show up as
+/// garbage on the startup page.
+fn strip_ansi(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![
-            desktop_status,
-            desktop_restart,
-            desktop_stop_relay,
-            desktop_open_surface,
-        ])
+        .invoke_handler(tauri::generate_handler![desktop_status, desktop_retry])
         .setup(|app| {
-            let handle = app.handle().clone();
-            let supervisor = Arc::new(
-                RelaySupervisor::new(&handle)
-                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?,
-            );
-            let startup_supervisor = supervisor.clone();
-            let startup_app = handle.clone();
-            app.manage(supervisor);
+            let supervisor = Arc::new(Supervisor::default());
+            app.manage(supervisor.clone());
+            *supervisor.startup_page.lock().unwrap() = Some(build_main_window(app)?);
             setup_tray(app)?;
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) =
-                    start_relay(startup_app.clone(), startup_supervisor.clone(), None).await
-                {
-                    startup_supervisor.push_log(Some(&startup_app), "error", error);
-                }
-            });
+            connect(app.handle().clone(), supervisor);
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Closing the window keeps the relay running, like closing a browser tab.
             if window.label() == MAIN_WINDOW_LABEL {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -1334,15 +851,14 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building Sealwire desktop")
-        .run(|app_handle, event| {
-            // F2: guarantee the relay-server (and its node worker / codex children)
-            // are killed on true app quit (tray Quit, Cmd+Q, app-menu Quit).
-            // Closing the launcher window is now a background/minimize action.
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                if let Some(supervisor) = app_handle.try_state::<Arc<RelaySupervisor>>() {
-                    stop_relay(app_handle, supervisor.inner());
-                }
-            }
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => stop_owned_relay(app),
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => show_main_window(app),
+            _ => {}
         });
 }
 
@@ -1350,112 +866,349 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn cfg(mode: BrokerMode, custom: &str) -> DesktopConfig {
-        DesktopConfig {
-            workspace_dir: "/tmp".to_string(),
-            preferred_port: 8787,
-            broker_mode: mode,
-            custom_broker_url: custom.to_string(),
-            broker_provider: None,
+    fn url(value: &str) -> Url {
+        Url::parse(value).unwrap()
+    }
+
+    #[test]
+    fn links_to_other_sites_open_in_the_default_browser() {
+        for link in [
+            "https://github.com/sealwire/sealwire/pull/1",
+            "http://example.com/",
+            "mailto:someone@example.com",
+            "http://localhost:3000/",
+        ] {
+            assert!(
+                opens_in_browser(&url(link)),
+                "{link} should open in the browser"
+            );
+        }
+        for link in [
+            "file:///etc/passwd",
+            "vscode://file/tmp/x",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                !opens_in_browser(&url(link)),
+                "{link} must not be handed to the OS"
+            );
         }
     }
 
-    // Turning the broker off (localOnly) must not forget the selected provider —
-    // an explicit choice is preserved, so re-enabling can't silently connect to a
-    // different broker/trust boundary.
+    // Both plugins inject a script into every page that turns a target=_blank click
+    // into an IPC call and cancels it; the relay's page has no IPC, so links went dead.
     #[test]
-    fn resolve_broker_provider_preserves_explicit_choice_when_off() {
+    fn no_plugin_swallows_link_clicks_on_the_relay_page() {
+        let manifest = include_str!("../Cargo.toml");
+        for plugin in ["tauri-plugin-shell", "tauri-plugin-opener"] {
+            assert!(
+                !manifest.contains(plugin),
+                "{plugin} intercepts link clicks on the relay page; open links in on_new_window instead"
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_only_shows_the_startup_page_and_the_local_relay() {
+        for target in [
+            "tauri://localhost/desktop.html",
+            "http://127.0.0.1:5173/static/desktop.html",
+            "http://127.0.0.1:8787/",
+            "http://localhost:8790/?thread=abc",
+            "http://[::1]:8787/",
+            "about:blank",
+        ] {
+            assert!(
+                stays_in_window(&url(target)),
+                "{target} belongs in the window"
+            );
+        }
+        for target in [
+            "https://github.com/",
+            "http://192.168.1.5:8787/",
+            "file:///Users/me/notes.md",
+            "data:text/html,hi",
+        ] {
+            assert!(
+                !stays_in_window(&url(target)),
+                "{target} must not replace the app"
+            );
+        }
+    }
+
+    #[test]
+    fn tray_items_map_to_page_commands() {
+        assert!(matches!(tray_action("open"), Some(TrayAction::Open)));
+        assert!(matches!(tray_action("quit"), Some(TrayAction::Quit)));
+        assert!(matches!(
+            tray_action("settings:devices"),
+            Some(TrayAction::Settings("devices"))
+        ));
+        assert!(matches!(
+            tray_action("theme:dark"),
+            Some(TrayAction::Theme("dark"))
+        ));
+        assert!(tray_action("settings:billing").is_none());
+        assert!(tray_action("theme:sepia").is_none());
+
+        let script =
+            page_command_script(&serde_json::json!({"command": "open-settings", "tab": "access"}));
         assert_eq!(
-            resolve_broker_provider(&BrokerMode::LocalOnly, Some(BrokerProvider::Custom), ""),
-            BrokerProvider::Custom
-        );
-        assert_eq!(
-            resolve_broker_provider(&BrokerMode::LocalOnly, Some(BrokerProvider::Hosted), ""),
-            BrokerProvider::Hosted
+            script,
+            r#"window.dispatchEvent(new CustomEvent("sealwire:desktop-command", { detail: {"command":"open-settings","tab":"access"} }))"#
         );
     }
 
-    // A pre-existing config (no broker_provider) migrates safely.
+    // The page owns these names; the menu only works while both sides agree.
     #[test]
-    fn resolve_broker_provider_migrates_from_broker_mode() {
-        assert_eq!(
-            resolve_broker_provider(&BrokerMode::Custom, None, ""),
-            BrokerProvider::Custom
-        );
-        assert_eq!(
-            resolve_broker_provider(&BrokerMode::Hosted, None, ""),
-            BrokerProvider::Hosted
-        );
-        // A truly blank local-only config defaults to the official broker.
-        assert_eq!(
-            resolve_broker_provider(&BrokerMode::LocalOnly, None, ""),
-            BrokerProvider::Hosted
-        );
+    fn tray_commands_match_what_the_local_page_listens_for() {
+        let commands = include_str!("../../frontend/local/desktop-commands.js");
+        assert!(commands.contains(&format!("\"{DESKTOP_COMMAND_EVENT}\"")));
+        assert!(commands.contains("\"open-settings\"") && commands.contains("\"set-theme\""));
+
+        let tabs = include_str!("../../frontend/local/settings-view.js");
+        for (tab, _) in SETTINGS_TABS {
+            assert!(
+                tabs.contains(&format!("\"{tab}\"")),
+                "settings page has no {tab:?} tab"
+            );
+        }
+
+        let theme = include_str!("../../frontend/shared/theme.js");
+        assert!(theme.contains(&format!("\"{THEME_STORAGE_KEY}\"")));
+        assert!(theme.contains(&format!("DEFAULT_THEME = \"{DEFAULT_THEME}\"")));
+        for (value, _) in THEMES {
+            assert!(
+                theme.contains(&format!("\"{value}\"")),
+                "page has no {value:?} theme"
+            );
+        }
     }
 
-    // A LEGACY local-only config that retained a self-hosted URL (the old UI kept
-    // customBrokerUrl when switching to Local) must migrate to Custom, NOT silently
-    // default to the official broker — otherwise enabling it would redirect traffic
-    // to an unintended trust boundary.
     #[test]
-    fn resolve_broker_provider_migrates_legacy_local_only_with_custom_url_to_custom() {
-        assert_eq!(
-            resolve_broker_provider(&BrokerMode::LocalOnly, None, "wss://self.example.com"),
-            BrokerProvider::Custom
-        );
+    fn page_theme_reads_like_the_page_does() {
+        assert_eq!(page_theme(r#""dark""#), "dark");
+        assert_eq!(page_theme(r#""auto""#), "auto");
+        assert_eq!(page_theme("null"), "light");
+        assert_eq!(page_theme(r#""purple""#), "light");
+        assert_eq!(page_theme(""), "light");
     }
 
-    // URL-based inference is ONLY the legacy fallback for configs with no remembered
-    // provider. An explicit brokerProvider always wins, even against a retained
-    // custom URL — so a user who picked Official while off keeps Official.
     #[test]
-    fn resolve_broker_provider_explicit_choice_beats_url_inference() {
+    fn health_identifies_a_relay_and_its_launch() {
         assert_eq!(
-            resolve_broker_provider(
-                &BrokerMode::LocalOnly,
-                Some(BrokerProvider::Hosted),
-                "wss://self.example.com"
+            parse_health(
+                r#"{"ok":true,"data":{"status":"ok","service":"relay-server","provider":"claude_code"}}"#
             ),
-            BrokerProvider::Hosted
-        );
-    }
-
-    // When the broker is ON, mode and provider can never disagree: the mode wins,
-    // so a stale/inconsistent provider can't send traffic to the wrong broker.
-    #[test]
-    fn resolve_broker_provider_forces_mode_provider_agreement_when_on() {
-        assert_eq!(
-            resolve_broker_provider(&BrokerMode::Hosted, Some(BrokerProvider::Custom), "wss://x"),
-            BrokerProvider::Hosted
+            Some(Health { launch_id: None })
         );
         assert_eq!(
-            resolve_broker_provider(&BrokerMode::Custom, Some(BrokerProvider::Hosted), ""),
-            BrokerProvider::Custom
-        );
-    }
-
-    // Old configs without brokerProvider deserialize (serde default None).
-    #[test]
-    fn desktop_config_without_broker_provider_deserializes() {
-        let json = r#"{"workspaceDir":"/tmp","preferredPort":8787,"brokerMode":"localOnly","customBrokerUrl":"wss://self.example.com"}"#;
-        let parsed: DesktopConfig = serde_json::from_str(json).expect("parse legacy config");
-        assert!(parsed.broker_provider.is_none());
-        // Legacy local-only + retained self-hosted URL migrates to Custom.
-        assert_eq!(
-            resolve_broker_provider(
-                &parsed.broker_mode,
-                parsed.broker_provider,
-                &parsed.custom_broker_url
+            parse_health(
+                r#"{"ok":true,"data":{"status":"ok","service":"relay-server","launch_id":"desktop-1"}}"#
             ),
-            BrokerProvider::Custom
+            Some(Health {
+                launch_id: Some("desktop-1".to_string())
+            })
+        );
+        assert_eq!(
+            parse_health(r#"{"ok":true,"data":{"status":"ok","service":"vite"}}"#),
+            None
+        );
+        assert_eq!(
+            parse_health(r#"{"ok":false,"data":{"status":"ok","service":"relay-server"}}"#),
+            None
+        );
+        assert_eq!(parse_health("<html>not a relay</html>"), None);
+    }
+
+    #[test]
+    fn owner_file_gives_the_running_relays_port() {
+        assert_eq!(
+            parse_owner_port(br#"{"pid":84175,"port":8787}"#),
+            Some(8787)
+        );
+        assert_eq!(parse_owner_port(br#"{"pid":1,"port":0}"#), None);
+        assert_eq!(parse_owner_port(br#"{"pid":1,"port":70000}"#), None);
+        assert_eq!(parse_owner_port(b"garbage"), None);
+    }
+
+    // The window must open the same database `npx sealwire` uses, or the sessions
+    // in it and in a localhost tab drift apart.
+    #[test]
+    fn state_database_matches_the_cli_default() {
+        let cwd = Path::new("/somewhere");
+        let home = home_dir().expect("tests run with HOME set");
+        assert_eq!(state_db_path(None, cwd), home.join(".sealwire/sealwire.db"));
+        assert_eq!(
+            state_db_path(Some(OsString::from("  ")), cwd),
+            home.join(".sealwire/sealwire.db")
+        );
+        assert_eq!(
+            state_db_path(Some(OsString::from("/tmp/isolated.db")), cwd),
+            PathBuf::from("/tmp/isolated.db")
+        );
+        assert_eq!(
+            state_db_path(Some(OsString::from("rel.db")), cwd),
+            PathBuf::from("/somewhere/rel.db")
         );
     }
 
-    // Every window that loads the Tauri UI (desktop.html) must be covered by a
-    // capability, or in Tauri v2 it opens with NO IPC access: desktop_status, the
-    // start/stop commands, and the file dialog all silently fail. This regressed
-    // once when the launcher moved from the (covered) "main" window to a freshly
-    // built "launcher" window that no capability matched.
+    fn env_value<'a>(envs: &'a [(OsString, OsString)], key: &str) -> Option<&'a OsString> {
+        envs.iter().find(|(k, _)| k == key).map(|(_, value)| value)
+    }
+
+    #[test]
+    fn relay_env_is_local_only_and_shares_the_default_database() {
+        let inherited = vec![
+            (OsString::from("HOME"), OsString::from("/Users/me")),
+            (OsString::from("PORT"), OsString::from("1234")),
+            (
+                OsString::from("PATH"),
+                OsString::from("/usr/bin:/custom/bin"),
+            ),
+            (
+                OsString::from("RELAY_BROKER_URL"),
+                OsString::from("wss://x"),
+            ),
+            (
+                OsString::from("relay_broker_public_url"),
+                OsString::from("wss://x"),
+            ),
+            (
+                OsString::from("RELAY_CLOUD_EXPECTED_RELAY_ID"),
+                OsString::from("r"),
+            ),
+            (
+                OsString::from("SEALWIRE_CLOUD_ACCESS_KEY"),
+                OsString::from("k"),
+            ),
+            (OsString::from("RELAY_API_TOKEN"), OsString::from("t")),
+        ];
+        let envs = relay_env(
+            inherited,
+            8787,
+            "launch-1",
+            Some(Path::new("/App/Resources/claude-worker/worker.mjs")),
+            Some(Path::new("/App/MacOS/node")),
+        );
+
+        assert_eq!(env_value(&envs, "PORT").unwrap(), "8787");
+        assert_eq!(env_value(&envs, "BIND_HOST").unwrap(), "127.0.0.1");
+        assert_eq!(env_value(&envs, "SEALWIRE_LAUNCH_ID").unwrap(), "launch-1");
+        assert_eq!(env_value(&envs, "HOME").unwrap(), "/Users/me");
+        assert_eq!(env_value(&envs, "RELAY_STATE_DB"), None);
+        for (key, _) in &envs {
+            let key = key.to_string_lossy().to_ascii_uppercase();
+            assert!(
+                !key.starts_with("RELAY_BROKER_")
+                    && !key.starts_with("RELAY_CLOUD_")
+                    && !key.starts_with("SEALWIRE_CLOUD_")
+                    && key != "RELAY_API_TOKEN",
+                "{key} must not reach a local-only relay"
+            );
+        }
+        assert_eq!(
+            env_value(&envs, "CLAUDE_WORKER_PATH").unwrap(),
+            "/App/Resources/claude-worker/worker.mjs"
+        );
+        assert_eq!(
+            env_value(&envs, "CLAUDE_NODE_BINARY").unwrap(),
+            "/App/MacOS/node"
+        );
+        let path = env_value(&envs, "PATH")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(path.starts_with("/App/MacOS:/opt/homebrew/bin:"), "{path}");
+        assert!(path.ends_with("/custom/bin"), "{path}");
+    }
+
+    #[test]
+    fn relay_env_keeps_explicit_worker_and_node_overrides() {
+        let inherited = vec![
+            (
+                OsString::from("CLAUDE_WORKER_PATH"),
+                OsString::from("/dev/worker.mjs"),
+            ),
+            (
+                OsString::from("CLAUDE_NODE_BINARY"),
+                OsString::from("/dev/node"),
+            ),
+            (
+                OsString::from("RELAY_STATE_DB"),
+                OsString::from("/tmp/isolated.db"),
+            ),
+        ];
+        let envs = relay_env(
+            inherited,
+            8787,
+            "launch-1",
+            Some(Path::new("/App/worker.mjs")),
+            Some(Path::new("/App/MacOS/node")),
+        );
+        assert_eq!(
+            env_value(&envs, "CLAUDE_WORKER_PATH").unwrap(),
+            "/dev/worker.mjs"
+        );
+        assert_eq!(env_value(&envs, "CLAUDE_NODE_BINARY").unwrap(), "/dev/node");
+        assert_eq!(
+            env_value(&envs, "RELAY_STATE_DB").unwrap(),
+            "/tmp/isolated.db"
+        );
+        assert!(!env_value(&envs, "PATH")
+            .unwrap()
+            .to_string_lossy()
+            .contains("/App/MacOS"));
+    }
+
+    #[test]
+    fn failure_message_prefers_the_relays_own_error() {
+        let logs = vec![
+            "started relay-server (pid 1) on port 8787".to_string(),
+            "relay-server: another relay is already running (pid 9, port 8787) against the state database".to_string(),
+            "relay-server (pid 1) exited with code Some(1)".to_string(),
+        ];
+        assert!(failure_message(&logs, Some(1)).starts_with("relay-server: another relay"));
+        assert_eq!(
+            failure_message(&["noise".to_string()], Some(101)),
+            "Sealwire stopped unexpectedly (exit code 101)."
+        );
+        assert_eq!(failure_message(&[], None), "Sealwire stopped unexpectedly.");
+    }
+
+    #[test]
+    fn status_serializes_the_phase_flat() {
+        let status = DesktopStatus {
+            phase: Phase::Failed {
+                message: "boom".to_string(),
+            },
+            logs: vec!["line".to_string()],
+        };
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!({"phase": "failed", "message": "boom", "logs": ["line"]})
+        );
+        let ready = DesktopStatus {
+            phase: Phase::Ready { port: 8787 },
+            logs: vec![],
+        };
+        assert_eq!(
+            serde_json::to_value(ready).unwrap(),
+            serde_json::json!({"phase": "ready", "port": 8787, "logs": []})
+        );
+    }
+
+    #[test]
+    fn log_lines_lose_terminal_colours() {
+        assert_eq!(
+            decode_lines(b"\x1b[2m2026-10-12\x1b[0m \x1b[32m INFO\x1b[0m relay up\n\n  second  \n"),
+            vec![
+                "2026-10-12  INFO relay up".to_string(),
+                "second".to_string()
+            ]
+        );
+    }
+
     #[test]
     fn tauri_ipc_windows_are_capability_covered() {
         let caps: serde_json::Value =
@@ -1470,138 +1223,18 @@ mod tests {
         for label in IPC_WINDOW_LABELS {
             assert!(
                 covered.iter().any(|w| *w == "*" || w == label),
-                "window {label:?} loads the Tauri IPC UI but is not covered by \
-                 capabilities/default.json `windows` {covered:?}; add it or its IPC \
-                 (status/start/stop/dialog) is dead"
+                "window {label:?} loads the startup page but is not covered by \
+                 capabilities/default.json `windows` {covered:?}"
             );
         }
     }
 
-    // The tray "Open Remote" item and the desktop_open_surface IPC command both
-    // route through surface_target, so this pins the labels/URLs they share: a
-    // typo that pointed "remote" at the local URL (or vice versa) would regress
-    // both entry points at once.
-    #[test]
-    fn surface_target_routes_local_and_remote() {
-        let (local_label, _, local) = surface_target("local", 8811).unwrap();
-        assert_eq!(local_label, "sealwire-local");
-        assert_eq!(local, "http://127.0.0.1:8811/");
-
-        let (remote_label, _, remote) = surface_target("remote", 8811).unwrap();
-        assert_eq!(remote_label, "sealwire-remote");
-        assert_eq!(remote, "http://127.0.0.1:8811/static/remote.html");
-
-        assert_ne!(local_label, remote_label);
-        assert!(surface_target("bogus", 8811).is_err());
-    }
-
-    // A product surface must not open until the relay is `ready`: `port` is
-    // `Some` the instant the process spawns, but during the ready-poll it is not
-    // yet accepting connections. The launcher UI disables its Open buttons until
-    // ready; the tray "Open Remote" item relies on this gate instead. Opening a
-    // surface at a not-yet-listening port dumps the user on a browser error page.
-    #[test]
-    fn surface_wont_open_until_relay_is_ready() {
-        let ready = RelayStatus {
-            running: true,
-            ready: true,
-            port: Some(8811),
-            ..RelayStatus::stopped()
-        };
-        assert_eq!(surface_ready_port(&ready).unwrap(), 8811);
-
-        let starting = RelayStatus {
-            running: true,
-            ready: false,
-            port: Some(8811),
-            ..RelayStatus::stopped()
-        };
-        assert!(
-            surface_ready_port(&starting).is_err(),
-            "a starting (port bound but not ready) relay must not open a surface"
-        );
-
-        assert!(surface_ready_port(&RelayStatus::stopped()).is_err());
-    }
-
-    // F8 documentation: RELAY_BROKER_PUBLIC_URL must stay a ws/wss URL (relay-server
-    // rejects http(s) there), while the control URL is the http(s) counterpart.
-    #[test]
-    fn broker_local_only_is_none() {
-        assert!(broker_runtime_config(&cfg(BrokerMode::LocalOnly, ""))
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn broker_hosted_normalizes_schemes() {
-        let broker = broker_runtime_config(&cfg(BrokerMode::Hosted, ""))
-            .unwrap()
-            .unwrap();
-        assert!(broker.websocket_url.starts_with("wss://"));
-        assert!(broker.control_url.starts_with("https://"));
-        assert_eq!(broker.label, "Hosted SealWire Cloud broker");
-    }
-
-    #[test]
-    fn broker_custom_https_maps_to_wss_and_https() {
-        let broker = broker_runtime_config(&cfg(BrokerMode::Custom, "https://broker.example.com"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(broker.websocket_url, "wss://broker.example.com");
-        assert_eq!(broker.control_url, "https://broker.example.com");
-    }
-
-    #[test]
-    fn broker_custom_ws_maps_to_http_control() {
-        let broker = broker_runtime_config(&cfg(BrokerMode::Custom, "ws://127.0.0.1:9000"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(broker.websocket_url, "ws://127.0.0.1:9000");
-        assert_eq!(broker.control_url, "http://127.0.0.1:9000");
-    }
-
-    #[test]
-    fn broker_custom_requires_a_url() {
-        assert!(broker_runtime_config(&cfg(BrokerMode::Custom, "   ")).is_err());
-    }
-
-    #[test]
-    fn broker_custom_rejects_unknown_scheme() {
-        assert!(broker_runtime_config(&cfg(BrokerMode::Custom, "ftp://nope")).is_err());
-    }
-
-    // F9: peer id must be stable per install, sanitized, and vary across installs.
-    #[test]
-    fn sanitize_peer_id_replaces_unsafe_chars() {
-        assert_eq!(sanitize_peer_id("My Mac.local"), "My-Mac.local");
-        assert_eq!(sanitize_peer_id("a/b:c"), "a-b-c");
-        assert_eq!(sanitize_peer_id(""), "");
-    }
-
-    #[test]
-    fn build_peer_id_is_stable_and_seed_sensitive() {
-        let a = build_peer_id("host", "/Users/alice/config");
-        let b = build_peer_id("host", "/Users/alice/config");
-        let c = build_peer_id("host", "/Users/bob/config");
-        assert_eq!(a, b, "same host+seed is stable across calls");
-        assert_ne!(a, c, "different seed yields a different peer id");
-        assert!(a.starts_with("desktop-relay-host-"));
-    }
-
-    #[test]
-    fn build_peer_id_handles_empty_host() {
-        assert!(build_peer_id("", "seed").starts_with("desktop-relay-relay-"));
-    }
-
-    // F3: a busy preferred port falls back; a free preferred port is reused.
     #[test]
     fn pick_port_prefers_free_and_falls_back_when_busy() {
         let occupied = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         let busy = occupied.local_addr().unwrap().port();
         let chosen = pick_port(busy).unwrap();
         assert_ne!(chosen, busy, "does not choose a busy preferred port");
-        assert!(port_is_available(chosen));
         drop(occupied);
 
         let probe = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -1614,25 +1247,6 @@ mod tests {
         );
     }
 
-    // F4: readiness reflects whether the port actually accepts connections.
-    #[test]
-    fn port_is_ready_reflects_listener_presence() {
-        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        assert!(port_is_ready(port), "ready while a listener is up");
-        drop(listener);
-
-        let probe = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let closed = probe.local_addr().unwrap().port();
-        drop(probe);
-        assert!(!port_is_ready(closed), "not ready with no listener");
-    }
-
-    // Tauri flattens externalBin next to the executable by basename, and the
-    // shell plugin's relative_command_path joins the .sidecar() argument onto
-    // the exe dir verbatim (no triple, no dir stripping). So the sidecar name
-    // must be a bare basename — a "binaries/…" prefix resolves to
-    // <exe>/binaries/… which does not exist -> ENOENT at spawn.
     #[test]
     fn relay_sidecar_is_a_bare_basename_matching_external_bin() {
         assert!(
@@ -1662,47 +1276,5 @@ mod tests {
             basenames.iter().any(|name| name == RELAY_SIDECAR),
             "RELAY_SIDECAR {RELAY_SIDECAR:?} must match an externalBin basename {basenames:?}"
         );
-    }
-
-    #[test]
-    fn parse_provider_status_extracts_rows_from_session_envelope() {
-        let body = r#"{"ok":true,"data":{"provider_status":[
-            {"provider":"claude_code","display_name":"Claude Code","status":"connected","connected":true},
-            {"provider":"codex","display_name":"Codex","status":"not_installed","connected":false,"reason":"codex: command not found"}
-        ]}}"#;
-        let rows = parse_provider_status(body);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].provider, "claude_code");
-        assert_eq!(rows[0].display_name, "Claude Code");
-        assert_eq!(rows[0].status, "connected");
-        assert!(rows[0].connected);
-        assert_eq!(rows[0].reason, None);
-        assert_eq!(rows[1].status, "not_installed");
-        assert_eq!(rows[1].reason.as_deref(), Some("codex: command not found"));
-    }
-
-    #[test]
-    fn parse_provider_status_is_empty_on_garbage_or_missing_field() {
-        assert!(parse_provider_status("not json at all").is_empty());
-        assert!(parse_provider_status(r#"{"ok":true,"data":{}}"#).is_empty());
-    }
-
-    #[test]
-    fn launcher_scrubs_inherited_broker_and_retired_access_env() {
-        for key in [
-            "RELAY_API_TOKEN",
-            "RELAY_ALLOWED_HOSTS",
-            "RELAY_ALLOW_INSECURE_NO_AUTH",
-        ] {
-            assert!(
-                is_launcher_managed_env(key),
-                "desktop sidecar must not inherit {key}"
-            );
-        }
-        assert!(is_launcher_managed_env("RELAY_BROKER_URL"));
-        assert!(is_launcher_managed_env("RELAY_BROKER_AUTH_MODE"));
-        assert!(!is_launcher_managed_env("PATH"));
-        assert!(!is_launcher_managed_env("HOME"));
-        assert!(!is_launcher_managed_env("CLAUDE_WORKER_PATH"));
     }
 }

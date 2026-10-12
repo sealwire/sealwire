@@ -87,7 +87,7 @@
     "smoke:pairing": "node scripts/pairing-smoke.mjs",
     "test:browser:smoke": "npm run build && node scripts/browser-page-smoke-e2e.mjs",
     "test:browser:composer-commands": "npm run build && node scripts/browser-composer-commands-e2e.mjs",
-    "test:browser:desktop-launcher": "npm run build && node scripts/browser-desktop-launcher-e2e.mjs",
+    "test:browser:desktop-startup": "npm run build && node scripts/browser-desktop-startup-e2e.mjs",
     "test:browser:highlighting": "node scripts/browser-highlighter-license-e2e.mjs",
     "test:claude:provider": "node scripts/claude-provider-e2e.mjs",
     "test:cursor:provider": "node scripts/cursor-provider-e2e.mjs",
@@ -175,7 +175,6 @@
     "@anthropic-ai/sdk": "^0.125.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
     "@tauri-apps/api": "^2.12.1",
-    "@tauri-apps/plugin-dialog": "^2.8.0",
     "diff": "^9.0.0",
     "zod": "^4.6.5"
   },
