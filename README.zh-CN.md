@@ -89,12 +89,14 @@ npx sealwire cloud
 
 | 命令 | 作用 |
 |---|---|
-| `/goal` | 给智能体一条终点线，让它自己往前跑，直到抵达。它只会停下来告诉你*干完了*（带证据）、*卡住了*（以及原因），或*需要你拍板*。 |
-| `/review` | 让另一个智能体检查目前的成果。例如：`/review codex high focus on the error paths` |
-| `/delegate` | 把支线活交给另一个智能体，等它把答案带回来 —— 比如 Codex 去追 flaky 测试，Claude 继续主线。两边对话都开着，你可以旁观，也可以插手。 |
-| `/handover` | 当前智能体写清现状，把整件事交给另一个收尾。配额用尽、或想换双新鲜眼睛时很有用。 |
+| [`/goal`](docs/commands/goal.zh-CN.md) | 给智能体一条终点线，让它自己往前跑，直到抵达。它只会停下来告诉你*干完了*（带证据）、*卡住了*（以及原因），或*需要你拍板*。 |
+| [`/review`](docs/commands/review.zh-CN.md) | 让另一个智能体检查目前的成果。例如：`/review codex gpt-5.5 high 重点看出错时的处理` |
+| [`/delegate`](docs/commands/delegate.zh-CN.md) | 把支线活交给另一个智能体，等它把答案带回来 —— 比如 Codex 去追 flaky 测试，Claude 继续主线。两边对话都开着，你可以旁观，也可以插手。 |
+| [`/handover`](docs/commands/handover.zh-CN.md) | 当前智能体写清现状，把整件事交给另一个收尾。配额用尽、或想换双新鲜眼睛时很有用。 |
 
 `/delegate` 和 `/handover` 里也可以敲 `@`，选一个已经开着的会话，而不必新开一个。各智能体自己的命令和 skills 会出现在同一菜单里，就在这些命令旁边。
+
+四条命令有什么区别、哪些智能体也能通过 MCP 自己发起：见[斜杠命令](docs/commands/README.zh-CN.md)。
 
 ## 人在哪里，控制就在哪里
 

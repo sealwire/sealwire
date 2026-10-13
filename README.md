@@ -121,14 +121,17 @@ instruction.
 
 | Command | What it does |
 |---|---|
-| `/goal` | Give the agent a finish line and let it keep going on its own until it gets there. It stops only to say *done* (with proof), *stuck* (and why), or *I need you to decide something*. |
-| `/review` | Have a different agent check the work so far. `/review codex high focus on the error paths` |
-| `/delegate` | Pass a side job to another agent and get the answer back — say, Codex chases a flaky test while Claude keeps going. Both conversations stay open, so you can read along or step in. |
-| `/handover` | The current agent writes up where things stand and hands the whole job to another one to finish. Handy when you've run out of quota, or want a fresh pair of eyes. |
+| [`/goal`](docs/commands/goal.md) | Give the agent a finish line and let it keep going on its own until it gets there. It stops only to say *done* (with proof), *stuck* (and why), or *I need you to decide something*. |
+| [`/review`](docs/commands/review.md) | Have a different agent check the work so far. `/review codex gpt-5.5 high focus on the error paths` |
+| [`/delegate`](docs/commands/delegate.md) | Pass a side job to another agent and get the answer back — say, Codex chases a flaky test while Claude keeps going. Both conversations stay open, so you can read along or step in. |
+| [`/handover`](docs/commands/handover.md) | The current agent writes up where things stand and hands the whole job to another one to finish. Handy when you've run out of quota, or want a fresh pair of eyes. |
 
 With `/delegate` and `/handover` you can also type `@` to pick a session that's
 already open, instead of starting a fresh one. Your agents' own commands and
 skills show up in the same menu, right beside these.
+
+How the four differ, and which ones an agent can also start on its own over
+MCP: [Slash commands](docs/commands/README.md).
 
 ## Stay in control from anywhere
 
