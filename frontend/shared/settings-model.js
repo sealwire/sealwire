@@ -135,6 +135,12 @@ export function pastDevicesLabel(records) {
   return `${parts.join(", ")} ${records.length === 1 ? "device" : "devices"}`;
 }
 
+// A paired phone's id is "mobile-" plus a 64-char key hash; 8 hash chars tell a list's phones apart.
+export function shortDeviceId(id) {
+  const value = String(id || "");
+  return value.length > 20 ? `${value.slice(0, 15)}…` : value;
+}
+
 export function pathScopeLabel(scope) {
   const paths = Array.isArray(scope) ? scope.filter(Boolean) : [];
   return paths.length ? paths.join(", ") : "All relay roots";

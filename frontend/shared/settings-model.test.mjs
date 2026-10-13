@@ -10,6 +10,7 @@ import {
   logRepeatLabel,
   pathScopeLabel,
   relativeTime,
+  shortDeviceId,
   splitDeviceRecords,
 } from "./settings-model.js";
 
@@ -87,4 +88,11 @@ test("deviceStatusLine", () => {
   assert.equal(deviceStatusLine({ lifecycle_state: "approved", last_seen_at: 1_000_000 - 120 }, now), "Last seen 2m ago");
   assert.equal(deviceStatusLine({ lifecycle_state: "approved" }, now), "Never connected");
   assert.equal(deviceStatusLine({ lifecycle_state: "pending" }, now), "Waiting for approval");
+});
+
+test("shortDeviceId cuts a key-derived id to a few hash chars and leaves short ids whole", () => {
+  const keyed = `mobile-${"3f8a2c1d".repeat(8)}`;
+  assert.equal(keyed.length, 71);
+  assert.equal(shortDeviceId(keyed), "mobile-3f8a2c1d…");
+  assert.equal(shortDeviceId("mobile-itjmagshdlj0"), "mobile-itjmagshdlj0");
 });

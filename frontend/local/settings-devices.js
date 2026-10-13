@@ -9,6 +9,7 @@ import {
   groupDevicesByBroker,
   pastDevicesLabel,
   pathScopeLabel,
+  shortDeviceId,
   splitDeviceRecords,
   workspaceName,
 } from "../shared/settings-model.js";
@@ -157,7 +158,7 @@ function DeviceRow({ record, canRevokeOthers, formatTimestamp, now, onRevoke, on
         "span",
         { className: "settings-row-copy" },
         h("span", { className: "settings-row-title" }, record.label || "Unnamed device"),
-        h("span", { className: "settings-row-sub settings-mono" }, record.device_id)
+        h("span", { className: "settings-row-sub settings-mono" }, shortDeviceId(record.device_id))
       ),
       h(
         "span",
@@ -172,6 +173,7 @@ function DeviceRow({ record, canRevokeOthers, formatTimestamp, now, onRevoke, on
           h(
             "dl",
             { className: "settings-fields" },
+            field("Device ID", record.device_id, true),
             field("Fingerprint", record.fingerprint || "Unavailable", true),
             field("Broker", record.pairing_broker_url || "Not recorded", Boolean(record.pairing_broker_url)),
             field("Access", pathScopeLabel(record.path_scope)),
@@ -233,7 +235,7 @@ function DeviceHistory({ records, formatTimestamp, onClear, onRetryRevoke }) {
       h(
         "p",
         { key: `retry-${record.device_id}`, className: "settings-hint" },
-        `${record.label || "Unnamed device"} (${record.device_id}) is revoked here, but the broker still accepts its credential. `,
+        `${record.label || "Unnamed device"} (${shortDeviceId(record.device_id)}) is revoked here, but the broker still accepts its credential. `,
         h(
           "button",
           {
@@ -266,7 +268,7 @@ function DeviceHistory({ records, formatTimestamp, onClear, onRetryRevoke }) {
               "li",
               { key: record.device_id, className: "settings-history-row" },
               h("span", { className: "settings-history-label" }, record.label || "Unnamed device"),
-              h("span", { className: "settings-mono settings-history-id" }, record.device_id),
+              h("span", { className: "settings-mono settings-history-id", title: record.device_id }, shortDeviceId(record.device_id)),
               h(
                 "span",
                 { className: "settings-history-when" },

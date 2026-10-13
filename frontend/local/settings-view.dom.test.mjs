@@ -241,6 +241,32 @@ test("a device's details name the full broker address it was paired through", ()
   }
 });
 
+test("a long device id shows a short form in the list and in full once opened", () => {
+  const id = `mobile-${"3f8a2c1d".repeat(8)}`;
+  const { props } = baseProps();
+  const view = render({
+    ...props,
+    devices: {
+      ...props.devices,
+      records: [device(id), device(`${id}-old`, { lifecycle_state: "revoked", broker_revoke_pending: true })],
+    },
+  });
+  try {
+    const row = view.host.querySelector(`[data-device-id='${id}']`);
+    assert.equal(row.querySelector(".settings-row-sub").textContent, "mobile-3f8a2c1d…");
+    assert.ok(!row.textContent.includes(id));
+    click(row.querySelector(".settings-row-toggle"));
+    assert.ok(row.querySelector(".settings-row-detail").textContent.includes(id));
+
+    const retryHint = view.host.querySelector("[data-retry-revoke-device-id]").parentElement;
+    assert.match(retryHint.textContent, /\(mobile-3f8a2c1d…\)/);
+    click(view.host.querySelector(".settings-history-toggle"));
+    assert.equal(view.host.querySelector(".settings-history-id").textContent, "mobile-3f8a2c1d…");
+  } finally {
+    view.cleanup();
+  }
+});
+
 test("revoked devices fold into one line and list only id and date, four at a time", () => {
   const revoked = Array.from({ length: 6 }, (_, index) =>
     device(`old-${index}`, { lifecycle_state: "revoked", state_changed_at: NOW_SECONDS - index })
