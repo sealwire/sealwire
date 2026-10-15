@@ -17,7 +17,7 @@ relay、broker、agent、Codex、Claude Code、Cursor、MCP、Git、commit、bra
 | prompt（发给 agent 的话） | 消息（按上下文，如"发送第一条消息"） |
 | composer | 输入框 |
 | send / stop | 发送 / 停止 |
-| provider | 提供方 |
+| provider（Codex、Claude Code 这些） | agent，和 agent 是同一个词；单独做标题或在句首写 Agent |
 | model | 模型 |
 | reasoning effort / effort | 推理强度 |
 | permission mode | 权限模式 |

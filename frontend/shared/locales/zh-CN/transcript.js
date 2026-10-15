@@ -273,7 +273,7 @@ export default {
   "Stop": "停止",
   "Couldn't start the review — check the activity log for details.": "无法开始审查，详情请看活动日志。",
   "Couldn't start the review.": "无法开始审查。",
-  "Choose a provider": "选择提供方",
+  "Choose a provider": "选择 agent",
   "Current model": "当前模型",
   "New clean reviewer session": "新建一个干净的审查者会话",
   "New reviewer": "新审查者",
@@ -296,7 +296,7 @@ export default {
   "That reviewer session can't review this working tree — a reviewer stays in the tree it was created in — so this review starts a clean one.":
     "那个审查者会话不能审查这个工作树（审查者只能留在创建它的工作树里），所以这次审查会新开一个干净的会话。",
   "Reusing this reviewer session — it keeps its earlier review context. Switching the provider starts a new reviewer instead.":
-    "正在复用这个审查者会话，它会保留之前的审查上下文。换提供方则会改为新开一个审查者。",
+    "正在复用这个审查者会话，它会保留之前的审查上下文。换 agent 则会改为新开一个审查者。",
   "The reviewer and the author iterate until the reviewer approves or the rounds run out (then it's handed back to you). The author session must be able to edit without approval prompts.":
     "审查者和作者会反复迭代，直到审查者批准或轮数用完（之后交回给你）。作者会话必须能在不弹出审批的情况下编辑。",
   "Use the author's last message (faster)": "用作者的最后一条消息（更快）",
@@ -309,7 +309,7 @@ export default {
   "A single review": "只审查一次",
   "Current": "当前",
   "Couldn't load the reviewer models — the review will use the provider default. ":
-    "无法加载审查者模型，审查会使用提供方的默认模型。",
+    "无法加载审查者模型，审查会使用 agent 的默认模型。",
   "Retry": "重试",
   "Loading reviewer models…": "正在加载审查者模型…",
   "Reopened": "已重新打开",
@@ -351,10 +351,10 @@ export default {
   "Run Code Flow": "运行 Code Flow",
   "Task": "任务",
   "Implement the change, update tests, and keep the diff focused.": "实现改动、更新测试，并让改动保持聚焦。",
-  "Reviewer provider": "审查者提供方",
-  "Select a provider…": "选择提供方…",
+  "Reviewer provider": "审查用的 agent",
+  "Select a provider…": "选择 agent…",
   "Reviewer model (optional)": "审查者模型（可选）",
-  "Provider default": "提供方默认",
+  "Provider default": "Agent 默认",
   "Couldn't load reviewer models. ": "无法加载审查者模型。",
   "Reviewer instructions (optional)": "给审查者的说明（可选）",
   "e.g. focus on regressions, tests, and scope creep": "例如：关注回归、测试和范围蔓延",

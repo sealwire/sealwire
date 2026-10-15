@@ -123,7 +123,7 @@ test("the remote Settings tabs and device page read in Chinese", () => {
   );
   try {
     assert.equal(view.host.querySelector(".settings-nav-title").textContent, "设置");
-    assert.deepEqual(texts(view.host, ".settings-nav-label"), ["提供方", "这台设备", "个性化"]);
+    assert.deepEqual(texts(view.host, ".settings-nav-label"), ["Agent", "这台设备", "个性化"]);
     const devicePage = view.host.querySelector('[data-settings-panel="device"]');
     assert.equal(devicePage.querySelector(".settings-page-title").textContent, "这台设备");
     assert.ok(devicePage.textContent.includes("版本"), devicePage.textContent);

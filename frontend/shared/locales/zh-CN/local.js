@@ -67,7 +67,7 @@ export default {
   "Workspace access": "工作区访问",
   "{count} configured": "已设置 {count} 个",
   "Unrestricted": "不限制",
-  "Provider": "提供方",
+  "Provider": "Agent",
   "Unknown": "未知",
   "unknown": "未知",
   "Model": "模型",
@@ -113,7 +113,7 @@ export default {
   "Remove {count} old devices from the list? None of them can connect without pairing again.":
     "从列表中移除 {count} 台旧设备？它们都必须重新配对才能连接。",
 
-  "Providers": "提供方",
+  "Providers": "Agent",
   "{count} waiting": "{count} 个待处理",
   "{count} root": "{count} 个文件夹",
   "{count} roots": "{count} 个文件夹",
@@ -163,7 +163,7 @@ export default {
   "Loading this saved session's conversation…": "正在加载这个已保存会话的对话…",
   "Welcome back": "欢迎回来",
   "Continue where you left off, or start something new below.": "从上次停下的地方继续，或者在下面开始新的工作。",
-  "Providers are ready": "提供方已就绪",
+  "Providers are ready": "Agent 已就绪",
   "What would you like to work on? Pick a starting point below, or type your own prompt.":
     "想做点什么？在下面选一个起点，或者自己写一条消息。",
   "Continue \"{name}\"": "继续「{name}」",

@@ -1,5 +1,5 @@
 export default {
-  "Providers": "提供方",
+  "Providers": "Agent",
   "This device": "这台设备",
   "Not paired": "未配对",
   "Re-pair": "需重新配对",
@@ -146,7 +146,7 @@ export default {
   "Security": "安全",
   "Visibility": "可见性",
   "Device": "设备",
-  "Provider": "提供方",
+  "Provider": "Agent",
   "Model": "模型",
   "Effort": "推理强度",
   "Unpaired": "未配对",
