@@ -2,6 +2,7 @@ import { cpSync } from "node:fs";
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildMetaPlugin } from "../scripts/build-meta-plugin.mjs";
 import { highlighterBuildPlugin } from "../scripts/highlighter-build-plugin.mjs";
 
 const mobileDir = fileURLToPath(new URL(".", import.meta.url));
@@ -76,6 +77,7 @@ export default defineConfig({
   publicDir,
   plugins: [
     highlighterBuildPlugin(rootDir),
+    buildMetaPlugin(),
     nativeAppHtmlPlugin(),
     remoteAsIndexPlugin(),
     publicUnderStaticPlugin(publicDir, outDir),

@@ -12,7 +12,7 @@ COPY package.json package-lock.json vite.config.js ./
 # to exist here too. It no-ops outside a Git checkout. Copied file-scoped rather
 # than as the whole scripts/ dir to keep this layer's cache from busting on every
 # unrelated script change.
-COPY scripts/install-git-hooks.mjs scripts/highlighter-build-plugin.mjs scripts/third-party-notices.mjs scripts/third-party-notices-plugin.mjs ./scripts/
+COPY scripts/install-git-hooks.mjs scripts/build-meta-plugin.mjs scripts/highlighter-build-plugin.mjs scripts/third-party-notices.mjs scripts/third-party-notices-plugin.mjs ./scripts/
 COPY scripts/third-party-license-overrides.json ./scripts/
 COPY docs/third-party ./docs/third-party
 COPY frontend ./frontend

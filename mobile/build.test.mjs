@@ -22,3 +22,9 @@ test("every /static/ file the bundled code asks for is in the app", () => {
   const missing = [...referenced].filter((path) => !existsSync(join(www, path)));
   assert.deepEqual(missing, []);
 });
+
+test("the app carries the build metadata its Settings shows", () => {
+  const path = join(www, "build-meta.json");
+  assert.ok(existsSync(path), "no build-meta.json in the app, so Settings says 'build unknown'");
+  assert.match(JSON.parse(readFileSync(path, "utf8")).buildId, /^\d{8}-\d{6}$/);
+});
