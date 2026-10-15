@@ -310,10 +310,9 @@ export function createLifecycleController(ctx) {
     const cwd = String(draft.cwd || "").trim();
 
     if (!cwd) {
-      const error = t("Choose a directory before starting a session.");
-      logLine(error);
+      logLine("Choose a directory before starting a session.");
       focusWorkspaceField();
-      return { ok: false, error };
+      return { ok: false, error: t("Choose a directory before starting a session.") };
     }
     setSelectedCwd(cwd);
     setStartControlsBusy(true);

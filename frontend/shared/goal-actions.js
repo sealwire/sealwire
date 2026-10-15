@@ -39,9 +39,9 @@ export function createGoalActions({
         if (outcome.isError) setGoalError(threadId, outcome.text, generation);
       })
       .catch((error) => {
-        const message = t("Could not reach the relay: {error}", { error: error?.message || error });
-        log(message);
-        setGoalError(threadId, message, generation);
+        const detail = error?.message || error;
+        log(`Could not reach the relay: ${detail}`);
+        setGoalError(threadId, t("Could not reach the relay: {error}", { error: detail }), generation);
       });
   };
   return {
