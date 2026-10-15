@@ -4,6 +4,7 @@ import { ConversationHeadingBody } from "../shared/conversation-header.js";
 export { ConversationComposer as Composer } from "../shared/composer.js";
 export { SessionSettingsFields } from "../shared/session-settings-fields.js";
 import { formatTimestamp, shortId } from "./utils.js";
+import { ScanPairingButton } from "./scan-pairing-button.js";
 import { surfaceText } from "./surface-wording.js";
 
 const h = React.createElement;
@@ -320,7 +321,7 @@ export function RelayDirectoryList({ onSelectRelay, viewModel }) {
   );
 }
 
-export function RelayHomeState({ clientAuth, nicknames, onRenameRelay, onSelectRelay, relayDirectory }) {
+export function RelayHomeState({ clientAuth, nicknames, onRenameRelay, onScanPairingCode, onSelectRelay, relayDirectory }) {
   if (!(relayDirectory || []).length) {
     return h(
       "div",
@@ -333,7 +334,8 @@ export function RelayHomeState({ clientAuth, nicknames, onRenameRelay, onSelectR
         clientAuth
           ? surfaceText("This browser has a client identity but no relay grants yet. Open a new QR code from a local relay to add one here.")
           : surfaceText("Open a pairing QR code from your local relay to add your first remote surface to this browser.")
-      )
+      ),
+      h(ScanPairingButton, { onScanned: onScanPairingCode })
     );
   }
 
@@ -349,7 +351,8 @@ export function RelayHomeState({ clientAuth, nicknames, onRenameRelay, onSelectR
         "p",
         null,
         surfaceText("This browser already has access to one or more relays. Open one below, or pair another from your local machine.")
-      )
+      ),
+      h(ScanPairingButton, { onScanned: onScanPairingCode })
     ),
     h(
       "section",

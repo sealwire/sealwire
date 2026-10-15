@@ -15,3 +15,10 @@ for (const action of ["LaunchAction", "ProfileAction"]) {
     assert.match(body, /<BuildableProductRunnable[\s\S]*?BuildableName = "App\.app"/);
   });
 }
+
+// iOS kills an app that opens the camera without saying why; the simulator has no camera,
+// so only a real phone would show it.
+test("the app says why it uses the camera", () => {
+  const plist = readFileSync(new URL("./ios/App/App/Info.plist", import.meta.url), "utf8");
+  assert.match(plist, /<key>NSCameraUsageDescription<\/key>\s*<string>[^<]+<\/string>/);
+});

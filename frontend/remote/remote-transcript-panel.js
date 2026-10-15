@@ -32,6 +32,7 @@ export function RemoteTranscriptPanel({
   onGoalAction = null,
   reviewJobs = null,
   onAskMessage = null,
+  onScanPairingCode = null,
   onSelectRelay,
   onToggleExpandableBlock,
   onSubmitDecision,
@@ -145,6 +146,7 @@ export function RemoteTranscriptPanel({
         clientAuth: emptyStateModel.clientAuth,
         nicknames: relayNicknames,
         onRenameRelay: saveRelayNickname,
+        onScanPairingCode,
         onSelectRelay,
         relayDirectory: emptyStateModel.relayDirectory,
       });

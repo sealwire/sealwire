@@ -2551,6 +2551,9 @@ function RemoteApp() {
           controlBannerModel,
           currentState,
           emptyStateModel,
+          onScanPairingCode(value) {
+            void handleBeginPairing(value);
+          },
           onSelectRelay(relayId) {
             closeRemoteNavigation();
             void handlers.onSelectRelay(relayId);
@@ -3404,6 +3407,7 @@ function RemoteThreadPanel({
   onComposerDraftChange,
   onComposerEffortChange,
   onComposerModelChange,
+  onScanPairingCode,
   onSelectRelay,
   onSendMessage,
   onStopTurn,
@@ -3507,6 +3511,7 @@ function RemoteThreadPanel({
         onGoalAction,
         reviewJobs,
         onAskMessage: askAboutMessage,
+        onScanPairingCode,
         onSelectRelay,
         onToggleExpandableBlock,
         onToggleTranscriptItem,

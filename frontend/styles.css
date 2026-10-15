@@ -6454,6 +6454,20 @@ textarea.settings-input {
   display: grid;
   gap: 8px;
 }
+.scan-pairing {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+.thread-empty .scan-pairing {
+  justify-items: center;
+  margin-top: 20px;
+}
+.scan-pairing .scan-pairing-error {
+  margin: 0;
+  color: var(--err-fg);
+  font-size: var(--text-sm);
+}
 .settings-label {
   color: var(--text-secondary);
   font-size: var(--text-sm);

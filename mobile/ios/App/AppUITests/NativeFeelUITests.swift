@@ -34,6 +34,19 @@ final class NativeFeelUITests: XCTestCase {
         XCTAssertEqual(editMenu.count, 0, "long-pressing interface text opened the copy menu")
     }
 
+    // The simulator has no camera, so the native scanner's refusal is what proves the
+    // button reached it rather than doing nothing.
+    func testScanButtonReachesTheNativeScanner() throws {
+        try XCTSkipIf(app.webViews.textViews.firstMatch.isEnabled, "a session is open, so neither the pairing screen nor the relay list shows")
+        let scan = app.webViews.buttons["Scan QR code"]
+        XCTAssertTrue(scan.waitForExistence(timeout: 5), "the pairing screen should offer a scan in the app")
+        scan.tap()
+        XCTAssertTrue(
+            app.webViews.staticTexts["This device has no camera."].waitForExistence(timeout: 5),
+            "tapping Scan QR code never reached the native scanner"
+        )
+    }
+
     private var statusBarBottom: CGFloat {
         XCUIApplication(bundleIdentifier: "com.apple.springboard").statusBars.firstMatch.frame.maxY
     }

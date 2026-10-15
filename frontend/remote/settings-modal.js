@@ -7,6 +7,7 @@ import { SettingsFooter, SettingsFrame, SettingsPage, SettingsSection } from "..
 import { LogPage } from "../shared/settings-log.js";
 import { ProvidersPage } from "../shared/settings-providers.js";
 import { DeviceMetaPanel } from "./react-renderer.js";
+import { ScanPairingButton } from "./scan-pairing-button.js";
 
 const h = React.createElement;
 
@@ -132,6 +133,7 @@ function DevicePage({ active, device }) {
           rows: 3,
           value: device.pairingInputValue,
         }),
+        h(ScanPairingButton, { onScanned: device.onBeginPairing }),
         h("label", { className: "settings-label", htmlFor: "device-label-input" }, "Name this device"),
         h(
           "div",
