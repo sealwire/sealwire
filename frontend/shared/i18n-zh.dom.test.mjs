@@ -131,3 +131,15 @@ test("the remote Settings tabs and device page read in Chinese", () => {
     view.cleanup();
   }
 });
+
+test("the phone's agents pill says in Chinese what is going on", async () => {
+  const { ReviewerChip } = await import("../local/workspace-diff.js");
+  const state = { status: "loaded", data: null, review: { reviewJobs: [{ id: "r1", status: "blocked" }], blocked: true } };
+  const store = { getState: () => state, subscribe: () => () => {} };
+  const view = render(h(ReviewerChip, { store }));
+  try {
+    assert.equal(view.host.querySelector(".workspace-diff-chip-label").textContent, "审查受阻");
+  } finally {
+    view.cleanup();
+  }
+});

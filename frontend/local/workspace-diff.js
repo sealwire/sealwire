@@ -948,6 +948,16 @@ const GOAL_CHIP_TITLE = {
   cancelled: t("The goal was stopped — tap to pick it up"),
 };
 
+const GOAL_CHIP_LABEL = {
+  active: t("Goal in progress"),
+  awaiting_user: t("Goal needs you"),
+  blocked: t("Goal needs you"),
+  out_of_turns: t("Goal needs you"),
+  interrupted: t("Goal needs you"),
+  complete_claimed: t("Goal done?"),
+  cancelled: t("Goal stopped"),
+};
+
 // A dedicated, self-describing "Reviewer" pill for mobile (the desktop rail has
 // the tab instead). It surfaces whenever there's a review to see OR one can be
 // started, and tapping it opens the right panel straight on the Reviewer tab.
@@ -995,6 +1005,23 @@ export function ReviewerChip({ store, onTap }) {
     : active || activeWorkflow
     ? t("Review workflow in progress — tap to view")
     : t("Review complete — tap to view findings");
+  // A phone never shows that title, so the pill's own text names the loudest thing, in the same order.
+  const reviewRunning = reviewJobs.some((job) => !TERMINAL_REVIEW.has(job.status)) || activeWorkflow;
+  const label = goal
+    ? GOAL_CHIP_LABEL[goal.status] || t("Goal")
+    : !hasReviews
+    ? t("Reviewed session")
+    : blocked
+    ? t("Review blocked")
+    : reviewRunning
+    ? t("Reviewing")
+    : asks.some((ask) => ask.status === "working")
+    ? t("Waiting for an answer")
+    : reviewJobs.length > 0 || workflowRuns.length > 0
+    ? t("Review done")
+    : asks.some((ask) => ask.status === "done")
+    ? t("Answered")
+    : t("No answer");
   return h(
     "button",
     {
@@ -1004,9 +1031,7 @@ export function ReviewerChip({ store, onTap }) {
       title,
     },
     h("span", { className: "reviewer-chip-icon", "aria-hidden": "true" }, "🔍"),
-    // "Agents", matching the desktop tab: the panel behind this pill stopped being about
-    // reviews alone once it grew the goal and the asks. Class names stay as styling hooks.
-    h("span", { className: "workspace-diff-chip-label" }, t("Agents")),
+    h("span", { className: "workspace-diff-chip-label" }, label),
     // Running borrows the sidebar's working-session dot; a "•" glyph was too small to see.
     running
       ? h("span", { className: "conversation-activity-dot", "aria-hidden": "true" })

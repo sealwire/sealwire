@@ -142,13 +142,13 @@ test("ReviewerChip stays hidden when there is no review (idle), regardless of ca
   assert.equal(idle, "");
 });
 
-test("a reviewer's mobile Agents entry opens its source without claiming the review is complete", () => {
+test("a reviewer's mobile pill opens its source without claiming the review is complete", () => {
   const store = makeStore({
     review: { reviewedSession: { threadId: "author", title: "Fix the retry loop" } },
   });
   const html = renderToStaticMarkup(h(ReviewerChip, { store }));
   assert.match(html, /reviewer-chip/);
-  assert.match(html, />Agents</);
+  assert.match(html, />Reviewed session</);
   assert.match(html, /Tap to see the reviewed session/);
   assert.doesNotMatch(html, /is-done|✓|Review complete/);
 });
@@ -162,7 +162,7 @@ test("ReviewerChip is a labeled pill that surfaces review status", () => {
     })
   );
   assert.match(done, /reviewer-chip/);
-  assert.match(done, />Agents</);
+  assert.match(done, />Review done</);
   assert.match(done, /is-done/);
   assert.match(done, /✓/);
 
@@ -173,6 +173,7 @@ test("ReviewerChip is a labeled pill that surfaces review status", () => {
       }),
     })
   );
+  assert.match(blocked, />Review blocked</);
   assert.match(blocked, /is-blocked/);
   assert.match(blocked, /⚠/);
 });
@@ -186,7 +187,7 @@ test("ReviewerChip surfaces a running review with a badge", () => {
     })
   );
   assert.match(html, /reviewer-chip/);
-  assert.match(html, />Agents</);
+  assert.match(html, />Reviewing</);
   assert.match(html, /is-active/);
   // The same dot as a working session in the sidebar, not a "•" glyph too small to see.
   assert.match(html, /class="conversation-activity-dot"/);
@@ -1053,6 +1054,7 @@ test("ReviewerChip surfaces a running goal, and an ask, with no review in sight"
     })
   );
   assert.match(goal, /reviewer-chip/);
+  assert.match(goal, />Goal in progress</);
   assert.match(goal, /is-active/);
 
   const ask = renderToStaticMarkup(
@@ -1068,6 +1070,7 @@ test("ReviewerChip surfaces a running goal, and an ask, with no review in sight"
     })
   );
   assert.match(ask, /reviewer-chip/);
+  assert.match(ask, />Waiting for an answer</);
   assert.match(ask, /is-active/);
 
   // A goal that has stopped is still worth a way in — it is how you press "keep going".
@@ -1084,7 +1087,36 @@ test("ReviewerChip surfaces a running goal, and an ask, with no review in sight"
     })
   );
   assert.match(settled, /reviewer-chip/);
+  assert.match(settled, />Goal done\?</);
   assert.match(settled, /is-done/);
+});
+
+// A phone never shows the pill's title, so its text has to say what is going on.
+test("ReviewerChip names a goal that needs you, and a question that came back", () => {
+  const needsYou = renderToStaticMarkup(
+    h(ReviewerChip, {
+      store: makeStore({
+        review: {
+          reviewJobs: [],
+          goal: { objective: "Ship it", status: "awaiting_user", turns: 3, max_turns: 20 },
+          canRequest: false,
+          blocked: false,
+        },
+      }),
+    })
+  );
+  assert.match(needsYou, />Goal needs you</);
+  assert.match(needsYou, /is-blocked/);
+
+  const answered = renderToStaticMarkup(
+    h(ReviewerChip, {
+      store: makeStore({
+        review: { reviewJobs: [], asks: [{ id: "a1", status: "done" }], canRequest: false, blocked: false },
+      }),
+    })
+  );
+  assert.match(answered, />Answered</);
+  assert.match(answered, /is-done/);
 });
 
 test("a long goal objective is clamped on the Agents card, and can be expanded", () => {

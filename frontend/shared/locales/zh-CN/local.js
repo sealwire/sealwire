@@ -1,4 +1,11 @@
 export default {
+  "Goal in progress": "目标进行中",
+  "Goal done?": "目标完成了？",
+  "Goal stopped": "目标已停止",
+  "Reviewed session": "被审查的会话",
+  "Waiting for an answer": "等待回答",
+  "Review done": "审查完成",
+  "No answer": "没有回答",
   "Primary": "主导航",
   "Local relay · Live": "本机 relay · 实时",
   "Local relay · Polling": "本机 relay · 轮询",
