@@ -38,6 +38,21 @@ tool, and the other agent answers with `report_back`. See [below](#mcp).
 Your agent doesn't stop to wait: it can keep working while the other agent
 does.
 
+## Use it for a review
+
+`/delegate` works for a review too:
+
+```text
+/delegate claude  review this round
+```
+
+That one line is enough: your agent writes the brief, so it tells the reviewer
+what this round changed and why. Next round, pick the same reviewer with `@`
+and it remembers what it already flagged.
+
+Unlike [`/review`](review.md), a delegated agent isn't read-only and can edit
+files. Add "don't edit anything" if you only want its findings.
+
 ## Options
 
 - **Provider, model, effort** — who to hand it to. By default a different

@@ -48,6 +48,20 @@ a goal that's stuck or waiting on you starts it up again.
 While the agent is waiting on another agent it brought in with `delegate`, the
 goal pauses instead of nudging it.
 
+## Tip: have another agent review as it goes
+
+You can write how to work into the goal itself. For example, to have Codex
+check each piece:
+
+```text
+/goal  finish the mobile settings page. You do the implementation. After each piece, use Sealwire's delegate tool to have the same Codex agent (gpt-6.1-sol, xhigh) review it without editing anything, and fix what it finds until it approves.
+```
+
+The agent's first `delegate` call starts that Codex agent; later calls go back
+to it, so it remembers what it has already reviewed. The agent can't start
+`/review` on its own, so this is how a goal gets a second opinion while you're
+away. Each review that comes back uses one of the 20 turns.
+
 ## Requirements
 
 - **Full access (YOLO).** A goal runs the session unattended, so the session
