@@ -1,0 +1,15 @@
+export default {
+  "Settings": "设置",
+  "Settings sections": "设置分区",
+  "Close settings": "关闭设置",
+  "Personalization": "个性化",
+  "Theme": "主题",
+  "Color theme": "颜色主题",
+  "Auto": "自动",
+  "Light": "浅色",
+  "Dark": "深色",
+  "Language": "语言",
+  "Interface language": "界面语言",
+  "Log": "日志",
+  "Cancel": "取消",
+};

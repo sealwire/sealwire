@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import zhCN from "./locales/zh-CN.js";
+import zhCN, { parts } from "./locales/zh-CN.js";
 import { appWording } from "../remote/surface-wording.js";
 
 const FRONTEND = fileURLToPath(new URL("..", import.meta.url));
@@ -65,4 +65,19 @@ test("a translation keeps the same {params} as its English", () => {
     .filter(([key, value]) => placeholders(key).join() !== placeholders(value).join())
     .map(([key, value]) => `${key} → ${value}`);
   assert.deepEqual(mismatched, []);
+});
+
+test("an English string reads the same Chinese in every area", () => {
+  const seen = new Map();
+  const conflicts = [];
+  for (const [area, entries] of Object.entries(parts)) {
+    for (const [key, value] of Object.entries(entries)) {
+      const earlier = seen.get(key);
+      if (earlier && earlier.value !== value) {
+        conflicts.push(`${key}: ${earlier.area} says ${earlier.value}, ${area} says ${value}`);
+      }
+      seen.set(key, { area, value });
+    }
+  }
+  assert.deepEqual(conflicts, []);
 });
