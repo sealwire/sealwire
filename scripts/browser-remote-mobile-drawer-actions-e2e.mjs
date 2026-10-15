@@ -243,13 +243,25 @@ async function main() {
     });
     await context.close();
 
-    const settingsRun = await openPage(browser, server, { width: 390, height: 844 }, true);
+    // The narrowest common phone, where the tab names run out of room soonest.
+    const settingsRun = await openPage(browser, server, { width: 320, height: 640 }, true);
     await settingsRun.page.tap("#remote-nav-toggle-button");
     await settingsRun.page.waitForTimeout(500);
     await settingsRun.page.tap("#remote-sidebar-settings");
     await settingsRun.page.waitForFunction(() => Boolean(document.getElementById("remote-settings-modal")?.open), null, {
       timeout: TIMEOUT_MS,
     });
+    // English tab names outgrow a phone: one row that scrolls sideways, not a second line.
+    const tabs = await settingsRun.page.evaluate(() => {
+      const strip = document.querySelector("#remote-settings-modal .settings-nav-items");
+      const items = [...strip.querySelectorAll(".settings-nav-item")];
+      const tops = new Set(items.map((item) => Math.round(item.getBoundingClientRect().top)));
+      strip.scrollLeft = strip.scrollWidth;
+      const last = items.at(-1).getBoundingClientRect();
+      const box = strip.getBoundingClientRect();
+      return { rows: tops.size, lastShown: last.right <= box.right + 1 && last.left >= box.left - 1 };
+    });
+    assert.deepEqual(tabs, { rows: 1, lastShown: true }, `Settings tabs on a phone: ${JSON.stringify(tabs)}`);
     await settingsRun.context.close();
 
     // A desktop sidebar is a column of its own with the list scrolling inside it: unchanged.

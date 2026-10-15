@@ -6761,9 +6761,15 @@ textarea.settings-input {
     margin-bottom: 8px;
     padding: 0 4px;
   }
+  /* One row that scrolls sideways: wrapped, longer English tab names took a second line. */
   .settings-nav-items {
     flex-direction: row;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .settings-nav-items::-webkit-scrollbar {
+    display: none;
   }
   .settings-nav-item {
     width: auto;
