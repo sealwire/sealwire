@@ -5,6 +5,8 @@
 // `shared/workspace-repair.js`, because remote needs exactly the same rules and two
 // copies of them drifted within a day of existing.
 
+import { t } from "../shared/i18n.js";
+
 export {
   normalizeWorkspaceRepairPlan,
   readWorkspaceRepair,
@@ -29,7 +31,7 @@ export async function repairThreadWorkspace(apiFetch, threadId, deviceId) {
   );
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to re-create the workspace");
+    throw new Error(payload?.error?.message || t("Failed to re-create the workspace"));
   }
   return payload.data;
 }

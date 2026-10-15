@@ -6,6 +6,7 @@ import {
   defaultEnterSubmits,
   defaultRemapHomeEnd,
 } from "./composer-keys.js";
+import { t } from "./i18n.js";
 import { ModelPicker } from "./model-picker.js";
 import { modelPickerProps } from "./model-picker-model.js";
 
@@ -103,14 +104,14 @@ export function ConversationComposer({
   rows = 1,
   sendDisabled = false,
   sendButtonId = "remote-send-button",
-  sendLabel = "Send",
+  sendLabel = t("Send"),
   sendPending = false,
   // The "not sent" slot, same two ways in as the error line above it.
   heldId = null,
   heldMessage = "",
   textareaRef = null,
   stopButtonId = null,
-  stopLabel = "Stop",
+  stopLabel = t("Stop"),
   stopPending = false,
   stopVisible = false,
 }) {
@@ -190,7 +191,7 @@ export function ConversationComposer({
             role: "status",
             hidden: !heldMessage,
           },
-          h("span", { className: "composer-held-label" }, "Not sent"),
+          h("span", { className: "composer-held-label" }, t("Not sent")),
           h("span", { className: "composer-held-text" }, heldMessage || null)
         )
       : null;
@@ -229,7 +230,7 @@ export function ConversationComposer({
           type: "submit",
         },
         sendPending
-          ? "Sending..."
+          ? t("Sending...")
           : [
               h("span", {
                 key: "icon",
@@ -252,7 +253,7 @@ export function ConversationComposer({
               onClick: onStop && !stopPending ? () => onStop() : undefined,
               type: "button",
             },
-            stopPending ? "Stopping..." : stopLabel
+            stopPending ? t("Stopping...") : stopLabel
           )
         : null
     )

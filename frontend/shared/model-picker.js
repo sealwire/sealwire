@@ -4,6 +4,7 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { MenuGlyph, highlightMatch, moveMenuFocus } from "./context-menu-react.js";
+import { t } from "./i18n.js";
 import { placeFlyout } from "./context-menu-position.js";
 import { labelUnderHeading, modelSections, searchModelOptions } from "./model-picker-model.js";
 import { providerMarkSlot } from "./provider-mark.js";
@@ -91,7 +92,7 @@ function ModelList({ group, otherOpen, onChoose, onToggleOther }) {
   if (group.empty) {
     // A note beside the choosable row, not a replacement for it.
     rows.push(
-      h("p", { className: "context-menu-note", key: "empty" }, "Catalogue unavailable — the relay will pick")
+      h("p", { className: "context-menu-note", key: "empty" }, t("Catalogue unavailable — the relay will pick"))
     );
   }
   sections.forEach((section, index) => {
@@ -126,7 +127,7 @@ function ModelList({ group, otherOpen, onChoose, onToggleOther }) {
           type: "button",
         },
         h(MenuGlyph, { className: "context-menu-lead", svg: "" }),
-        h("span", { className: "context-menu-label" }, "Other models"),
+        h("span", { className: "context-menu-label" }, t("Other models")),
         h("span", { className: "context-menu-hint" }, String(other.length)),
         h(MenuGlyph, { className: "context-menu-chevron model-picker-other-caret", svg: CHEVRON_DOWN_SVG })
       )
@@ -141,7 +142,7 @@ function ModelList({ group, otherOpen, onChoose, onToggleOther }) {
 }
 
 export function ModelPicker({
-  ariaLabel = "Model",
+  ariaLabel = t("Model"),
   className = "",
   disabled = false,
   // From buildModelPickerGroups. A group with `direct: true` is one row chosen at
@@ -513,13 +514,13 @@ export function ModelPicker({
       { className: "context-menu-filter", key: "filter" },
       h(MenuGlyph, { svg: SEARCH_SVG }),
       h("input", {
-        "aria-label": "Search models or providers",
+        "aria-label": t("Search models or providers"),
         autoComplete: "off",
         onChange: (event) => {
           setQuery(event.target.value);
           requestFocus("search");
         },
-        placeholder: "Search models or providers",
+        placeholder: t("Search models or providers"),
         ref: searchRef,
         spellCheck: false,
         type: "text",
@@ -541,7 +542,7 @@ export function ModelPicker({
               query,
             })
           )
-        : h("p", { className: "context-menu-note", key: "none" }, "No models match"),
+        : h("p", { className: "context-menu-note", key: "none" }, t("No models match")),
     ];
   } else if (single && activeGroup) {
     firstLevel = [
@@ -628,7 +629,7 @@ export function ModelPicker({
         ref: triggerRef,
         type: "button",
       },
-      h("span", { className: "sr-only" }, `${ariaLabel}: `),
+      h("span", { className: "sr-only" }, t("{label}: ", { label: ariaLabel })),
       providerMarkSlot(provider, { className: "model-picker-trigger-mark" }),
       h("span", { className: "setting-pill-value" }, value),
       tag ? h("span", { className: "setting-pill-tag" }, tag) : null,
@@ -669,7 +670,7 @@ export function ModelPicker({
           ? h(
               "div",
               {
-                "aria-label": `${activeGroup.label} models`,
+                "aria-label": t("{provider} models", { provider: activeGroup.label }),
                 className: "context-menu context-menu-submenu model-picker-flyout",
                 "data-provider": activeGroup.provider,
                 key: activeGroup.provider,

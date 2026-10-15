@@ -1,3 +1,5 @@
+import { t } from "./i18n.js";
+
 const PROVIDER_LABELS = {
   pi: "Pi",
   claude_code: "Claude",
@@ -23,7 +25,7 @@ export function providerLabel(provider) {
 export function selectModelBadge({ provider, model, reasoningEffort } = {}) {
   const name = providerLabel(provider);
   const detail = name && model ? `${name} · ${model}` : name;
-  const title = detail && reasoningEffort ? `${detail} · effort ${reasoningEffort}` : detail;
+  const title = detail && reasoningEffort ? t("{detail} · effort {effort}", { detail, effort: reasoningEffort }) : detail;
   return { show: Boolean(name), text: name, title };
 }
 

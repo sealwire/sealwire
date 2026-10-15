@@ -3,6 +3,7 @@
 import React from "react";
 
 import { clockTime, OpenThreadLink, useCardBody, useFold } from "./card-parts.js";
+import { t } from "./i18n.js";
 import { renderMarkdown } from "./markdown.js";
 import { providerLabel } from "./provider-labels.js";
 import { FORK_SVG } from "../svg.js";
@@ -13,7 +14,7 @@ const h = React.createElement;
 export const FORK_DIVIDER_KIND = "fork_divider";
 
 function sourceAgent(fork) {
-  return providerLabel(fork.source_provider) || "another agent";
+  return providerLabel(fork.source_provider) || t("another agent");
 }
 
 function forkIcon(className) {
@@ -24,10 +25,6 @@ function forkIcon(className) {
   });
 }
 
-function plural(count, one, many = `${one}s`) {
-  return `${count} ${count === 1 ? one : many}`;
-}
-
 /** The "Carried over" line, or null for a branch that carried nothing. */
 export function carriedText(carried) {
   const { total = 0, full = 0, condensed = 0, dropped = 0 } = carried || {};
@@ -35,16 +32,27 @@ export function carriedText(carried) {
     return null;
   }
   if (full === total) {
-    return total === 1 ? "The one step, as written." : `All ${total} steps, as written.`;
+    return total === 1 ? t("The one step, as written.") : t("All {count} steps, as written.", { count: total });
   }
-  const parts = [`the last ${full} as written`];
-  if (condensed) {
-    parts.push(`the ${condensed} before ${condensed === 1 ? "it" : "them"} cut to a line each`);
+  const params = {
+    steps: total === 1 ? t("{count} step", { count: total }) : t("{count} steps", { count: total }),
+    full,
+    condensed,
+    dropped,
+  };
+  if (!condensed) {
+    return dropped
+      ? t("{steps} — the last {full} as written, the oldest {dropped} left out to fit.", params)
+      : t("{steps} — the last {full} as written.", params);
   }
-  if (dropped) {
-    parts.push(`the oldest ${dropped} left out to fit`);
+  if (condensed === 1) {
+    return dropped
+      ? t("{steps} — the last {full} as written, the {condensed} before it cut to a line each, the oldest {dropped} left out to fit.", params)
+      : t("{steps} — the last {full} as written, the {condensed} before it cut to a line each.", params);
   }
-  return `${plural(total, "step")} — ${parts.join(", ")}.`;
+  return dropped
+    ? t("{steps} — the last {full} as written, the {condensed} before them cut to a line each, the oldest {dropped} left out to fit.", params)
+    : t("{steps} — the last {full} as written, the {condensed} before them cut to a line each.", params);
 }
 
 function ForkRow({ label, value, folds = true, body = null, className = "" }) {
@@ -96,8 +104,8 @@ export function ForkBriefEntry({ attrs, entry }) {
         h(
           "div",
           { className: "handover-card-heading" },
-          h("span", { className: "handover-card-kicker" }, `Forked from ${sourceAgent(fork)}`),
-          h("span", { className: "handover-card-title" }, fork.source_title || "Another session")
+          h("span", { className: "handover-card-kicker" }, t("Forked from {agent}", { agent: sourceAgent(fork) })),
+          h("span", { className: "handover-card-title" }, fork.source_title || t("Another session"))
         ),
         fork.created_at ? h("span", { className: "handover-card-time" }, clockTime(fork.created_at)) : null
       ),
@@ -106,12 +114,16 @@ export function ForkBriefEntry({ attrs, entry }) {
         { className: "handover-card-body" },
         point
           ? h(ForkRow, {
-              label: "Branched at",
+              label: t("Branched at"),
               className: "message-body",
               value: h(
                 "p",
                 null,
-                h("span", { className: "fork-card-speaker" }, `${point.speaker === "user" ? "You" : sourceAgent(fork)}:`),
+                h(
+                  "span",
+                  { className: "fork-card-speaker" },
+                  point.speaker === "user" ? t("You:") : t("{agent}:", { agent: sourceAgent(fork) })
+                ),
                 " ",
                 // A quote, so the agent's line breaks would only spend the two folded lines.
                 point.text.replace(/\s+/g, " ")
@@ -120,14 +132,14 @@ export function ForkBriefEntry({ attrs, entry }) {
           : null,
         fork.note
           ? h(ForkRow, {
-              label: "Your note",
+              label: t("Your note"),
               className: "message-body",
               value: renderMarkdown(fork.note),
               body,
             })
           : null,
         carried
-          ? h(ForkRow, { label: "Carried over", className: "fork-card-carried", value: carried, folds: false })
+          ? h(ForkRow, { label: t("Carried over"), className: "fork-card-carried", value: carried, folds: false })
           : null
       ),
       fork.source_thread_id
@@ -135,7 +147,7 @@ export function ForkBriefEntry({ attrs, entry }) {
             "div",
             { className: "handover-card-foot" },
             h("span", { className: "handover-card-spacer" }),
-            h(OpenThreadLink, { threadId: fork.source_thread_id, label: "Source thread" })
+            h(OpenThreadLink, { threadId: fork.source_thread_id, label: t("Source thread") })
           )
         : null
     )
@@ -146,6 +158,7 @@ export function ForkBriefEntry({ attrs, entry }) {
 export function ForkDivider({ entry }) {
   const { fork } = entry;
   const time = clockTime(fork.created_at);
+  const [fromBefore, fromAfter] = t("Forked from {title}").split("{title}");
   return h(
     "div",
     { className: "fork-divider", role: "note", "data-transcript-entry-id": entry.id, "data-fork-id": fork.id },
@@ -155,11 +168,11 @@ export function ForkDivider({ entry }) {
       { className: "fork-divider-label" },
       forkIcon("fork-divider-icon"),
       fork.source_title
-        ? h(React.Fragment, null, "Forked from ", h("span", { className: "fork-divider-title" }, fork.source_title))
-        : "Forked from another session",
+        ? h(React.Fragment, null, fromBefore, h("span", { className: "fork-divider-title" }, fork.source_title), fromAfter)
+        : t("Forked from another session"),
       time ? ` · ${time}` : null
     ),
-    h(OpenThreadLink, { threadId: fork.source_thread_id, label: "Source thread" }),
+    h(OpenThreadLink, { threadId: fork.source_thread_id, label: t("Source thread") }),
     h("span", { className: "fork-divider-line", "aria-hidden": "true" })
   );
 }

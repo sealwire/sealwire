@@ -15,6 +15,7 @@ import {
   useNow,
 } from "./card-parts.js";
 import { briefSummary, parseHandoverSections, SummarySections } from "./handover-card.js";
+import { t } from "./i18n.js";
 import { renderMarkdown } from "./markdown.js";
 import { providerLabel } from "./provider-labels.js";
 import { reviewDuration } from "./review-card.js";
@@ -40,11 +41,11 @@ function agentName(provider, fallback) {
 }
 
 function peerName(ask) {
-  return agentName(ask?.peer_provider, "the other agent");
+  return agentName(ask?.peer_provider, t("the other agent"));
 }
 
 function askerName(ask) {
-  return agentName(ask?.asker_provider, "the agent that asked");
+  return agentName(ask?.asker_provider, t("the agent that asked"));
 }
 
 function capitalize(text) {
@@ -68,7 +69,7 @@ function answerSpan(ask) {
 
 function reason(ask) {
   const text = String(ask?.error || "").trim();
-  return text ? `${capitalize(text).replace(/[.\s]+$/, "")}.` : "It did not answer.";
+  return text ? `${capitalize(text).replace(/[.\s]+$/, "")}.` : t("It did not answer.");
 }
 
 function DelegateCard({ anchorId, tone, icon, kicker, title, time, onFold = null, children, footerStart = null, link = null }) {
@@ -89,7 +90,7 @@ function DelegateCard({ anchorId, tone, icon, kicker, title, time, onFold = null
       onFold
         ? h(
             "button",
-            { type: "button", className: "review-card-fold", "aria-label": "Fold this card", onClick: onFold },
+            { type: "button", className: "review-card-fold", "aria-label": t("Fold this card"), onClick: onFold },
             h(Caret, { open: true })
           )
         : null
@@ -151,7 +152,7 @@ function Cited({ places }) {
   return h(
     "div",
     { className: "delegate-card-cited" },
-    h("span", { className: "delegate-card-cited-label" }, "Cited"),
+    h("span", { className: "delegate-card-cited-label" }, t("Cited")),
     h(
       "span",
       { className: "delegate-card-cited-places" },
@@ -181,7 +182,10 @@ function PeerStatus({ ask }) {
       "span",
       { className: "review-card-next" },
       h(Spinner),
-      `${peer} is working · ${reviewDuration(Math.max(0, now / 1000 - since))}`
+      t("{agent} is working · {duration}", {
+        agent: peer,
+        duration: reviewDuration(Math.max(0, now / 1000 - since)),
+      })
     );
   }
   if (state === "done") {
@@ -189,14 +193,14 @@ function PeerStatus({ ask }) {
       "span",
       { className: "handover-card-status" },
       h("span", { className: "handover-card-dot", "aria-hidden": "true" }),
-      `${peer} answered`
+      t("{agent} answered", { agent: peer })
     );
   }
   return h(
     "span",
     { className: "handover-card-status delegate-status-missing" },
     h("span", { className: "handover-card-dot", "aria-hidden": "true" }),
-    `No answer from ${peer}`
+    t("No answer from {agent}", { agent: peer })
   );
 }
 
@@ -204,13 +208,13 @@ function AskedCard({ ask, brief, collapsed }) {
   const [open, setOpen] = useState(false);
   const detail = useCardBody(brief.rowId, brief.clipped);
   const peer = peerName(ask);
-  const title = ask.title || "A question for another agent";
+  const title = ask.title || t("A question for another agent");
   if (collapsed && !open) {
     return h(Strip, {
       anchorId: `${ask.id}:asked`,
       tone: "info",
       icon: ICONS.asked,
-      label: `Delegated to ${peer}`,
+      label: t("Delegated to {agent}", { agent: peer }),
       title,
       onOpen: () => setOpen(true),
     });
@@ -221,14 +225,14 @@ function AskedCard({ ask, brief, collapsed }) {
       anchorId: `${ask.id}:asked`,
       tone: "info",
       icon: ICONS.asked,
-      kicker: `Delegated to ${peer}`,
+      kicker: t("Delegated to {agent}", { agent: peer }),
       title,
       time: clockTime(ask.sent_at || ask.asked_at),
       onFold: collapsed ? () => setOpen(false) : null,
       footerStart: h(PeerStatus, { ask }),
-      link: h(OpenThreadLink, { threadId: ask.peer_thread_id, label: `${peer} thread` }),
+      link: h(OpenThreadLink, { threadId: ask.peer_thread_id, label: t("{agent} thread", { agent: peer }) }),
     },
-    h(CardText, { text: brief.text, title, moreLabel: "Show the whole question", detail })
+    h(CardText, { text: brief.text, title, moreLabel: t("Show the whole question"), detail })
   );
 }
 
@@ -241,10 +245,10 @@ function MissingCard({ ask }) {
       anchorId: `${ask.id}:answer`,
       tone: "needs-you",
       icon: ICONS.missing,
-      kicker: `No answer from ${peer}`,
-      title: ask.title || "A question for another agent",
+      kicker: t("No answer from {agent}", { agent: peer }),
+      title: ask.title || t("A question for another agent"),
       time: answerSpan(ask),
-      link: h(OpenThreadLink, { threadId: ask.peer_thread_id, label: `${peer} thread` }),
+      link: h(OpenThreadLink, { threadId: ask.peer_thread_id, label: t("{agent} thread", { agent: peer }) }),
     },
     h(
       "div",
@@ -263,14 +267,14 @@ function AnsweredCard({ ask, rowId }) {
       anchorId: `${ask.id}:answer`,
       tone: "pass",
       icon: ICONS.answered,
-      kicker: `${peer} answered`,
-      title: ask.title || "A question for another agent",
+      kicker: t("{agent} answered", { agent: peer }),
+      title: ask.title || t("A question for another agent"),
       time: answerSpan(ask),
-      link: h(OpenThreadLink, { threadId: ask.peer_thread_id, label: `${peer} thread` }),
+      link: h(OpenThreadLink, { threadId: ask.peer_thread_id, label: t("{agent} thread", { agent: peer }) }),
     },
     h(CardText, {
       text: ask.answer,
-      moreLabel: "Show the whole answer",
+      moreLabel: t("Show the whole answer"),
       footer: h(Cited, { places: ask.cited }),
       detail,
     })
@@ -301,7 +305,7 @@ function PreparingLine({ ask, asker }) {
     return h(
       "div",
       { className: "handover-line handover-failed", role: "status" },
-      h("span", { className: "handover-line-label" }, "Delegate did not start"),
+      h("span", { className: "handover-line-label" }, t("Delegate did not start")),
       ask.error ? h("span", { className: "handover-line-detail" }, reason(ask)) : null
     );
   }
@@ -309,11 +313,14 @@ function PreparingLine({ ask, asker }) {
     "div",
     { className: "handover-line delegate-preparing", role: "status" },
     h(Spinner),
-    h("span", { className: "handover-line-label" }, "Preparing brief"),
+    h("span", { className: "handover-line-label" }, t("Preparing brief")),
     h(
       "span",
       { className: "handover-line-detail delegate-preparing-detail" },
-      `${asker} is writing the question for ${ask.peer_provider ? peerName(ask) : "another agent"}`
+      t("{agent} is writing the question for {peer}", {
+        agent: asker,
+        peer: ask.peer_provider ? peerName(ask) : t("another agent"),
+      })
     ),
     ask.asker_thread_id
       ? h(
@@ -324,7 +331,7 @@ function PreparingLine({ ask, asker }) {
             "data-delegate-action": "cancel",
             "data-thread-id": ask.asker_thread_id,
           },
-          "Cancel"
+          t("Cancel")
         )
       : null
   );
@@ -344,7 +351,7 @@ export function DelegateRequestEntry({
 }) {
   const asks = entry.injection.delegate || [];
   const first = asks[0];
-  const asker = agentName(first?.asker_provider || provider, "This session");
+  const asker = agentName(first?.asker_provider || provider, t("This session"));
   const bubble = h(
     "article",
     { ...attrs, className: `${attrs.className} handover-command` },
@@ -416,15 +423,17 @@ export function DelegateTaskEntry({ attrs, entry }) {
         anchorId: `${ask.id}:task`,
         tone: "info",
         icon: ICONS.task,
-        kicker: ask.asker_title ? `Task from ${asker} · ${ask.asker_title}` : `Task from ${asker}`,
-        title: ask.title || "A question from another agent",
+        kicker: ask.asker_title
+          ? t("Task from {agent} · {title}", { agent: asker, title: ask.asker_title })
+          : t("Task from {agent}", { agent: asker }),
+        title: ask.title || t("A question from another agent"),
         time: clockTime(ask.sent_at || ask.asked_at),
-        link: h(OpenThreadLink, { threadId: ask.asker_thread_id, label: "Asker thread" }),
+        link: h(OpenThreadLink, { threadId: ask.asker_thread_id, label: t("Asker thread") }),
       },
       h(CardText, {
         text: briefSummary(entry.text, ask.instruction),
         title: ask.title,
-        moreLabel: "Show the whole task",
+        moreLabel: t("Show the whole task"),
         detail,
       })
     )
@@ -438,7 +447,7 @@ export function DelegateNudgeEntry({ attrs, entry }) {
     "div",
     { ...attrs, className: "delegate-nudge", role: "status" },
     h("span", { className: "delegate-dot", "aria-hidden": "true" }),
-    `Reminded ${agentName(ask?.peer_provider, "the agent")} to report back`
+    t("Reminded {agent} to report back", { agent: agentName(ask?.peer_provider, t("the agent")) })
   );
 }
 
@@ -463,19 +472,19 @@ export function DelegateReportedEntry({ entry, provider = "", providerIcon = "" 
         anchorId: `${ask.id}:reported`,
         tone: "pass",
         icon: ICONS.answered,
-        kicker: `Reported back to ${asker}`,
-        title: ask.title || "A question from another agent",
+        kicker: t("Reported back to {agent}", { agent: asker }),
+        title: ask.title || t("A question from another agent"),
         time: answerSpan(ask),
         footerStart: h(
           "span",
           { className: "review-card-next" },
-          ask.delivered ? "Delivered" : `${capitalize(asker)} gets it when it is free`
+          ask.delivered ? t("Delivered") : t("{agent} gets it when it is free", { agent: capitalize(asker) })
         ),
-        link: h(OpenThreadLink, { threadId: ask.asker_thread_id, label: "Asker thread" }),
+        link: h(OpenThreadLink, { threadId: ask.asker_thread_id, label: t("Asker thread") }),
       },
       h(CardText, {
         text: entry.answer,
-        moreLabel: "Show the whole answer",
+        moreLabel: t("Show the whole answer"),
         footer: h(Cited, { places: entry.cited }),
         detail,
       })

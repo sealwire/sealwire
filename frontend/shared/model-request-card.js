@@ -1,5 +1,7 @@
 import React from "react";
 
+import { t } from "./i18n.js";
+
 const h = React.createElement;
 
 /** Whether an ask is an agent's flagship request still waiting on the user. */
@@ -19,19 +21,29 @@ function preselected(options, requested) {
 
 function decidedLine(request) {
   if (request.decision === "declined") {
-    return `You declined ${request.model}; nothing ran.`;
+    return t("You declined {model}; nothing ran.", { model: request.model });
   }
   if (request.decision !== "allowed" && request.decision !== "switched") return null;
 
   const allowed = request.decision === "allowed";
   const chosen = request.chosen_model || request.model;
   if (request.start_error) {
-    return `You ${allowed ? "allowed" : "picked"} ${chosen}, but it did not start: ${request.start_error}`;
+    const params = { model: chosen, error: request.start_error };
+    return allowed
+      ? t("You allowed {model}, but it did not start: {error}", params)
+      : t("You picked {model}, but it did not start: {error}", params);
   }
   if (request.started_model) {
-    return `Started on ${request.started_model} — ${allowed ? "you allowed it" : `the agent asked for ${request.model}`}.`;
+    return allowed
+      ? t("Started on {model} — you allowed it.", { model: request.started_model })
+      : t("Started on {model} — the agent asked for {requested}.", {
+          model: request.started_model,
+          requested: request.model,
+        });
   }
-  return `Starting on ${chosen === "default" ? "the default model" : chosen}…`;
+  return chosen === "default"
+    ? t("Starting on the default model…")
+    : t("Starting on {model}…", { model: chosen });
 }
 
 // Nothing starts until the user answers. A refused answer shows here: on a phone this
@@ -68,6 +80,10 @@ export function ModelRequestBlock({ askId, request, onDecide = null }) {
   };
   const insteadOptions = options.filter((option) => option.model !== request.model);
   const canDecide = typeof onDecide === "function";
+  const [askedBefore, askedAfter] = t(
+    "The agent asked for {model}, a flagship model ({family}). Nothing has started.",
+    { family: request.family }
+  ).split("{model}");
 
   return h(
     "div",
@@ -79,9 +95,9 @@ export function ModelRequestBlock({ askId, request, onDecide = null }) {
     h(
       "p",
       { className: "reviewer-model-request-copy" },
-      "The agent asked for ",
+      askedBefore,
       h("code", null, request.model),
-      `, a flagship model (${request.family}). Nothing has started.`
+      askedAfter
     ),
     canDecide
       ? h(
@@ -95,7 +111,7 @@ export function ModelRequestBlock({ askId, request, onDecide = null }) {
               onClick: decide("allow"),
               type: "button",
             },
-            `Allow ${request.model}`
+            t("Allow {model}", { model: request.model })
           ),
           h(
             "button",
@@ -105,7 +121,7 @@ export function ModelRequestBlock({ askId, request, onDecide = null }) {
               onClick: decide("decline"),
               type: "button",
             },
-            "Decline"
+            t("Decline")
           )
         )
       : null,
@@ -116,7 +132,7 @@ export function ModelRequestBlock({ askId, request, onDecide = null }) {
           h(
             "label",
             { className: "reviewer-model-request-label" },
-            h("span", null, "Or run it on"),
+            h("span", null, t("Or run it on")),
             h(
               "select",
               {
@@ -129,7 +145,9 @@ export function ModelRequestBlock({ askId, request, onDecide = null }) {
                 h(
                   "option",
                   { key: option.model, value: option.model },
-                  `${option.display_name || option.model}${option.flagship ? " (flagship)" : ""}`
+                  option.flagship
+                    ? t("{model} (flagship)", { model: option.display_name || option.model })
+                    : option.display_name || option.model
                 )
               )
             )
@@ -142,7 +160,7 @@ export function ModelRequestBlock({ askId, request, onDecide = null }) {
               onClick: decide("switch", choice),
               type: "button",
             },
-            "Start with this model"
+            t("Start with this model")
           )
         )
       : null,

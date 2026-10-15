@@ -2,6 +2,9 @@
 // per-turn cost rather than a one-off one. The wall is set where a pasted document
 // stops being a task; the notice below it is the part that actually teaches, since
 // the cost is invisible from the composer.
+
+import { t } from "./i18n.js";
+
 export const MAX_GOAL_OBJECTIVE_CHARS = 8000;
 export const LONG_GOAL_OBJECTIVE_CHARS = 2000;
 
@@ -22,7 +25,11 @@ export function goalObjectiveRefusal(objective) {
   if (count <= MAX_GOAL_OBJECTIVE_CHARS) return null;
   // Says how much to cut, because the draft is kept: the fix is an edit, and
   // "too long" alone leaves the user guessing at a number they cannot see.
-  return `This goal is ${count} characters and ${MAX_GOAL_OBJECTIVE_CHARS} is the most it can be. Trim ${count - MAX_GOAL_OBJECTIVE_CHARS} and send it again.`;
+  return t("This goal is {count} characters and {max} is the most it can be. Trim {over} and send it again.", {
+    count,
+    max: MAX_GOAL_OBJECTIVE_CHARS,
+    over: count - MAX_GOAL_OBJECTIVE_CHARS,
+  });
 }
 
 /**
@@ -38,7 +45,7 @@ export function goalObjectiveLengthNotice(objective) {
   if (!trimmed) return null;
   const count = goalObjectiveCharCount(trimmed);
   if (count <= LONG_GOAL_OBJECTIVE_CHARS) return null;
-  return `${count} characters, re-sent in full every turn.`;
+  return t("{count} characters, re-sent in full every turn.", { count });
 }
 
 /**

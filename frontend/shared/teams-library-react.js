@@ -6,6 +6,7 @@
 
 import React from "react";
 
+import { t } from "./i18n.js";
 import {
   BUILTIN_TEAM_ID,
   listLibraryTeams,
@@ -47,7 +48,7 @@ export function TeamsSidebarList({
     return h(
       "div",
       { className: "task-sidebar task-locked" },
-      h("p", { className: "task-sidebar-empty" }, "In development")
+      h("p", { className: "task-sidebar-empty" }, t("In development"))
     );
   }
   const persistent = (teams || []).filter((team) => team.persistent !== false);
@@ -66,9 +67,9 @@ export function TeamsSidebarList({
           onClick: () => onBackToTasks?.(),
         },
         h(BackGlyph),
-        "Tasks"
+        t("Tasks")
       ),
-      h("h2", { className: "teams-sidebar-title" }, "Teams")
+      h("h2", { className: "teams-sidebar-title" }, t("Teams"))
     ),
     h(
       "button",
@@ -76,16 +77,16 @@ export function TeamsSidebarList({
         type: "button",
         className: "task-sidebar-new is-disabled",
         disabled: true,
-        title: "Configurable teams land with the next milestone",
+        title: t("Configurable teams land with the next milestone"),
       },
       h("span", { className: "task-sidebar-new-plus" }, "+"),
-      "New team"
+      t("New team")
     ),
     persistent.length
       ? h(
           "section",
-          { className: "task-sidebar-group", "aria-label": "Persistent" },
-          h("h3", { className: "task-sidebar-group-label" }, "Persistent"),
+          { className: "task-sidebar-group", "aria-label": t("Persistent") },
+          h("h3", { className: "task-sidebar-group-label" }, t("Persistent")),
           h(
             "div",
             { className: "task-sidebar-rows" },
@@ -103,8 +104,8 @@ export function TeamsSidebarList({
     temporary.length
       ? h(
           "section",
-          { className: "task-sidebar-group", "aria-label": "Temporary" },
-          h("h3", { className: "task-sidebar-group-label" }, "Temporary"),
+          { className: "task-sidebar-group", "aria-label": t("Temporary") },
+          h("h3", { className: "task-sidebar-group-label" }, t("Temporary")),
           h(
             "div",
             { className: "task-sidebar-rows" },
@@ -122,7 +123,7 @@ export function TeamsSidebarList({
     h(
       "p",
       { className: "teams-sidebar-foot" },
-      "Built-in structures are versioned. Running tasks keep the version they started with."
+      t("Built-in structures are versioned. Running tasks keep the version they started with.")
     )
   );
 }
@@ -149,7 +150,7 @@ function TeamSidebarRow({ team, selected, onSelectTeam }) {
 function TeamsOrchestratorPane({ team }) {
   return h(
     "section",
-    { className: "task-orch", "aria-label": "Orchestrator" },
+    { className: "task-orch", "aria-label": t("Orchestrator") },
     h(
       "header",
       { className: "task-orch-header" },
@@ -157,18 +158,18 @@ function TeamsOrchestratorPane({ team }) {
         "div",
         { className: "task-orch-brand" },
         h("span", { className: "task-orch-mark" }, "S"),
-        team ? `Orchestrator · Editing ${team.name}` : "Orchestrator · Teams"
+        team ? t("Orchestrator · Editing {team}", { team: team.name }) : t("Orchestrator · Teams")
       ),
-      h("span", { className: "task-orch-waiting is-quiet" }, "No pending edits")
+      h("span", { className: "task-orch-waiting is-quiet" }, t("No pending edits"))
     ),
     h(
       "div",
       { className: "task-orch-body" },
-      h("h2", { className: "task-welcome-title" }, "Change a team by saying what to change"),
+      h("h2", { className: "task-welcome-title" }, t("Change a team by saying what to change")),
       h(
         "p",
         { className: "task-welcome-lede" },
-        "Mockup 13a: describe a role change, see a prompt diff, apply — only new tasks pick it up. That chat lands here once editable team definitions ship."
+        t("Mockup 13a: describe a role change, see a prompt diff, apply — only new tasks pick it up. That chat lands here once editable team definitions ship.")
       )
     ),
     h(
@@ -177,8 +178,8 @@ function TeamsOrchestratorPane({ team }) {
       h(
         "div",
         { className: "task-orch-chips" },
-        h("span", { className: "task-orch-chip is-disabled" }, "Where did this team fail lately?"),
-        h("span", { className: "task-orch-chip is-disabled" }, "Compare with another team")
+        h("span", { className: "task-orch-chip is-disabled" }, t("Where did this team fail lately?")),
+        h("span", { className: "task-orch-chip is-disabled" }, t("Compare with another team"))
       ),
       h(
         "div",
@@ -187,9 +188,9 @@ function TeamsOrchestratorPane({ team }) {
           // like an input, and it was borrowing styles from a real composer
           // that has since moved onto the shared one.
           className: "task-orch-placeholder",
-          title: "Team editing chat arrives with configurable teams",
+          title: t("Team editing chat arrives with configurable teams"),
         },
-        "Tell me how you want to change this team…"
+        t("Tell me how you want to change this team…")
       )
     )
   );
@@ -199,7 +200,7 @@ function TeamRolePipeline({ team }) {
   const roles = team?.roles || [];
   return h(
     "ol",
-    { className: "team-role-flow", "aria-label": "Role pipeline" },
+    { className: "team-role-flow", "aria-label": t("Role pipeline") },
     ...roles.map((role, index) =>
       h(
         "li",
@@ -233,8 +234,8 @@ export function TeamsDetail({ team }) {
       h(
         "div",
         { className: "task-screen-empty" },
-        h("h3", null, "No team selected"),
-        h("p", null, "Pick one on the left.")
+        h("h3", null, t("No team selected")),
+        h("p", null, t("Pick one on the left."))
       )
     );
   }
@@ -251,9 +252,9 @@ export function TeamsDetail({ team }) {
         h(
           "p",
           { className: "task-screen-subtitle" },
-          team.persistent === false ? "Temporary" : "Persistent",
+          team.persistent === false ? t("Temporary") : t("Persistent"),
           " · ",
-          `${team.roleCount || team.roles?.length || 0} roles`,
+          t("{count} roles", { count: team.roleCount || team.roles?.length || 0 }),
           team.focus ? ` · ${team.focus}` : ""
         )
       )
@@ -265,14 +266,14 @@ export function TeamsDetail({ team }) {
         type: "button",
         className: "task-screen-start is-disabled",
         disabled: true,
-        title: "Adding roles needs configurable teams",
+        title: t("Adding roles needs configurable teams"),
       },
-      "+ Add a role"
+      t("+ Add a role")
     ),
     h(
       "p",
       { className: "task-screen-hint" },
-      "Running tasks keep the version they started with. Edits only affect new work."
+      t("Running tasks keep the version they started with. Edits only affect new work.")
     )
   );
 }
@@ -291,11 +292,11 @@ export function TeamsLibraryScreen({
       h(
         "div",
         { className: "task-locked-notice", role: "status" },
-        h("h2", { className: "task-locked-title" }, "Teams is in development"),
+        h("h2", { className: "task-locked-title" }, t("Teams is in development")),
         h(
           "p",
           { className: "task-locked-lede" },
-          "Configurable teams ship with Tasks behind --beta."
+          t("Configurable teams ship with Tasks behind --beta.")
         )
       )
     );
@@ -315,7 +316,7 @@ export function TeamsLibraryScreen({
     ),
     h(
       "aside",
-      { className: "task-workspace-right", "aria-label": "Team detail" },
+      { className: "task-workspace-right", "aria-label": t("Team detail") },
       h(TeamsDetail, { team })
     )
   );

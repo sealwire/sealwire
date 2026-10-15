@@ -1,4 +1,5 @@
 import React from "react";
+import { t } from "./i18n.js";
 import { SessionSettingsFields } from "./session-settings-fields.js";
 
 const h = React.createElement;
@@ -12,7 +13,7 @@ export function LaunchSettingsModal({ id, model, onFieldChange, title }) {
     h(
       "div",
       { className: "modal-header" },
-      h("h2", null, title || "Launch settings"),
+      h("h2", null, title || t("Launch settings")),
       h("button", {
         className: "header-button close-modal-btn",
         onClick: () => document.getElementById(id)?.close(),
@@ -25,7 +26,7 @@ export function LaunchSettingsModal({ id, model, onFieldChange, title }) {
       h(
         "p",
         { className: "panel-modal-copy" },
-        "Most people can leave these alone. Change them only if you need a different startup behavior."
+        t("Most people can leave these alone. Change them only if you need a different startup behavior.")
       ),
       h(SessionSettingsFields, {
         fields: model.fields,

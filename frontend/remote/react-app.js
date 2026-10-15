@@ -803,7 +803,7 @@ function RemoteApp() {
     projectsLoading: remoteProjects.loading,
   });
   const promptRemoteProjectName = (current = "") =>
-    normalizeProjectName(window.prompt("Project name", current));
+    normalizeProjectName(window.prompt(t("Project name"), current));
   // Straight through the session-view controller, exactly as local's switcher does: each
   // context owns its own workspace and its own remembered focus, so selecting a project
   // has to MOVE the location or the strip would describe a workspace nobody is in. The
@@ -1063,11 +1063,11 @@ function RemoteApp() {
     currentModelValue: remoteUi.composerModel,
     messagePlaceholder: !hasRelay
       ? currentState.relayDirectory?.length
-        ? "Open a relay before sending messages."
-        : surfaceText("Pair this browser before sending messages.")
+        ? t("Open a relay before sending messages.")
+        : t(surfaceText("Pair this browser before sending messages."))
       : hasUsableRelay
-        ? "Start or open a remote session first."
-        : surfaceText("Local credentials are unavailable. Pair this relay again in this browser."),
+        ? t("Start or open a remote session first.")
+        : t(surfaceText("Local credentials are unavailable. Pair this relay again in this browser.")),
     sendPending: composerSendPending,
   };
   const transcriptDetailEntries = buildExpandedTranscriptDetailEntries(currentState, {
@@ -1877,7 +1877,7 @@ function RemoteApp() {
           ...defaultForkFields({ thread, models: [], session }),
           upToItemId,
         },
-        error: "Cannot fork a session while a turn is in progress.",
+        error: t("Cannot fork a session while a turn is in progress."),
       });
       return;
     }
@@ -1989,7 +1989,7 @@ function RemoteApp() {
         // different intents and the action branch relies on telling them apart.
         promptRename: () => {
           const answer = window.prompt(
-            "Rename this session.\n\nLeave it blank to go back to the name the agent picked.",
+            t("Rename this session.\n\nLeave it blank to go back to the name the agent picked."),
             threadNameDraft(sheetThread, shortId(threadId))
           );
           return answer === null ? undefined : normalizeThreadName(answer);
@@ -2032,7 +2032,7 @@ function RemoteApp() {
         return true;
       }
       remoteUiStore.getState().setForkDialog({
-        error: result?.error || "Failed to fork session.",
+        error: result?.error || t("Failed to fork session."),
       });
       return false;
     } finally {
@@ -2278,7 +2278,7 @@ function RemoteApp() {
       dispatchTranscriptUi({
         type: "askUser/submitError",
         requestId,
-        message: error?.message || "Could not send your answer.",
+        message: error?.message || t("Could not send your answer."),
       });
     }
   }, []);
@@ -2500,7 +2500,7 @@ function RemoteApp() {
                 });
               },
               onRename: handleRenameThreadInline,
-              emptyMessage: "No open sessions. Pick one from the sidebar.",
+              emptyMessage: t("No open sessions. Pick one from the sidebar."),
             })
           : null,
         h(RemoteThreadPanel, {
@@ -2751,7 +2751,7 @@ function RemoteApp() {
     h(ThreadActionsSheet, {
       open: actionsSheetOpen,
       sections: actionsSheetSections,
-      threadTitle: actionsSheetThread?.name || "Session",
+      threadTitle: actionsSheetThread?.name || t("Session"),
       onClose: closeActionsSheet,
       onSelect: (item) => void handleThreadSheetAction(item),
     }),
@@ -2793,7 +2793,7 @@ function RemoteApp() {
         remoteUiStore.getState().setRemoteInfoModalOpen(false);
       },
       sessionMetaModel,
-      sessionPath: headerModel.sessionPath || "No workspace path yet.",
+      sessionPath: headerModel.sessionPath || t("No workspace path yet."),
       pushModel: {
         supported: remoteUi.pushSupported,
         permission: remoteUi.pushPermission,
@@ -3059,7 +3059,7 @@ function RemoteSidebar({
     h(
       "div",
       { className: "sidebar-row" },
-      h("p", { className: "sidebar-caption" }, "Device Pairing"),
+      h("p", { className: "sidebar-caption" }, t("Device Pairing")),
       h(
         "button",
         {
@@ -3068,7 +3068,7 @@ function RemoteSidebar({
           onClick: onOpenPairing,
           type: "button",
         },
-        "Manage"
+        t("Manage")
       )
     ),
     h(StartSessionSplitButton, {
@@ -3097,7 +3097,7 @@ function RemoteSidebar({
         h("p", { className: "sidebar-caption", id: "remote-relays-count" }, relayDirectoryModel.countLabel),
         h(RefreshButton, {
           id: "remote-relays-refresh-button",
-          label: "Refresh relays",
+          label: t("Refresh relays"),
           onClick: onRefreshRelayDirectory,
         })
       ),
@@ -3162,7 +3162,7 @@ function RemoteSidebar({
         h("p", { className: "sidebar-caption", id: "remote-threads-count" }, listChrome.countLabel),
         h(RefreshButton, {
           id: "remote-threads-refresh-button",
-          label: "Refresh sessions",
+          label: t("Refresh sessions"),
           disabled: threadsModel.loading || !hasUsableRelay,
           onClick: () => onRefreshThreads(),
         })
@@ -3229,8 +3229,8 @@ function RemoteSidebar({
           id: "remote-sidebar-settings",
           onClick: onOpenSettings,
           type: "button",
-          title: "Settings",
-          "aria-label": "Settings",
+          title: t("Settings"),
+          "aria-label": t("Settings"),
         },
         h("span", {
           className: "inline-icon",
@@ -3255,14 +3255,14 @@ function PinnedProjectChip({ name, onClear, summary }) {
       ? h(
           "span",
           { className: "project-sidebar-badge is-working" },
-          `${summary.working} working`
+          t("{count} working", { count: summary.working })
         )
       : null,
     summary?.needsInput
       ? h(
           "span",
           { className: "project-sidebar-badge is-attention" },
-          `${summary.needsInput} needs input`
+          t("{count} needs input", { count: summary.needsInput })
         )
       : null,
     h(
@@ -3271,8 +3271,8 @@ function PinnedProjectChip({ name, onClear, summary }) {
         type: "button",
         className: "pinned-project-chip-clear",
         id: "remote-pinned-project-clear",
-        title: "Back to the default workspace",
-        "aria-label": "Back to the default workspace",
+        title: t("Back to the default workspace"),
+        "aria-label": t("Back to the default workspace"),
         onClick: onClear,
       },
       "\u00d7"
@@ -3307,7 +3307,7 @@ function RemoteHeader({
 }) {
   const usesDrawer = currentState.remoteNavMode === "drawer";
   const navOpen = currentState.remoteNavOpen;
-  const navLabel = navOpen ? "Close sidebar" : "Open sidebar";
+  const navLabel = navOpen ? t("Close sidebar") : t("Open sidebar");
   const {
     label: switcherLabel,
     labelTooltip: switcherTooltip,
@@ -3357,13 +3357,13 @@ function RemoteHeader({
         h("span", null),
         h("span", null)
       ),
-      h("span", { className: "sr-only" }, "Toggle sidebar")
+      h("span", { className: "sr-only" }, t("Toggle sidebar"))
     ),
     // The back button goes somewhere different here than on local — the relay list, not
     // the console — which is why the label travels with the handler.
     backButtonId: "remote-home-button",
     backHidden: deviceChromeModel.homeButton.hidden,
-    backLabel: "All relays",
+    backLabel: t("All relays"),
     onBack: onReturnHome,
     composeButtonId: "remote-new-session-compose-button",
     onCompose: onOpenStartSession,
@@ -3378,10 +3378,10 @@ function RemoteHeader({
     actions: h(
       "button",
       {
-        "aria-label": "Toggle side panel",
+        "aria-label": t("Toggle side panel"),
         className: "header-button header-panel-toggle header-panel-toggle-right",
         id: "remote-toggle-right-panel",
-        title: "Toggle side panel (\u2325\u2318B)",
+        title: t("Toggle side panel (⌥⌘B)"),
         type: "button",
       },
       h(ToggleRightPanelIcon)
@@ -3587,7 +3587,7 @@ function RemoteThreadPanel({
             // narrow composer (the desktop nudge keeps it — it has the room).
             h(ReviewLauncher, {
               panelId: "review-panel-remote-nudge",
-              label: "Request reviewer",
+              label: t("Request reviewer"),
               providerOptions: reviewNudgeModel.reviewModel?.providerOptions || [],
               models: reviewNudgeModel.reviewModel?.models || [],
               defaultProvider: reviewNudgeModel.reviewModel?.defaultProvider || "",
@@ -3685,7 +3685,7 @@ function RemoteInfoModal({
     h(
       "div",
       { className: "modal-header" },
-      h("h2", null, "Session details"),
+      h("h2", null, t("Session details")),
       h(
         "button",
         {
@@ -3703,7 +3703,7 @@ function RemoteInfoModal({
       h(
         "section",
         { className: "details-section" },
-        h("h3", { className: "details-heading" }, "Workspace"),
+        h("h3", { className: "details-heading" }, t("Workspace")),
         h("p", { className: "details-path", id: "remote-session-path" }, sessionPath)
       ),
       h(RemoteNotificationsSection, {
@@ -3712,7 +3712,7 @@ function RemoteInfoModal({
       h(
         "section",
         { className: "details-section" },
-        h("h3", { className: "details-heading" }, "Session"),
+        h("h3", { className: "details-heading" }, t("Session")),
         h(
           "section",
           { className: "session-meta", id: "remote-session-meta" },
@@ -3731,7 +3731,7 @@ function RemoteNotificationsSection({ pushModel }) {
   return h(
     "section",
     { className: "details-section" },
-    h("h3", { className: "details-heading" }, "Notifications"),
+    h("h3", { className: "details-heading" }, t("Notifications")),
     hint ? h("p", { className: "details-hint", id: "remote-push-status" }, hint) : null
   );
 }
@@ -3759,7 +3759,7 @@ function ThreadActionsSheet({ onClose, onSelect, open, sections, threadTitle }) 
     h(
       "div",
       { className: "modal-header" },
-      h("h2", null, threadTitle || "Session"),
+      h("h2", null, threadTitle || t("Session")),
       h(
         "button",
         {
@@ -3767,7 +3767,7 @@ function ThreadActionsSheet({ onClose, onSelect, open, sections, threadTitle }) 
           className: "header-button close-modal-btn",
           id: "close-thread-actions-sheet",
           onClick: onClose,
-          "aria-label": "Close",
+          "aria-label": t("Close"),
         },
         "×"
       )
@@ -3780,7 +3780,7 @@ function ThreadActionsSheet({ onClose, onSelect, open, sections, threadTitle }) 
       // refreshed). Say so rather than leave a blank sheet on screen.
       sections.length
         ? null
-        : h("p", { className: "thread-actions-empty" }, "This session is no longer available."),
+        : h("p", { className: "thread-actions-empty" }, t("This session is no longer available.")),
       ...sections.map((section) =>
         h(
           "div",
@@ -3803,7 +3803,7 @@ function ThreadActionsSheet({ onClose, onSelect, open, sections, threadTitle }) 
               },
               h("span", { className: "thread-actions-item-label" }, item.label),
               item.isCurrent
-                ? h("span", { className: "thread-actions-item-check", "aria-label": "Current project" }, "✓")
+                ? h("span", { className: "thread-actions-item-check", "aria-label": t("Current project") }, "✓")
                 : null
             )
           )

@@ -8,6 +8,7 @@ import {
 } from "./scroll-to-bottom-core.js";
 import { getTranscriptScrollController } from "./transcript-scroll-controller.js";
 import { dispatchTranscriptScrollActionEvent } from "./transcript-scroll.js";
+import { t } from "./i18n.js";
 
 const h = React.createElement;
 
@@ -20,7 +21,7 @@ const h = React.createElement;
 // see conversation.css), so the button hovers just above the composer without
 // adding scrollable height. It only appears when the reader has scrolled away
 // from the bottom.
-export function ScrollToBottomButton({ label = "Scroll to latest" }) {
+export function ScrollToBottomButton({ label = t("Scroll to latest") }) {
   const anchorRef = React.useRef(null);
   const buttonRef = React.useRef(null);
   const [visible, setVisible] = React.useState(false);

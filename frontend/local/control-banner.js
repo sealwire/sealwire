@@ -6,6 +6,7 @@
 // renderer only paints what this returns.
 
 import { normalizeWorkspaceRepairPlan } from "../shared/workspace-repair.js";
+import { t } from "../shared/i18n.js";
 
 // Re-exported so this module stays the one import a banner test (or a future surface)
 // needs: the decision and the shape it decides on belong together.
@@ -29,15 +30,15 @@ export function workspaceRepairAction(plan, { pending = false, error = "" } = {}
     return null;
   }
   const idleLabel = plan.kind === "worktree"
-    ? `Re-create worktree on ${plan.branch}`
-    : "Create folder";
+    ? t("Re-create worktree on {branch}", { branch: plan.branch })
+    : t("Create folder");
   return {
     error: error || "",
     kind: plan.kind,
     label: pending
       ? plan.kind === "worktree"
-        ? "Re-creating worktree…"
-        : "Creating folder…"
+        ? t("Re-creating worktree…")
+        : t("Creating folder…")
       : idleLabel,
     pending: Boolean(pending),
     recordedCwd: plan.recordedCwd,
@@ -63,16 +64,18 @@ export function selectControlBannerModel({
   // before it reaches the provider and the repair is the only action that helps.
   const plan = normalizeWorkspaceRepairPlan(workspaceMissing);
   if (plan) {
-    const noun = plan.kind === "worktree" ? "worktree" : "folder";
+    const worktree = plan.kind === "worktree";
     return {
       hidden: false,
-      hint: plan.kind === "worktree"
-        ? `Re-creating it checks ${plan.branch} back out at that path.`
-        : "Re-creating it lets this session run there again.",
+      hint: worktree
+        ? t("Re-creating it checks {branch} back out at that path.", { branch: plan.branch })
+        : t("Re-creating it lets this session run there again."),
       repair: workspaceRepairAction(plan, { error: repairError, pending: repairPending }),
       // Names the directory: the user has just watched sends vanish, and which path
       // is missing is the only fact that explains it.
-      summary: `This session's ${noun} is gone: ${plan.recordedCwd}`,
+      summary: worktree
+        ? t("This session's worktree is gone: {path}", { path: plan.recordedCwd })
+        : t("This session's folder is gone: {path}", { path: plan.recordedCwd }),
       summaryTitle: plan.recordedCwd,
     };
   }
@@ -84,10 +87,10 @@ export function selectControlBannerModel({
   return {
     hidden: false,
     hint: lockedByWorkflow
-      ? "This session is locked by Code Flow; it unlocks when the workflow finishes."
-      : "This session is being reviewed; it unlocks when the review finishes.",
+      ? t("This session is locked by Code Flow; it unlocks when the workflow finishes.")
+      : t("This session is being reviewed; it unlocks when the review finishes."),
     repair: null,
-    summary: lockedByWorkflow ? "Code Flow in progress" : "Review in progress",
+    summary: lockedByWorkflow ? t("Code Flow in progress") : t("Review in progress"),
     summaryTitle: "",
   };
 }

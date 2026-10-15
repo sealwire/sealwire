@@ -8,6 +8,7 @@
 // This module is the pure half: what the sidebar should show given the authoritative
 // groups plus the current search slice. It knows nothing about fetching or the DOM.
 
+import { t } from "./i18n.js";
 import { summarizeThreadGroups } from "./thread-groups.js";
 
 /** The "not searching" slice. Shared so every reset writes the same shape. */
@@ -98,7 +99,7 @@ export function selectThreadListView({ threadGroups = [], search = null, groupBy
       collapseGroups: true,
       groups,
       countLabel: summarizeThreadGroups(groups, { groupBy }),
-      emptyMessage: "Start or open a session to build workspace groups.",
+      emptyMessage: t("Start or open a session to build workspace groups."),
     };
   }
 
@@ -115,8 +116,8 @@ export function selectThreadListView({ threadGroups = [], search = null, groupBy
       // Keep the previous results on screen while a newer query is in flight. Blanking
       // the list on every keystroke makes the sidebar strobe as you type.
       groups,
-      countLabel: "Searching…",
-      emptyMessage: "Searching…",
+      countLabel: t("Searching…"),
+      emptyMessage: t("Searching…"),
     };
   }
 
@@ -126,8 +127,8 @@ export function selectThreadListView({ threadGroups = [], search = null, groupBy
       status: "error",
       collapseGroups: false,
       groups: [],
-      countLabel: "Search failed",
-      emptyMessage: `Search failed: ${search.error}`,
+      countLabel: t("Search failed"),
+      emptyMessage: t("Search failed: {error}", { error: search.error }),
     };
   }
 
@@ -142,10 +143,12 @@ export function selectThreadListView({ threadGroups = [], search = null, groupBy
       status: "partial",
       collapseGroups: false,
       groups,
-      countLabel: matches === 1 ? "1 result · partial" : `${matches} results · partial`,
-      emptyMessage: `Couldn’t search ${names}. ${
-        matches ? "Some sessions may be missing." : "No results from the providers that answered."
-      }`,
+      countLabel: matches === 1
+        ? t("{count} result · partial", { count: matches })
+        : t("{count} results · partial", { count: matches }),
+      emptyMessage: matches
+        ? t("Couldn’t search {names}. Some sessions may be missing.", { names })
+        : t("Couldn’t search {names}. No results from the providers that answered.", { names }),
       incomplete: true,
       unavailableProviders: unreachable,
     };
@@ -156,7 +159,7 @@ export function selectThreadListView({ threadGroups = [], search = null, groupBy
     status: "ok",
     collapseGroups: false,
     groups,
-    countLabel: matches === 1 ? "1 result" : `${matches} results`,
-    emptyMessage: `No sessions match “${query}”.`,
+    countLabel: matches === 1 ? t("{count} result", { count: matches }) : t("{count} results", { count: matches }),
+    emptyMessage: t("No sessions match “{query}”.", { query }),
   };
 }

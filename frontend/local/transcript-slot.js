@@ -1,15 +1,16 @@
 import React from "react";
+import { t } from "../shared/i18n.js";
 
 const h = React.createElement;
 
 export const LOCAL_TRANSCRIPT_FALLBACK = h(
   "div",
   { className: "thread-empty" },
-  h("h2", null, "Relay standing by"),
+  h("h2", null, t("Relay standing by")),
   h(
     "p",
     null,
-    "Load a workspace, then use this console to watch the live session, control state, and trusted devices."
+    t("Load a workspace, then use this console to watch the live session, control state, and trusted devices.")
   )
 );
 

@@ -6,6 +6,8 @@
 // intentionally NO in-app toggle — the browser's own notification permission is
 // the on/off switch, and it persists — so this section is purely informational.
 
+import { t } from "../shared/i18n.js";
+
 /**
  * The gate the auto-enroll effect uses: enroll only when push is usable and the
  * browser permission is granted. "Off" is expressed by denying the browser
@@ -35,17 +37,17 @@ export function remoteNotificationsHint(model = {}) {
   const subscribed = Boolean(model.subscribed);
 
   if (!supported) {
-    return "Requires HTTPS / iOS 16.4+ installed to Home Screen.";
+    return t("Requires HTTPS / iOS 16.4+ installed to Home Screen.");
   }
   if (denied) {
     // The browser permission is the off switch; point the user at it.
-    return "Notifications are blocked in your browser settings.";
+    return t("Notifications are blocked in your browser settings.");
   }
   if (!hasVapidKey) {
-    return "Push isn't available on this relay yet.";
+    return t("Push isn't available on this relay yet.");
   }
   if (subscribed) {
-    return "You'll get push alerts when sessions need input or finish, even when the app is closed.";
+    return t("You'll get push alerts when sessions need input or finish, even when the app is closed.");
   }
-  return "Notifications turn on automatically when you pair this device.";
+  return t("Notifications turn on automatically when you pair this device.");
 }

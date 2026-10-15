@@ -10,11 +10,13 @@
 // risk levels. Nothing on the wire ranks danger, so nothing here should imply
 // a ranking — no ordering, no colour, no "safe"/"dangerous" wording.
 
+import { t } from "./i18n.js";
+
 export const APPROVAL_KIND_LABELS = {
-  command_execution: "Shell command",
-  file_change: "File change",
-  permissions: "Permission grant",
-  plan: "Plan",
+  command_execution: t("Shell command"),
+  file_change: t("File change"),
+  permissions: t("Permission grant"),
+  plan: t("Plan"),
 };
 
 // Unknown kinds fall through to the wire value rather than to a placeholder: a

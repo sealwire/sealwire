@@ -3,6 +3,8 @@
 
 import React from "react";
 
+import { t } from "./i18n.js";
+
 const h = React.createElement;
 
 // Order: "where", then "what", then "how". The old dialogs led with Provider —
@@ -81,7 +83,7 @@ export function SessionDialogShell({
       h(
         "button",
         {
-          "aria-label": "Close",
+          "aria-label": t("Close"),
           className: "session-dialog-close",
           onClick: close,
           type: "button",

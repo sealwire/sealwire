@@ -1,6 +1,7 @@
 // What the approval card and its float bar show, kept pure so it is testable
 // without a DOM. See frontend/approval-card-redesign.test.mjs.
 import { approvalKindLabel } from "./approval-labels.js";
+import { t } from "./i18n.js";
 
 // Past this the summary is a sentence ("Codex wants to run …"), not a tool name.
 const MAX_NAME_CHARS = 24;
@@ -55,7 +56,7 @@ export function approvalFloatName(approval) {
   if (summary && summary.length <= MAX_NAME_CHARS) {
     return summary;
   }
-  return approvalKindLabel(approval?.kind) || "Approval";
+  return approvalKindLabel(approval?.kind) || t("Approval");
 }
 
 export function approvalFloatSubject(approval) {

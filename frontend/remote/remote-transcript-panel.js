@@ -18,6 +18,7 @@ import { useRelayNicknames } from "./use-relay-nicknames.js";
 import { visibleTranscriptEntries } from "../shared/withdrawn-transcript.js";
 import { reviewProgressFor } from "../shared/review-card.js";
 import { reviewActivity } from "../shared/review-state.js";
+import { t } from "../shared/i18n.js";
 
 const h = React.createElement;
 
@@ -139,7 +140,7 @@ export function RemoteTranscriptPanel({
     if (emptyStateModel.showServerDisconnected) {
       body = h(ConversationEmptyState, {
         copy: emptyStateModel.serverDisconnectedCopy,
-        title: "Server disconnected",
+        title: t("Server disconnected"),
       });
     } else if (emptyStateModel.showRelayHome) {
       body = h(RelayHomeState, {
@@ -152,8 +153,8 @@ export function RemoteTranscriptPanel({
       });
     } else {
       body = h(ConversationEmptyState, {
-        copy: "After pairing, this page will stream the live relay transcript through the broker.",
-        title: "No remote session yet",
+        copy: t("After pairing, this page will stream the live relay transcript through the broker."),
+        title: t("No remote session yet"),
       });
     }
   } else {
@@ -163,7 +164,7 @@ export function RemoteTranscriptPanel({
       entries,
       hydrationLoading,
       readyState: {
-        readyCopy: "The remote session is live. Send the first prompt below when you're ready.",
+        readyCopy: t("The remote session is live. Send the first prompt below when you're ready."),
         session,
         shortId,
       },
@@ -265,8 +266,8 @@ export function RemoteTranscriptPanel({
     null,
     session?.active_thread_id && currentState.viewedThreadRefreshError?.threadId === session.active_thread_id
       ? h("div", { className: "transcript-refresh-notice", role: "status" },
-          h("span", null, "Couldn’t refresh this conversation. Showing saved messages."),
-          h("button", { type: "button", onClick: () => void viewRemoteThread(session.active_thread_id) }, "Retry")
+          h("span", null, t("Couldn’t refresh this conversation. Showing saved messages.")),
+          h("button", { type: "button", onClick: () => void viewRemoteThread(session.active_thread_id) }, t("Retry"))
         )
       : null,
     h("div", { className: "chat-thread", id: "remote-transcript", ref: transcriptRef }, body)

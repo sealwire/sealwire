@@ -1,3 +1,5 @@
+import { t } from "../shared/i18n.js";
+
 // On reads too: some GETs act, and the relay checks them like writes.
 export function applyCsrfHeader(headers) {
   headers.set("X-Agent-Relay-CSRF", "1");
@@ -18,7 +20,7 @@ export async function submitAskUserAnswer(apiFetch, requestId, answers, deviceId
   );
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "AskUserQuestion submission failed");
+    throw new Error(payload?.error?.message || t("AskUserQuestion submission failed"));
   }
   return payload.data;
 }
@@ -34,7 +36,7 @@ export async function requestReview(apiFetch, input, deviceId) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to request review");
+    throw new Error(payload?.error?.message || t("Failed to request review"));
   }
   return payload.data;
 }
@@ -49,7 +51,7 @@ export async function startWorkflow(apiFetch, input, deviceId) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to start workflow");
+    throw new Error(payload?.error?.message || t("Failed to start workflow"));
   }
   return payload.data;
 }
@@ -64,7 +66,7 @@ export async function resolveReview(apiFetch, reviewJobId, deviceId) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to resolve the blocked review");
+    throw new Error(payload?.error?.message || t("Failed to resolve the blocked review"));
   }
   return payload.data;
 }
@@ -79,7 +81,7 @@ export async function resolveWorkflow(apiFetch, workflowRunId, deviceId) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to resolve the blocked workflow");
+    throw new Error(payload?.error?.message || t("Failed to resolve the blocked workflow"));
   }
   return payload.data;
 }
@@ -97,7 +99,7 @@ export async function acceptReview(apiFetch, reviewId, deviceId) {
   );
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to accept the review");
+    throw new Error(payload?.error?.message || t("Failed to accept the review"));
   }
   return payload.data;
 }
@@ -113,7 +115,7 @@ export async function deleteReview(apiFetch, reviewId, deviceId) {
   );
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to delete the review");
+    throw new Error(payload?.error?.message || t("Failed to delete the review"));
   }
   return payload.data;
 }
@@ -124,7 +126,7 @@ export async function getReviews(apiFetch, deviceId) {
   const response = await apiFetch(`/api/session/reviews${suffix}`, { method: "GET" });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to load reviews");
+    throw new Error(payload?.error?.message || t("Failed to load reviews"));
   }
   return payload.data;
 }
@@ -136,7 +138,7 @@ export async function getAskDetail(apiFetch, askId) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to load ask");
+    throw new Error(payload?.error?.message || t("Failed to load ask"));
   }
   return payload.data;
 }
@@ -153,7 +155,7 @@ export async function decideModelRequest(apiFetch, askId, { decision, model = nu
   );
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Could not answer the model request");
+    throw new Error(payload?.error?.message || t("Could not answer the model request"));
   }
   return payload.data;
 }
@@ -163,7 +165,7 @@ export async function getWorkflows(apiFetch, deviceId) {
   const response = await apiFetch(`/api/session/workflows${suffix}`, { method: "GET" });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to load workflows");
+    throw new Error(payload?.error?.message || t("Failed to load workflows"));
   }
   return payload.data;
 }
@@ -174,7 +176,7 @@ export async function getTeams(apiFetch) {
   const response = await apiFetch("/api/session/teams", { method: "GET" });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to load tasks");
+    throw new Error(payload?.error?.message || t("Failed to load tasks"));
   }
   return payload.data;
 }
@@ -183,7 +185,7 @@ export async function getOrchestratorProposals(apiFetch) {
   const response = await apiFetch("/api/orchestrator/proposals", { method: "GET" });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to load proposals");
+    throw new Error(payload?.error?.message || t("Failed to load proposals"));
   }
   return payload.data;
 }
@@ -198,7 +200,7 @@ export async function startTeam(apiFetch, input) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to start the task");
+    throw new Error(payload?.error?.message || t("Failed to start the task"));
   }
   return payload.data;
 }
@@ -206,6 +208,21 @@ export async function startTeam(apiFetch, input) {
 // The five whole-run actions share one body and one receipt, so they share one
 // client. `team_run_id` is optional only while one task runs at a time — send it.
 export const TEAM_ACTIONS = Object.freeze(["pause", "stop", "cancel", "resume", "resolve"]);
+
+function teamActionFailure(action) {
+  switch (action) {
+    case "pause":
+      return t("Failed to pause the task");
+    case "stop":
+      return t("Failed to stop the task");
+    case "cancel":
+      return t("Failed to cancel the task");
+    case "resume":
+      return t("Failed to resume the task");
+    default:
+      return t("Failed to resolve the task");
+  }
+}
 
 export async function teamAction(apiFetch, action, { teamRunId, deviceId } = {}) {
   if (!TEAM_ACTIONS.includes(action)) {
@@ -218,7 +235,7 @@ export async function teamAction(apiFetch, action, { teamRunId, deviceId } = {})
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || `Failed to ${action} the task`);
+    throw new Error(payload?.error?.message || teamActionFailure(action));
   }
   return payload.data;
 }
@@ -259,7 +276,7 @@ export async function deleteTeam(apiFetch, { teamRunId, deviceId } = {}) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to delete the task");
+    throw new Error(payload?.error?.message || t("Failed to delete the task"));
   }
   return payload.data;
 }
@@ -268,7 +285,7 @@ export async function getDevices(apiFetch) {
   const response = await apiFetch("/api/devices", { method: "GET" });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to load devices");
+    throw new Error(payload?.error?.message || t("Failed to load devices"));
   }
   return payload.data;
 }
@@ -324,7 +341,7 @@ export async function setUsageBudget(apiFetch, patch) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to save the budget");
+    throw new Error(payload?.error?.message || t("Failed to save the budget"));
   }
   return payload.data;
 }
@@ -335,7 +352,7 @@ export async function getUsage(apiFetch, { since, until, bucket = "day", compare
   const response = await apiFetch(`/api/usage?${query}`, { method: "GET" });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to load usage");
+    throw new Error(payload?.error?.message || t("Failed to load usage"));
   }
   return payload.data;
 }
@@ -350,7 +367,7 @@ export async function getTeamCatalog(apiFetch) {
   const response = await apiFetch("/api/teams", { method: "GET" });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to load teams");
+    throw new Error(payload?.error?.message || t("Failed to load teams"));
   }
   return payload.data;
 }
@@ -369,7 +386,7 @@ export async function ensureOrchestrator(apiFetch, deviceId) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to open the Orchestrator");
+    throw new Error(payload?.error?.message || t("Failed to open the Orchestrator"));
   }
   return payload.data;
 }
@@ -390,7 +407,7 @@ export async function resetOrchestrator(apiFetch, deviceId) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to restart the Orchestrator");
+    throw new Error(payload?.error?.message || t("Failed to restart the Orchestrator"));
   }
   return payload.data;
 }
@@ -409,7 +426,7 @@ export async function getTeamDiff(apiFetch, teamRunId, base, deviceId) {
   const response = await apiFetch(`/api/session/team/diff?${params}`);
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to load the task's changes");
+    throw new Error(payload?.error?.message || t("Failed to load the task's changes"));
   }
   return payload.data;
 }
@@ -422,7 +439,7 @@ export async function proposeOrchestratorTask(apiFetch, body) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to create proposal");
+    throw new Error(payload?.error?.message || t("Failed to create proposal"));
   }
   return payload.data;
 }
@@ -438,7 +455,7 @@ export async function confirmOrchestratorProposal(apiFetch, proposalId, deviceId
   );
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to confirm proposal");
+    throw new Error(payload?.error?.message || t("Failed to confirm proposal"));
   }
   return payload.data;
 }
@@ -456,7 +473,7 @@ export async function reviseOrchestratorProposal(apiFetch, proposalId, updates, 
   );
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to update proposal");
+    throw new Error(payload?.error?.message || t("Failed to update proposal"));
   }
   return payload.data;
 }
@@ -472,7 +489,7 @@ export async function dismissOrchestratorProposal(apiFetch, proposalId, deviceId
   );
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to dismiss proposal");
+    throw new Error(payload?.error?.message || t("Failed to dismiss proposal"));
   }
   return payload.data;
 }

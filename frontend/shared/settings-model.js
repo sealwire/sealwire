@@ -1,5 +1,7 @@
 // Pure logic behind the Settings screens, kept free of React so it is unit-testable.
 
+import { t } from "./i18n.js";
+
 const ERROR_WORDS = ["failed", "error", "denied", "rejected", "refused", "timed out", "offline", "disconnected"];
 const NOTABLE_WORDS = [
   "approved",
@@ -49,13 +51,13 @@ export function logRepeatLabel(row) {
     return "";
   }
   const seconds = Math.round((row.at - row.oldestAt) / 1000 / (row.count - 1));
-  return seconds > 0 ? `×${row.count} · every ${seconds}s` : `×${row.count}`;
+  return seconds > 0 ? t("×{count} · every {seconds}s", { count: row.count, seconds }) : `×${row.count}`;
 }
 
 export const LOG_FILTERS = [
-  { key: "all", label: "All" },
-  { key: "notable", label: "Notable" },
-  { key: "errors", label: "Errors" },
+  { key: "all", label: t("All") },
+  { key: "notable", label: t("Notable") },
+  { key: "errors", label: t("Errors") },
 ];
 
 export function filterLogRows(rows, filter) {
@@ -131,8 +133,17 @@ export function groupDevicesByBroker(records) {
 export function pastDevicesLabel(records) {
   const revoked = records.filter((record) => record?.lifecycle_state === "revoked").length;
   const rejected = records.length - revoked;
-  const parts = [revoked ? `${revoked} revoked` : "", rejected ? `${rejected} rejected` : ""].filter(Boolean);
-  return `${parts.join(", ")} ${records.length === 1 ? "device" : "devices"}`;
+  if (revoked && rejected) {
+    return t("{revoked} revoked, {rejected} rejected devices", { revoked, rejected });
+  }
+  if (revoked) {
+    return revoked === 1
+      ? t("{count} revoked device", { count: revoked })
+      : t("{count} revoked devices", { count: revoked });
+  }
+  return rejected === 1
+    ? t("{count} rejected device", { count: rejected })
+    : t("{count} rejected devices", { count: rejected });
 }
 
 // A paired phone's id is "mobile-" plus a 64-char key hash; 8 hash chars tell a list's phones apart.
@@ -143,7 +154,7 @@ export function shortDeviceId(id) {
 
 export function pathScopeLabel(scope) {
   const paths = Array.isArray(scope) ? scope.filter(Boolean) : [];
-  return paths.length ? paths.join(", ") : "All relay roots";
+  return paths.length ? paths.join(", ") : t("All relay roots");
 }
 
 /** @param {number|null|undefined} seconds epoch seconds, as the relay sends them */
@@ -153,41 +164,40 @@ export function relativeTime(seconds, nowMs = Date.now()) {
   }
   const deltaSeconds = Math.max(0, Math.round(nowMs / 1000 - seconds));
   if (deltaSeconds < 60) {
-    return "just now";
+    return t("just now");
   }
   const minutes = Math.floor(deltaSeconds / 60);
   if (minutes < 60) {
-    return `${minutes}m ago`;
+    return t("{count}m ago", { count: minutes });
   }
   const hours = Math.floor(minutes / 60);
   if (hours < 24) {
-    return `${hours}h ago`;
+    return t("{count}h ago", { count: hours });
   }
-  return `${Math.floor(hours / 24)}d ago`;
+  return t("{count}d ago", { count: Math.floor(hours / 24) });
 }
 
 /** "Expires in 23:41:08", or "Expires in 41:08" inside the last hour. */
 export function expiresInLabel(seconds, nowMs = Date.now()) {
   const remaining = Math.floor(seconds - nowMs / 1000);
   if (remaining <= 0) {
-    return "Expired";
+    return t("Expired");
   }
   const hours = Math.floor(remaining / 3600);
   const minutes = Math.floor((remaining % 3600) / 60);
   const secs = String(remaining % 60).padStart(2, "0");
-  return hours
-    ? `Expires in ${hours}:${String(minutes).padStart(2, "0")}:${secs}`
-    : `Expires in ${minutes}:${secs}`;
+  const time = hours ? `${hours}:${String(minutes).padStart(2, "0")}:${secs}` : `${minutes}:${secs}`;
+  return t("Expires in {time}", { time });
 }
 
 export function deviceStatusLine(record, nowMs = Date.now()) {
   switch (record?.lifecycle_state) {
     case "pending":
-      return "Waiting for approval";
+      return t("Waiting for approval");
     case "approved":
       return record.last_seen_at
-        ? `Last seen ${relativeTime(record.last_seen_at, nowMs)}`
-        : "Never connected";
+        ? t("Last seen {time}", { time: relativeTime(record.last_seen_at, nowMs) })
+        : t("Never connected");
     default:
       return "";
   }

@@ -8,6 +8,8 @@
 // The relay heard this one before refusing, so its reason is a failure and goes to the
 // error line — not to the "not sent" slot, which is for what the composer stopped.
 
+import { t } from "../shared/i18n.js";
+
 /**
  * @param {{
  *   requestReview: (values: object) => Promise<unknown>,
@@ -30,7 +32,7 @@ export function createReviewAuthor({
     } catch (error) {
       setComposerError(
         threadId,
-        error?.message || "The relay refused the review, without saying why."
+        error?.message || t("The relay refused the review, without saying why.")
       );
       // Rethrown so the controller still knows it failed and keeps the draft.
       throw error;

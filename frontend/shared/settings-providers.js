@@ -1,6 +1,7 @@
 // Settings > Providers, shared by local and remote. Rows come from buildProviderStatusModel.
 
 import React from "react";
+import { t } from "./i18n.js";
 import { providerMark } from "./provider-mark.js";
 import { SettingsHint, SettingsPage } from "./settings-frame.js";
 
@@ -9,14 +10,14 @@ const h = React.createElement;
 export function ProvidersPage({ active, model, listId, footnote }) {
   return h(
     SettingsPage,
-    { pageKey: "providers", active, title: "Providers" },
+    { pageKey: "providers", active, title: t("Providers") },
     model?.length
       ? h(
           "ul",
           { className: "provider-status-list settings-list", id: listId },
           ...model.map((row) => h(ProviderRow, { key: row.key, row }))
         )
-      : h("p", { className: "settings-empty" }, "No providers are configured on this relay."),
+      : h("p", { className: "settings-empty" }, t("No providers are configured on this relay.")),
     footnote ? h(SettingsHint, null, footnote) : null
   );
 }
@@ -61,7 +62,7 @@ function providerDetail(row) {
   if (row.reason) {
     return row.reason;
   }
-  const plan = row.plan ? (row.plan === "API key" ? row.plan : `${row.plan} plan`) : "";
+  const plan = row.plan ? (row.plan === "API key" ? row.plan : t("{plan} plan", { plan: row.plan })) : "";
   return [row.version ? `v${row.version}` : "", plan].filter(Boolean).join(" · ");
 }
 
@@ -79,8 +80,8 @@ function LoginHint({ command }) {
   return h(
     "div",
     { className: "settings-login-hint" },
-    h("span", { className: "settings-login-label" }, "Sign in from a terminal:"),
+    h("span", { className: "settings-login-label" }, t("Sign in from a terminal:")),
     h("code", { className: "settings-login-command settings-mono" }, command),
-    h("button", { className: "settings-button is-quiet", onClick: copy, type: "button" }, copied ? "Copied" : "Copy")
+    h("button", { className: "settings-button is-quiet", onClick: copy, type: "button" }, copied ? t("Copied") : t("Copy"))
   );
 }

@@ -2,15 +2,16 @@ import {
   buildThreadGroups,
   canonicalizeWorkspace,
 } from "./thread-groups.js";
+import { t } from "./i18n.js";
 
 function workspaceBasename(cwd) {
   if (!cwd) {
-    return "workspace";
+    return t("workspace");
   }
 
   const trimmed = String(cwd).replace(/[\\/]+$/, "");
   const parts = trimmed.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) || trimmed || "workspace";
+  return parts.at(-1) || trimmed || t("workspace");
 }
 
 export function buildWorkspaceSuggestions({
@@ -33,19 +34,20 @@ export function buildWorkspaceSuggestions({
     });
   };
 
-  addSuggestion(selectedCwd, "Selected workspace");
-  addSuggestion(currentCwd, "Current session");
+  addSuggestion(selectedCwd, t("Selected workspace"));
+  addSuggestion(currentCwd, t("Current session"));
 
   for (const group of buildThreadGroups(threads || [])) {
     const count = group.threads?.length || 0;
+    const name = workspaceBasename(group.cwd);
     addSuggestion(
       group.cwd,
-      `${workspaceBasename(group.cwd)} (${count} ${count === 1 ? "session" : "sessions"})`
+      count === 1 ? t("{name} ({count} session)", { name, count }) : t("{name} ({count} sessions)", { name, count })
     );
   }
 
   for (const root of allowedRoots || []) {
-    addSuggestion(root, "Allowed root");
+    addSuggestion(root, t("Allowed root"));
   }
 
   return suggestions.slice(0, limit);

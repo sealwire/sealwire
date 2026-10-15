@@ -1,6 +1,7 @@
 import React, { useSyncExternalStore } from "react";
 
 import { getComposerWorkspaceStore } from "./composer-workspace.js";
+import { t } from "./i18n.js";
 
 const h = React.createElement;
 
@@ -25,7 +26,7 @@ export function ComposerQuoteStrip({ scope }) {
       {
         type: "button",
         className: "composer-quote-remove",
-        "aria-label": "Remove quote",
+        "aria-label": t("Remove quote"),
         onClick: () => store.write(scope, { quote: "" }),
       },
       "✕"

@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 
 import { avatar, CardBodyStatus, CardIcon, Caret, useCardBody } from "./card-parts.js";
+import { t } from "./i18n.js";
 import { renderMarkdown } from "./markdown.js";
 import { providerLabel } from "./provider-labels.js";
 import { transcriptRowKey } from "./transcript-row-key.js";
@@ -18,24 +19,22 @@ const SETTLED_TONES = {
 };
 
 const RESOLUTION_LABELS = {
-  reopened: "Reopened",
-  answered: "Answered",
-  accepted: "Marked done",
-  cancelled: "Cancelled",
+  reopened: t("Reopened"),
+  answered: t("Answered"),
+  accepted: t("Marked done"),
+  cancelled: t("Cancelled"),
 };
 
 const STEP_STATUS_WORDS = {
-  done: "done",
-  active: "in progress",
-  pending: "not started",
+  done: t(" (done)"),
+  active: t(" (in progress)"),
+  pending: t(" (not started)"),
 };
 
-function plural(count, word) {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
-}
-
 function turnOf(turns, maxTurns) {
-  return Number.isFinite(maxTurns) && maxTurns > 0 ? `turn ${turns} of ${maxTurns}` : `turn ${turns}`;
+  return Number.isFinite(maxTurns) && maxTurns > 0
+    ? t("turn {turn} of {max}", { turn: turns, max: maxTurns })
+    : t("turn {turn}", { turn: turns });
 }
 
 export function goalStepsOf(value) {
@@ -124,10 +123,10 @@ export function GoalSteps({ steps, live = false, flagTone = "", under = null }) 
           "div",
           { className: "goal-step-text" },
           h("span", { className: "goal-step-title" }, step.title),
-          h("span", { className: "sr-only" }, ` (${flagTone && status === "active" ? "stopped here" : STEP_STATUS_WORDS[status]})`),
+          h("span", { className: "sr-only" }, flagTone && status === "active" ? t(" (stopped here)") : STEP_STATUS_WORDS[status]),
           index === flagged ? under : note ? h("span", { className: "goal-step-note" }, note) : null
         ),
-        h("span", { className: "goal-step-turn" }, Number.isFinite(step.turn) ? `turn ${step.turn}` : "")
+        h("span", { className: "goal-step-turn" }, Number.isFinite(step.turn) ? t("turn {turn}", { turn: step.turn }) : "")
       );
     })
   );
@@ -141,7 +140,7 @@ export function GoalLeftForYou({ items }) {
   return h(
     "div",
     { className: "goal-left" },
-    h("span", { className: "goal-left-label" }, "Left for you"),
+    h("span", { className: "goal-left-label" }, t("Left for you")),
     h(
       "ul",
       { className: "goal-left-items" },
@@ -154,12 +153,12 @@ export function GoalLeftForYou({ items }) {
 export function GoalTurnLine({ attrs, entry }) {
   const turn = entry.injection.goal_turn;
   const step = turn.step?.title ? turn.step : null;
-  const stepText = step ? `Step ${step.index} · ${step.title}` : "";
+  const stepText = step ? t("Step {index} · {title}", { index: step.index, title: step.title }) : "";
   return h(
     "article",
     { ...attrs, className: `${attrs.className} goal-turn` },
     h("span", { className: "goal-turn-icon" }, h(CardIcon, { paths: GOAL_FLAG_ICON, size: 14 })),
-    h("span", { className: "goal-turn-label" }, "Goal"),
+    h("span", { className: "goal-turn-label" }, t("Goal")),
     h("span", { className: "goal-turn-count" }, turnOf(turn.turn, turn.max_turns)),
     h("span", { className: "goal-turn-rule", "aria-hidden": "true" }),
     step ? h("span", { className: "goal-turn-step", title: stepText }, stepText) : null
@@ -168,9 +167,12 @@ export function GoalTurnLine({ attrs, entry }) {
 
 function kickerParts(card, provider) {
   if (card.status === "complete_claimed") {
-    return ["Goal complete", `claimed by ${providerLabel(card.provider || provider) || "the agent"}`];
+    return [
+      t("Goal complete"),
+      t("claimed by {agent}", { agent: providerLabel(card.provider || provider) || t("the agent") }),
+    ];
   }
-  return [card.status === "blocked" ? "Goal stuck" : "Goal needs you", turnOf(card.turns, card.max_turns)];
+  return [card.status === "blocked" ? t("Goal stuck") : t("Goal needs you"), turnOf(card.turns, card.max_turns)];
 }
 
 // On a phone the kicker wraps between its parts, never inside "turn 3 of 20".
@@ -201,7 +203,7 @@ function InlineReport({ text, body }) {
           "button",
           { type: "button", className: "handover-card-more", onClick: body.load },
           h(Caret, { open: false }),
-          "Show full report"
+          t("Show full report")
         )
       : null,
     h(CardBodyStatus, { body })
@@ -228,7 +230,7 @@ function FullReport({ text, body }) {
         onClick: toggle,
       },
       h(Caret, { open }),
-      "Full report"
+      t("Full report")
     ),
     open ? h(GoalReport, { text }) : null,
     open ? h(CardBodyStatus, { body }) : null
@@ -236,7 +238,7 @@ function FullReport({ text, body }) {
 }
 
 function Resolved({ resolution }) {
-  return h("p", { className: "goal-card-resolved" }, RESOLUTION_LABELS[resolution] || "Settled");
+  return h("p", { className: "goal-card-resolved" }, RESOLUTION_LABELS[resolution] || t("Settled"));
 }
 
 function actionAttrs(card, action, extra = null) {
@@ -265,12 +267,12 @@ function WaitingActions({ card, options }) {
         option
       )
     ),
-    h("button", { ...actionAttrs(card, "reply"), key: "reply", className: "review-card-secondary" }, "Reply…"),
+    h("button", { ...actionAttrs(card, "reply"), key: "reply", className: "review-card-secondary" }, t("Reply…")),
     card.status === "blocked"
       ? h("span", { key: "spacer", className: "handover-card-spacer" })
       : null,
     card.status === "blocked"
-      ? h("button", { ...actionAttrs(card, "stop"), key: "stop", className: "handover-card-link" }, "Cancel goal")
+      ? h("button", { ...actionAttrs(card, "stop"), key: "stop", className: "handover-card-link" }, t("Cancel goal"))
       : null
   );
 }
@@ -289,7 +291,10 @@ export function GoalSettledEntry({ attrs, entry, showAvatar = true, provider = "
   const flagTone = complete ? "" : tone;
   const underStep = report && flaggedStepIndex(steps, flagTone) >= 0;
   const leftForYou = complete ? goalListOf(card.left_for_you) : [];
-  const trailing = complete ? plural(card.turns || 0, "turn") : resolution ? "" : "paused";
+  const turns = card.turns || 0;
+  const trailing = complete
+    ? turns === 1 ? t("{count} turn", { count: turns }) : t("{count} turns", { count: turns })
+    : resolution ? "" : t("paused");
   const body = useCardBody(transcriptRowKey(entry), card.report_clipped);
   return h(
     "article",
@@ -306,7 +311,7 @@ export function GoalSettledEntry({ attrs, entry, showAvatar = true, provider = "
           "div",
           { className: "handover-card-heading" },
           h(Kicker, { parts: kickerParts(card, provider) }),
-          h("span", { className: "handover-card-title", title: card.objective || "" }, card.objective || "Goal")
+          h("span", { className: "handover-card-title", title: card.objective || "" }, card.objective || t("Goal"))
         ),
         trailing ? h("span", { className: "handover-card-time" }, trailing) : null
       ),
@@ -336,9 +341,9 @@ export function GoalSettledEntry({ attrs, entry, showAvatar = true, provider = "
               : h(
                   React.Fragment,
                   null,
-                  h("button", { ...actionAttrs(card, "resume"), className: "review-card-secondary" }, "Not done — keep going"),
+                  h("button", { ...actionAttrs(card, "resume"), className: "review-card-secondary" }, t("Not done — keep going")),
                   h("span", { className: "handover-card-spacer" }),
-                  h("button", { ...actionAttrs(card, "stop"), className: "handover-card-link" }, "Mark done")
+                  h("button", { ...actionAttrs(card, "stop"), className: "handover-card-link" }, t("Mark done"))
                 )
           )
         : null
@@ -395,6 +400,19 @@ function planTitles(args) {
     .map((title) => title.trim());
 }
 
+function stepToolTitle(step, status) {
+  if (status === "done") {
+    return step ? t("Step {step} done", { step }) : t("A step done");
+  }
+  if (status === "active") {
+    return step ? t("Step {step} started", { step }) : t("A step started");
+  }
+  if (status === "pending") {
+    return step ? t("Step {step} back to not started", { step }) : t("A step back to not started");
+  }
+  return step ? t("Step {step} updated", { step }) : t("A step updated");
+}
+
 /** A goal tool row's own line, from its name and structured arguments only. */
 export function goalToolLabel(tool) {
   const match = GOAL_TOOL.exec(String(tool?.name || ""));
@@ -404,32 +422,27 @@ export function goalToolLabel(tool) {
   const args = toolArgs(tool);
   switch (match[1]) {
     case "status":
-      return { title: "Checked goal status", detail: "" };
+      return { title: t("Checked goal status"), detail: "" };
     case "plan": {
       const titles = planTitles(args);
-      return titles.length
-        ? { title: `Planned ${plural(titles.length, "step")}`, detail: titles.join(" · ") }
-        : { title: "Planned the goal", detail: "" };
+      const count = titles.length;
+      return count
+        ? {
+            title: count === 1 ? t("Planned {count} step", { count }) : t("Planned {count} steps", { count }),
+            detail: titles.join(" · "),
+          }
+        : { title: t("Planned the goal"), detail: "" };
     }
     case "step": {
       const number = Number(args.step);
-      const which = Number.isInteger(number) && number > 0 ? `Step ${number}` : "A step";
       const note = typeof args.note === "string" ? args.note.trim() : "";
-      const title =
-        args.status === "done"
-          ? `${which} done`
-          : args.status === "active"
-            ? `${which} started`
-            : args.status === "pending"
-              ? `${which} back to not started`
-              : `${which} updated`;
-      return { title, detail: note };
+      return { title: stepToolTitle(Number.isInteger(number) && number > 0 ? number : null, args.status), detail: note };
     }
     case "complete":
-      return { title: "Said the goal is done", detail: "" };
+      return { title: t("Said the goal is done"), detail: "" };
     case "blocked":
-      return { title: "Said the goal is stuck", detail: "" };
+      return { title: t("Said the goal is stuck"), detail: "" };
     default:
-      return { title: "Asked you to decide", detail: "" };
+      return { title: t("Asked you to decide"), detail: "" };
   }
 }

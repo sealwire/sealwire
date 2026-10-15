@@ -1,5 +1,6 @@
 import React from "react";
 
+import { t } from "./i18n.js";
 import { providerMarkSlot } from "./provider-mark.js";
 import { clampReviewRounds } from "./review-panel.js";
 import { selectReviewerCatalogState } from "./review-state.js";
@@ -96,7 +97,7 @@ export function CodeFlowPanel({
         })
       );
       if (result === false) {
-        setError("Couldn't start Code Flow — check the activity log for details.");
+        setError(t("Couldn't start Code Flow — check the activity log for details."));
         return;
       }
       close();
@@ -105,7 +106,7 @@ export function CodeFlowPanel({
       setReviewerModel("");
       setMaxRounds("2");
     } catch (err) {
-      setError(err?.message || "Couldn't start Code Flow.");
+      setError(err?.message || t("Couldn't start Code Flow."));
     } finally {
       setSubmitting(false);
     }
@@ -130,7 +131,7 @@ export function CodeFlowPanel({
     h(
       "div",
       { className: "modal-header" },
-      h("h2", null, "Run Code Flow"),
+      h("h2", null, t("Run Code Flow")),
       h(
         "button",
         { className: "header-button close-modal-btn", onClick: close, type: "button" },
@@ -140,16 +141,16 @@ export function CodeFlowPanel({
     h(
       "section",
       { className: "panel-modal-body" },
-      h("label", { className: "sidebar-label", htmlFor: `${id}-task` }, "Task"),
+      h("label", { className: "sidebar-label", htmlFor: `${id}-task` }, t("Task")),
       h("textarea", {
         id: `${id}-task`,
         className: "control-input",
         rows: 5,
-        placeholder: "Implement the change, update tests, and keep the diff focused.",
+        placeholder: t("Implement the change, update tests, and keep the diff focused."),
         value: taskPrompt,
         onChange: (event) => setTaskPrompt(event.target.value),
       }),
-      h("label", { className: "sidebar-label", htmlFor: `${id}-provider` }, "Reviewer provider"),
+      h("label", { className: "sidebar-label", htmlFor: `${id}-provider` }, t("Reviewer provider")),
       h(
         "div",
         { className: "select-with-mark" },
@@ -165,7 +166,7 @@ export function CodeFlowPanel({
               setReviewerModel("");
             },
           },
-          h("option", { value: "" }, "Select a provider…"),
+          h("option", { value: "" }, t("Select a provider…")),
           ...providerSelectOptions
         )
       ),
@@ -176,7 +177,7 @@ export function CodeFlowPanel({
             h(
               "label",
               { className: "sidebar-label", htmlFor: `${id}-model` },
-              "Reviewer model (optional)"
+              t("Reviewer model (optional)")
             ),
             h(
               "select",
@@ -186,7 +187,7 @@ export function CodeFlowPanel({
                 value: reviewerModel,
                 onChange: (event) => setReviewerModel(event.target.value),
               },
-              h("option", { value: "" }, "Provider default"),
+              h("option", { value: "" }, t("Provider default")),
               ...providerModels.map((model) =>
                 h(
                   "option",
@@ -202,7 +203,7 @@ export function CodeFlowPanel({
             ? h(
                 "p",
                 { className: "panel-modal-copy" },
-                "Couldn't load reviewer models. ",
+                t("Couldn't load reviewer models. "),
                 h(
                   "button",
                   {
@@ -210,29 +211,29 @@ export function CodeFlowPanel({
                     className: "link-button",
                     onClick: () => onEnsureProviderModels?.(reviewerProvider),
                   },
-                  "Retry"
+                  t("Retry")
                 )
               )
             : catalog.modelsStatus === "loading"
-              ? h("p", { className: "panel-modal-copy" }, "Loading reviewer models…")
+              ? h("p", { className: "panel-modal-copy" }, t("Loading reviewer models…"))
               : null,
       h(
         "label",
         { className: "sidebar-label", htmlFor: `${id}-reviewer-instructions` },
-        "Reviewer instructions (optional)"
+        t("Reviewer instructions (optional)")
       ),
       h("textarea", {
         id: `${id}-reviewer-instructions`,
         className: "control-input",
         rows: 3,
-        placeholder: "e.g. focus on regressions, tests, and scope creep",
+        placeholder: t("e.g. focus on regressions, tests, and scope creep"),
         value: reviewerInstructions,
         onChange: (event) => setReviewerInstructions(event.target.value),
       }),
       h(
         "label",
         { className: "sidebar-label", htmlFor: `${id}-max-rounds` },
-        "Maximum rounds"
+        t("Maximum rounds")
       ),
       h("input", {
         id: `${id}-max-rounds`,
@@ -257,7 +258,7 @@ export function CodeFlowPanel({
           onClick: submit,
           type: "button",
         },
-        busy ? "Starting…" : "Start Code Flow"
+        busy ? t("Starting…") : t("Start Code Flow")
       )
     )
   );
@@ -273,8 +274,8 @@ export function CodeFlowLauncher({
   parentThreadId = null,
   onEnsureProviderModels,
   disabled = false,
-  label = "Run code flow",
-  title = "Run author, reviewer, and revise steps",
+  label = t("Run code flow"),
+  title = t("Run author, reviewer, and revise steps"),
   onSubmit,
 }) {
   return h(
@@ -332,11 +333,11 @@ export function WorkflowRunCard({ run, onResolveWorkflow }) {
   // the same card in the same list, so "still running" and "finished and
   // approved" were the same object at a glance. This is deliberately a compact ROW rather
   // than a card: it carries no verdict to headline, and sizing it like one implied it did.
-  const metaParts = ["code flow"];
+  const metaParts = [t("code flow")];
   if (stepLabel) metaParts.push(stepLabel.toLowerCase());
   // `round` is all the wire carries — WorkflowRunView has no max_rounds, so there is no
   // "1/2" to show without inventing a denominator.
-  if (run?.round) metaParts.push(`round ${run.round}`);
+  if (run?.round) metaParts.push(t("round {round}", { round: run.round }));
   return h(
     "article",
     { className: `workflow-run workflow-run-${tone}` },
@@ -358,14 +359,14 @@ export function WorkflowRunCard({ run, onResolveWorkflow }) {
               className: "header-button review-resolve-button workflow-run-stop",
               disabled: resolveDisabled,
               title:
-                "The workflow is blocked while owned turns are stopped. Stop them to unlock the workspace.",
+                t("The workflow is blocked while owned turns are stopped. Stop them to unlock the workspace."),
               onClick: handleResolve,
             },
             // Kept explicit rather than shortened to "Stop": this button ONLY appears for
             // a blocked/resolving run, where the workspace is locked and unlocking it is
             // the actual reason to press it. The tooltip should not be the only place
             // that says so.
-            resolveDisabled ? "Stopping workflow…" : "Stop workflow & unlock"
+            resolveDisabled ? t("Stopping workflow…") : t("Stop workflow & unlock")
           )
         : null
     ),
@@ -373,7 +374,7 @@ export function WorkflowRunCard({ run, onResolveWorkflow }) {
       ? h(
           "p",
           { className: "workflow-run-verdict" },
-          run.last_verdict.approved ? "Approved" : "Needs changes"
+          run.last_verdict.approved ? t("Approved") : t("Needs changes")
         )
       : null,
     findings.length

@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { providerLabel } from "./provider-labels.js";
 
 // Maps the backend `ProviderStatusKind` (serialized snake_case in the session
@@ -10,33 +11,33 @@ import { providerLabel } from "./provider-labels.js";
 // never drift.
 const PROVIDER_STATUS_META = {
   connected: {
-    label: "Connected",
+    label: t("Connected"),
     tone: "ready",
     dotClass: "provider-dot-connected",
   },
   starting: {
-    label: "Starting",
+    label: t("Starting"),
     tone: "active",
     dotClass: "provider-dot-starting",
   },
   disconnected: {
-    label: "Disconnected",
+    label: t("Disconnected"),
     tone: "offline",
     dotClass: "provider-dot-disconnected",
   },
   failed: {
-    label: "Failed to start",
+    label: t("Failed to start"),
     tone: "alert",
     dotClass: "provider-dot-failed",
   },
   not_installed: {
-    label: "Not installed",
+    label: t("Not installed"),
     tone: "alert",
     dotClass: "provider-dot-not-installed",
   },
   // Not a relay status: a running CLI whose last account check said it is signed out.
   signed_out: {
-    label: "Not signed in",
+    label: t("Not signed in"),
     tone: "active",
     dotClass: "provider-dot-starting",
   },

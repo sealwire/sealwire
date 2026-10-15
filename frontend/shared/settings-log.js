@@ -2,6 +2,7 @@
 // hangs off the footer link. Kept mounted, because e2e scripts read its text while closed.
 
 import React from "react";
+import { t } from "./i18n.js";
 import { SettingsPage } from "./settings-frame.js";
 import { LOG_FILTERS, collapseLogRepeats, filterLogRows, logRepeatLabel } from "./settings-model.js";
 
@@ -34,13 +35,13 @@ export function LogPage({ active, entries, listId, rootId, footnote }) {
     {
       pageKey: "log",
       active,
-      title: "Log",
+      title: t("Log"),
       actions: h(
         React.Fragment,
         null,
         h(
           "div",
-          { className: "theme-picker settings-filter", role: "radiogroup", "aria-label": "Show" },
+          { className: "theme-picker settings-filter", role: "radiogroup", "aria-label": t("Show") },
           ...LOG_FILTERS.map((entry) =>
             h(
               "button",
@@ -57,7 +58,7 @@ export function LogPage({ active, entries, listId, rootId, footnote }) {
             )
           )
         ),
-        h("button", { className: "settings-button", onClick: copy, type: "button" }, copied ? "Copied" : "Copy")
+        h("button", { className: "settings-button", onClick: copy, type: "button" }, copied ? t("Copied") : t("Copy"))
       ),
     },
     h(
@@ -81,7 +82,7 @@ export function LogPage({ active, entries, listId, rootId, footnote }) {
         : h(
             "p",
             { className: "settings-empty", id: listId },
-            filter === "all" ? "Nothing logged yet." : "Nothing matches this filter."
+            filter === "all" ? t("Nothing logged yet.") : t("Nothing matches this filter.")
           )
     ),
     h("p", { className: "settings-hint" }, footnote)

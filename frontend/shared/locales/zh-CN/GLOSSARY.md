@@ -44,7 +44,7 @@ relay、broker、agent、Codex、Claude Code、Cursor、MCP、Git、commit、bra
 | usage | 用量 |
 | connect / connected / disconnected | 连接 / 已连接 / 已断开 |
 | online / offline | 在线 / 离线 |
-| archive / delete / rename / pin | 归档 / 删除 / 重命名 / 置顶 |
+| archive / delete / rename / pin / unpin | 归档 / 删除 / 重命名 / 固定 / 取消固定 |
 | retry / refresh | 重试 / 刷新 |
 | Loading… | 正在加载… |
 

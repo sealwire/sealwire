@@ -5,6 +5,8 @@
 // comment cites a guard, that guard is authoritative and this is a hint: the
 // relay refuses the action regardless of what this file allows.
 
+import { t } from "./i18n.js";
+
 // `TeamRunStatus::is_terminal` — crates/relay-server/src/state/team.rs.
 const TERMINAL_STATUSES = new Set([
   "done",
@@ -21,11 +23,11 @@ const SETTLED_WITHOUT_DRIVER = new Set(["paused", "blocked", "resolving"]);
 export const TEAM_ROLES = Object.freeze(["tl", "dev", "reviewer"]);
 
 export const TEAM_ROLE_LABELS = Object.freeze({
-  tl: "Team lead",
-  lead: "Team lead",
-  dev: "Developer",
-  reviewer: "Reviewer",
-  pair: "Pair programmer",
+  tl: t("Team lead"),
+  lead: t("Team lead"),
+  dev: t("Developer"),
+  reviewer: t("Reviewer"),
+  pair: t("Pair programmer"),
 });
 
 const DEFAULT_TEAM_STRUCTURE = Object.freeze({
@@ -81,18 +83,18 @@ export function teamRunIsWorking(run) {
 }
 
 const STATUS_LABELS = Object.freeze({
-  queued: "Queued",
-  running: "Running",
-  pause_pending: "Pausing",
-  paused: "Paused",
-  awaiting_user: "Needs you",
-  done: "Done",
-  escalated: "Needs you",
-  blocked: "Needs you",
-  resolving: "Resolving",
-  failed: "Needs you",
-  interrupted: "Needs you",
-  cancelled: "Cancelled",
+  queued: t("Queued"),
+  running: t("Running"),
+  pause_pending: t("Pausing"),
+  paused: t("Paused"),
+  awaiting_user: t("Needs you"),
+  done: t("Done"),
+  escalated: t("Needs you"),
+  blocked: t("Needs you"),
+  resolving: t("Resolving"),
+  failed: t("Needs you"),
+  interrupted: t("Needs you"),
+  cancelled: t("Cancelled"),
 });
 
 // Reuses the thread-dot vocabulary (`frontend/shared/thread-dot.js`) rather than
@@ -114,14 +116,14 @@ const STATUS_TONES = Object.freeze({
 });
 
 const PHASE_LABELS = Object.freeze({
-  intake: "Sizing up the task",
-  design: "Designing",
-  design_review: "Reviewing the design",
-  planning: "Splitting into sub-tasks",
-  sub_tasks: "Building",
-  mr_gate: "Reviewing the whole change",
-  wrapping: "Writing the report",
-  finished: "Finished",
+  intake: t("Sizing up the task"),
+  design: t("Designing"),
+  design_review: t("Reviewing the design"),
+  planning: t("Splitting into sub-tasks"),
+  sub_tasks: t("Building"),
+  mr_gate: t("Reviewing the whole change"),
+  wrapping: t("Writing the report"),
+  finished: t("Finished"),
 });
 
 export function isTerminalTeamStatus(status) {
@@ -134,7 +136,7 @@ export function isTeamRunDeletable(status) {
 }
 
 export function teamStatusLabel(status) {
-  return STATUS_LABELS[status] || status || "Unknown";
+  return STATUS_LABELS[status] || status || t("Unknown");
 }
 
 export function teamStatusTone(status) {
@@ -203,19 +205,19 @@ export function availableTeamActions(status) {
 }
 
 export const TEAM_ACTION_LABELS = Object.freeze({
-  pause: "Pause",
-  stop: "Stop now",
-  cancel: "Cancel",
-  resume: "Resume",
-  resolve: "Unblock",
+  pause: t("Pause"),
+  stop: t("Stop now"),
+  cancel: t("Cancel"),
+  resume: t("Resume"),
+  resolve: t("Unblock"),
 });
 
 export const TEAM_ACTION_HINTS = Object.freeze({
-  pause: "Finish the current step, then stop.",
-  stop: "Stop the current step now. The task stays resumable.",
-  cancel: "Stop now and give up the slot. The branch and its commits survive.",
-  resume: "Start a fresh driver from where the task left off.",
-  resolve: "Drain the task's threads and settle it so it can be resumed.",
+  pause: t("Finish the current step, then stop."),
+  stop: t("Stop the current step now. The task stays resumable."),
+  cancel: t("Stop now and give up the slot. The branch and its commits survive."),
+  resume: t("Start a fresh driver from where the task left off."),
+  resolve: t("Drain the task's threads and settle it so it can be resumed."),
 });
 
 /**
@@ -324,7 +326,7 @@ export function teamStructure(run) {
   const roles = rawRoles
     .map((role) => ({
       id: String(role?.id || "").trim(),
-      name: String(role?.name || TEAM_ROLE_LABELS[role?.id] || role?.id || "Role"),
+      name: String(role?.name || TEAM_ROLE_LABELS[role?.id] || role?.id || t("Role")),
       runtimeRole: String(role?.runtime_role ?? role?.runtimeRole ?? "dev"),
       blurb: String(role?.blurb || ""),
     }))
@@ -374,7 +376,8 @@ function normalizeAwaitingRole(role, structure) {
 
 function roleAttentionName(run, roleId) {
   const role = teamStructure(run).roles.find((candidate) => candidate.id === roleId);
-  return String(role?.name || TEAM_ROLE_LABELS[roleId] || roleId || "team").toLowerCase();
+  const name = role?.name || TEAM_ROLE_LABELS[roleId] || roleId;
+  return name ? String(name).toLowerCase() : null;
 }
 
 /**
@@ -391,14 +394,14 @@ export function teamAttention(run, seenAt = {}) {
     return {
       kind: "needs_input",
       reason: "question",
-      text: `The ${who} asked you a question.`,
+      text: who ? t("The {who} asked you a question.", { who }) : t("The team asked you a question."),
     };
   }
   if (run.status === "blocked") {
     return {
       kind: "needs_input",
       reason: "blocked",
-      text: run.error || "A step could not be confirmed stopped. Unblock it to continue.",
+      text: run.error || t("A step could not be confirmed stopped. Unblock it to continue."),
     };
   }
   if (
@@ -414,7 +417,7 @@ export function teamAttention(run, seenAt = {}) {
       // Says what is actually on offer. There is no "try again" action — the run
       // is terminal — so the honest next step is to read what it could not settle
       // and take the branch from there.
-      text: "The team ran out of rounds. Its branch and commits are on disk; what it could not settle is below.",
+      text: t("The team ran out of rounds. Its branch and commits are on disk; what it could not settle is below."),
     };
   }
   if (run.status === "failed" || run.status === "interrupted") {
@@ -426,7 +429,7 @@ export function teamAttention(run, seenAt = {}) {
       // not exist is the same defect the escalated copy was fixed for.
       text:
         run.error
-        || `The task stopped as ${run.status}. Its branch is on disk; nothing is running.`,
+        || t("The task stopped as {status}. Its branch is on disk; nothing is running.", { status: run.status }),
     };
   }
   if (run.status === "awaiting_user") {
@@ -437,7 +440,7 @@ export function teamAttention(run, seenAt = {}) {
     return {
       kind: "needs_input",
       reason: "question",
-      text: "The team asked you a question.",
+      text: t("The team asked you a question."),
     };
   }
   if (run.status === "paused" && run.pause_kind === "provider") {
@@ -452,8 +455,8 @@ export function teamAttention(run, seenAt = {}) {
       kind: "paused",
       reason: "paused",
       text: run.pause_reason
-        ? `The provider stopped the work. ${run.pause_reason}. You can resume once that clears.`
-        : "The provider stopped the work. You can resume once that clears.",
+        ? t("The provider stopped the work. {reason}. You can resume once that clears.", { reason: run.pause_reason })
+        : t("The provider stopped the work. You can resume once that clears."),
     };
   }
   if (run.status === "paused" && run.pause_reason) {
@@ -535,11 +538,11 @@ export function teamsNeedingYou(teams, seenAt = {}) {
  * job — typically `sortTeamRuns` first, then partition.
  */
 export const TEAM_LIST_GROUPS = Object.freeze([
-  { id: "needs_you", label: "Needs you" },
-  { id: "in_progress", label: "In progress" },
-  { id: "queued", label: "Queued" },
-  { id: "pending_merge", label: "Ready to merge" },
-  { id: "finished", label: "Finished" },
+  { id: "needs_you", label: t("Needs you") },
+  { id: "in_progress", label: t("In progress") },
+  { id: "queued", label: t("Queued") },
+  { id: "pending_merge", label: t("Ready to merge") },
+  { id: "finished", label: t("Finished") },
 ]);
 
 /**
@@ -589,7 +592,7 @@ export function groupTeamRuns(teams, seenAt = {}) {
 export function teamListMeta(run, groupId = null) {
   const group = groupId || teamListGroupId(run);
   if (group === "needs_you") {
-    return "Needs you";
+    return t("Needs you");
   }
   if (group === "in_progress") {
     const progress = teamRunProgress(run);
@@ -604,10 +607,10 @@ export function teamListMeta(run, groupId = null) {
     return teamPhaseLabel(run?.phase) || teamStatusLabel(run?.status);
   }
   if (group === "queued") {
-    return "Queued";
+    return t("Queued");
   }
   if (group === "pending_merge") {
-    return "Ready to merge";
+    return t("Ready to merge");
   }
   return teamStatusLabel(run?.status);
 }

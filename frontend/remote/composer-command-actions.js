@@ -1,5 +1,6 @@
 import { prepareAuthoredGoalObjective } from "../shared/goal-objective.js";
 import { commandOutcomeOrContractError } from "../shared/command-outcome.js";
+import { t } from "../shared/i18n.js";
 
 // The "/" controller expects capabilities that answer `{text, isError}`. Two remote
 // shapes reach it, and they are settled separately ON PURPOSE: collapsing them is how a
@@ -14,7 +15,7 @@ async function settledSelfReporting(run) {
   try {
     return (await run()) ? OK : REFUSED;
   } catch (error) {
-    return { text: `Could not reach the relay: ${error?.message || error}`, isError: true };
+    return { text: t("Could not reach the relay: {error}", { error: error?.message || error }), isError: true };
   }
 }
 
@@ -25,7 +26,7 @@ async function settledGoal(run, report) {
   try {
     answer = await run();
   } catch (error) {
-    const text = `Could not reach the relay: ${error?.message || error}`;
+    const text = t("Could not reach the relay: {error}", { error: error?.message || error });
     report(text);
     return { text, isError: true };
   }

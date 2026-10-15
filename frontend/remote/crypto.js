@@ -2,6 +2,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import nacl from "tweetnacl";
 
 import { base64ToBytes, base64UrlToBytes, bytesToBase64 } from "./encoding.js";
+import { t } from "../shared/i18n.js";
 
 const REMOTE_DEVICE_KEY_DB_NAME = "agent-relay-crypto";
 const REMOTE_DEVICE_KEY_STORE_NAME = "device-keys";
@@ -23,23 +24,23 @@ let deviceKeypairPromise = null;
 export function parsePairingPayload(rawInput) {
   let raw = rawInput.trim();
 
+  let url = null;
   try {
-    const url = new URL(raw);
-    if (url.searchParams.has("pairing")) {
-      throw new Error(
-        "this pairing link carries its secret in the query string, which exposes it to the broker; generate a fresh QR or pairing link from the local relay (the payload belongs in the URL fragment)"
-      );
-    }
+    url = new URL(raw);
+  } catch {
+    // Not a link: a bare payload, a fragment, or `pairing=…`.
+  }
+  if (url?.searchParams.has("pairing")) {
+    throw new Error(
+      t("this pairing link carries its secret in the query string, which exposes it to the broker; generate a fresh QR or pairing link from the local relay (the payload belongs in the URL fragment)")
+    );
+  }
+  if (url) {
     raw = pairingFromFragment(url.hash) || raw;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes("fragment")) {
-      throw error;
-    }
-    if (raw.startsWith("#")) {
-      raw = pairingFromFragment(raw) || raw;
-    } else if (raw.startsWith("pairing=")) {
-      raw = raw.slice("pairing=".length);
-    }
+  } else if (raw.startsWith("#")) {
+    raw = pairingFromFragment(raw) || raw;
+  } else if (raw.startsWith("pairing=")) {
+    raw = raw.slice("pairing=".length);
   }
 
   const json = new TextDecoder().decode(base64UrlToBytes(raw));
@@ -64,15 +65,15 @@ export function parsePairingPayload(rawInput) {
   if (missingFields.length > 0) {
     if (missingFields.length === 1 && missingFields[0] === "pairing_join_ticket") {
       throw new Error(
-        "pairing link is outdated and missing pairing_join_ticket; generate a new QR or pairing link from the local relay"
+        t("pairing link is outdated and missing pairing_join_ticket; generate a new QR or pairing link from the local relay")
       );
     }
     if (missingFields.includes("relay_verify_key")) {
       throw new Error(
-        "pairing link is missing the relay identity key; generate a new QR or pairing link from the local relay and pair again"
+        t("pairing link is missing the relay identity key; generate a new QR or pairing link from the local relay and pair again")
       );
     }
-    throw new Error(`pairing payload is missing required fields: ${missingFields.join(", ")}`);
+    throw new Error(t("pairing payload is missing required fields: {fields}", { fields: missingFields.join(", ") }));
   }
 
   return payload;

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from "react";
 
+import { t } from "./i18n.js";
 const h = React.createElement;
 
 // A short-lived note at the bottom of the window with one way back. Used where an
@@ -25,7 +26,7 @@ export function UndoToast({ message, onDismiss, onUndo, timeoutMs = 6000 }) {
         },
         type: "button",
       },
-      "Undo"
+      t("Undo")
     )
   );
 }

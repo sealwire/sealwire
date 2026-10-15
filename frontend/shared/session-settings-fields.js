@@ -1,6 +1,7 @@
 import React from "react";
 
 import { buildModelOptions } from "./composer.js";
+import { t } from "./i18n.js";
 
 const h = React.createElement;
 
@@ -24,14 +25,14 @@ export function SessionSettingsFields({
     { className: "settings-grid" },
     h(SelectField, {
       id: fieldId(idPrefix, "provider-input"),
-      label: "Provider",
+      label: t("Provider"),
       onChange: (value) => onFieldChange?.("provider", value),
       options: providerOptions,
       value: fields.provider,
     }),
     h(SelectField, {
       id: fieldId(idPrefix, "model-input"),
-      label: labels.model || "Model",
+      label: labels.model || t("Model"),
       onChange: (value) => onFieldChange?.("model", value),
       options: buildModelOptions(models, fields.model).map((option) => ({
         label: option.display_name || option.model,
@@ -41,7 +42,7 @@ export function SessionSettingsFields({
     }),
     h(SelectField, {
       id: fieldId(idPrefix, "approval-policy-input"),
-      label: labels.approval || "Permission mode",
+      label: labels.approval || t("Permission mode"),
       onChange: (value) => onFieldChange?.("approvalPolicy", value),
       options: approvalOptions,
       value: fields.approvalPolicy,
@@ -53,7 +54,7 @@ export function SessionSettingsFields({
     // shim — so the protocol contract is unchanged.
     h(SelectField, {
       id: fieldId(idPrefix, "start-effort"),
-      label: labels.effort || "Effort",
+      label: labels.effort || t("Effort"),
       onChange: (value) => onFieldChange?.("effort", value),
       options: effortOptions,
       value: fields.effort,
@@ -61,11 +62,11 @@ export function SessionSettingsFields({
     h(
       "label",
       { className: "field field-full" },
-      h("span", null, labels.initialPrompt || "Initial Prompt"),
+      h("span", null, labels.initialPrompt || t("Initial Prompt")),
       h("textarea", {
         id: fieldId(idPrefix, "start-prompt"),
         onChange: (event) => onFieldChange?.("initialPrompt", event.target.value),
-        placeholder: labels.initialPromptPlaceholder || "Optional first task.",
+        placeholder: labels.initialPromptPlaceholder || t("Optional first task."),
         rows: 4,
         // Leave undefined when the caller doesn't manage initial prompt state — keeps
         // the textarea uncontrolled so user input isn't wiped on the next re-render.

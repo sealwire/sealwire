@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { canonicalizeWorkspace } from "./thread-groups.js";
 
 function copyCwdSet(values) {
@@ -83,7 +84,7 @@ export function finishThreadListRefresh(threadList) {
 export function failThreadListRefresh(threadList, message) {
   return {
     ...threadList,
-    error: message || "Failed to load sessions",
+    error: message || t("Failed to load sessions"),
     loading: false,
   };
 }

@@ -15,10 +15,10 @@ final class LanguageUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-AppleLanguages", "(\(phoneLanguage))"]
         app.launch()
-        let menuButton = app.webViews.buttons["Open sidebar"]
+        let menuButton = app.webViews.buttons["打开侧边栏"]
         XCTAssertTrue(menuButton.waitForExistence(timeout: 20), "the remote page should render its header")
         menuButton.tap()
-        let settings = app.webViews.buttons["Settings"].firstMatch
+        let settings = app.webViews.buttons["设置"].firstMatch
         XCTAssertTrue(settings.waitForExistence(timeout: 5), "the drawer should have a Settings button")
         settings.tap()
         XCTAssertTrue(app.webViews.buttons["个性化"].waitForExistence(timeout: 5), "a \(phoneLanguage) phone got the English page")

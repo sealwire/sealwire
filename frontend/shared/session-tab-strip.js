@@ -1,5 +1,6 @@
 import React from "react";
 
+import { t } from "./i18n.js";
 import { InlineTitleEditor } from "./inline-title-editor.js";
 import { ContextMenu, MenuItem, MenuSeparator } from "./context-menu-react.js";
 import { selectThreadDot } from "./thread-dot.js";
@@ -176,7 +177,7 @@ function SessionTab({
           ),
           h(InlineTitleEditor, {
             className: "session-tab-title-input",
-            ariaLabel: "Session name",
+            ariaLabel: t("Session name"),
             // Seeded from the DISPLAYED title so a never-renamed session opens with
             // the agent's name to edit, not an empty box.
             defaultValue: item.renameDraft ?? item.title,
@@ -232,8 +233,8 @@ function SessionTab({
           {
             type: "button",
             className: `session-tab-pin${item.pinned ? " is-pinned" : ""}`,
-            title: item.pinned ? "Unpin tab" : "Pin tab",
-            "aria-label": item.pinned ? `Unpin ${item.title}` : `Pin ${item.title}`,
+            title: item.pinned ? t("Unpin tab") : t("Pin tab"),
+            "aria-label": item.pinned ? t("Unpin {title}", { title: item.title }) : t("Pin {title}", { title: item.title }),
             "aria-pressed": item.pinned ? "true" : "false",
             onClick: (event) => {
               event.stopPropagation();
@@ -249,8 +250,8 @@ function SessionTab({
           {
             type: "button",
             className: "session-tab-close",
-            title: "Close tab",
-            "aria-label": `Close ${item.title}`,
+            title: t("Close tab"),
+            "aria-label": t("Close {title}", { title: item.title }),
             onClick: (event) => {
               event.stopPropagation();
               onClose?.(item.tabId);
@@ -286,7 +287,7 @@ export function SessionTabStrip({
   // (blank means "reset to the agent's own title"). Absent → tabs are not renamable and
   // no rename affordance is advertised at all.
   onRename = null,
-  emptyMessage = "No open sessions.",
+  emptyMessage = t("No open sessions."),
   reorderHoldMs = REORDER_HOLD_MS,
 }) {
   const [draggingId, setDraggingId] = useState(null);
@@ -714,7 +715,7 @@ export function SessionTabStrip({
   if (!items.length) {
     return h(
       "div",
-      { className: "session-tab-strip is-empty", role: "tablist", "aria-label": "Open sessions" },
+      { className: "session-tab-strip is-empty", role: "tablist", "aria-label": t("Open sessions") },
       h("p", { className: "session-tab-empty" }, emptyMessage),
       onNewTab
         ? h(
@@ -722,8 +723,8 @@ export function SessionTabStrip({
             {
               type: "button",
               className: "session-tab-new",
-              title: "Open a session",
-              "aria-label": "Open a session",
+              title: t("Open a session"),
+              "aria-label": t("Open a session"),
               onClick: () => onNewTab(),
             },
             "+"
@@ -737,7 +738,7 @@ export function SessionTabStrip({
     {
       className: `session-tab-strip${panning ? " is-panning" : ""}${draggingId ? " is-reordering" : ""}`,
       role: "tablist",
-      "aria-label": "Open sessions",
+      "aria-label": t("Open sessions"),
       ref: stripRef,
       // Only the press starts here; the rest of the gesture is taken from the
       // window (see listenForGesture) so it survives leaving the strip.
@@ -770,8 +771,8 @@ export function SessionTabStrip({
           {
             type: "button",
             className: "session-tab-new",
-            title: "Open a session",
-            "aria-label": "Open a session",
+            title: t("Open a session"),
+            "aria-label": t("Open a session"),
             onClick: () => onNewTab(),
           },
           "+"
@@ -806,27 +807,27 @@ function TabMenu({ items, menu, onBeginRename, onClose, onCloseTabs, onDismiss, 
       ? h(MenuItem, {
           hint: "F2",
           key: "rename",
-          label: "Rename…",
+          label: t("Rename…"),
           onSelect: run(() => onBeginRename(item.tabId)),
         })
       : null,
     onTogglePin
       ? h(MenuItem, {
           key: "pin",
-          label: item.pinned ? "Unpin tab" : "Pin tab",
+          label: item.pinned ? t("Unpin tab") : t("Pin tab"),
           onSelect: run(() => onTogglePin(item.tabId, !item.pinned)),
         })
       : null,
   ].filter(Boolean);
   const closing = [
     onClose
-      ? h(MenuItem, { key: "close", label: "Close", onSelect: run(() => onClose(item.tabId)) })
+      ? h(MenuItem, { key: "close", label: t("Close"), onSelect: run(() => onClose(item.tabId)) })
       : null,
     onCloseTabs
       ? h(MenuItem, {
           disabled: others.length === 0,
           key: "others",
-          label: "Close other tabs",
+          label: t("Close other tabs"),
           onSelect: run(() => onCloseTabs(others, { keepTabId: item.tabId })),
         })
       : null,
@@ -834,14 +835,14 @@ function TabMenu({ items, menu, onBeginRename, onClose, onCloseTabs, onDismiss, 
       ? h(MenuItem, {
           disabled: right.length === 0,
           key: "right",
-          label: "Close tabs to the right",
+          label: t("Close tabs to the right"),
           onSelect: run(() => onCloseTabs(right, { keepTabId: item.tabId })),
         })
       : null,
   ].filter(Boolean);
   return h(
     ContextMenu,
-    { anchor: { x: menu.x, y: menu.y }, ariaLabel: `Tab ${item.title}`, onClose: onDismiss },
+    { anchor: { x: menu.x, y: menu.y }, ariaLabel: t("Tab {title}", { title: item.title }), onClose: onDismiss },
     ...own,
     own.length && closing.length ? h(MenuSeparator, { key: "sep" }) : null,
     ...closing
@@ -878,7 +879,7 @@ export function buildSessionTabItems({
       // The tab the next peek will replace. Rendered as an italic title, the same
       // signal an editor uses for exactly this state.
       preview: Boolean(tab.preview),
-      title: `${resolved.title || "Session"}${paneSuffix}`,
+      title: `${resolved.title || t("Session")}${paneSuffix}`,
       // What the rename editor opens with — the session's OWN title, without the
       // `(2)` pane count the displayed title carries. Seeding from `title` would
       // pre-fill "Auth work (2)", and committing that stores the suffix literally,

@@ -10,6 +10,7 @@ import React, {
   useState,
 } from "react";
 
+import { t } from "./i18n.js";
 import { hasFinePrimaryPointer } from "./pointer-class.js";
 import {
   abbreviateHomePath,
@@ -314,7 +315,7 @@ export function WorkspacePicker({
         "aria-controls": open ? panelId : undefined,
         "aria-expanded": open ? "true" : "false",
         "aria-haspopup": "dialog",
-        "aria-label": `Workspace: ${value || "none chosen"}`,
+        "aria-label": value ? t("Workspace: {path}", { path: value }) : t("Workspace: none chosen"),
         className: "workspace-picker-trigger",
         ref: triggerRef,
         disabled: disabled || undefined,
@@ -363,8 +364,8 @@ export function WorkspacePicker({
               },
               onKeyDown: handleKeyDown,
               placeholder: worktreeMode
-                ? "Filter by branch or repo…"
-                : "Filter, or type a path…",
+                ? t("Filter by branch or repo…")
+                : t("Filter, or type a path…"),
               ref: inputRef,
               spellCheck: false,
               type: "text",
@@ -377,7 +378,7 @@ export function WorkspacePicker({
                     className: "workspace-picker-count",
                     // The bare number reads as a count of nothing in particular to a
                     // screen reader, which cannot see it sitting on the filter field.
-                    title: matched === total ? undefined : `${matched} of ${total} shown`,
+                    title: matched === total ? undefined : t("{matched} of {total} shown", { matched, total }),
                   },
                   matched === total ? String(total) : `${matched}/${total}`
                 )
@@ -419,7 +420,7 @@ export function WorkspacePicker({
             ? h(
                 "p",
                 { className: "workspace-picker-empty" },
-                total ? "No tree matches that filter." : "No other working trees."
+                total ? t("No tree matches that filter.") : t("No other working trees.")
               )
             : null,
           h(
@@ -434,14 +435,14 @@ export function WorkspacePicker({
             h(
               "span",
               { className: "workspace-picker-footer-action" },
-              pathDraft ? `Use ${draft.trim()}` : "Enter a path…"
+              pathDraft ? t("Use {path}", { path: draft.trim() }) : t("Enter a path…")
             ),
             pathDraft
               ? null
               : h(
                   "span",
                   { className: "workspace-picker-footer-hint" },
-                  "for a repo not listed here"
+                  t("for a repo not listed here")
                 )
           )
         )
@@ -452,7 +453,7 @@ export function WorkspacePicker({
 /** What the closed chip says. Worktree mode names the BRANCH; the path is the title. */
 function triggerLabel({ worktreeMode, roots, value }) {
   if (!value) {
-    return "Choose a directory";
+    return t("Choose a directory");
   }
   if (worktreeMode) {
     const match = (roots || []).find((root) => root?.path === value);
@@ -526,11 +527,14 @@ function trustPrompt(workspace, onTrustWorkspace) {
   }
   const canGrant = typeof onTrustWorkspace === "function";
   const state = skipped.length
-    ? `Restricted — agents here skip this folder’s own config (${skipped.join(", ")}).`
-    : "Restricted — this folder isn’t trusted.";
-  const copy = canGrant
-    ? `${state} Trusting it loads that config and lets this relay run git here; its hooks, MCP servers and plugins then run as you.`
-    : `${state} Trust it on the computer running the relay.`;
+    ? t("Restricted — agents here skip this folder’s own config ({skipped}).", { skipped: skipped.join(", ") })
+    : t("Restricted — this folder isn’t trusted.");
+  const copy = t("{sentence} {next}", {
+    sentence: state,
+    next: canGrant
+      ? t("Trusting it loads that config and lets this relay run git here; its hooks, MCP servers and plugins then run as you.")
+      : t("Trust it on the computer running the relay."),
+  });
   return h(
     "div",
     {
@@ -545,10 +549,10 @@ function trustPrompt(workspace, onTrustWorkspace) {
           {
             className: "thread-workspace-trust-button",
             onClick: () => onTrustWorkspace(cwd),
-            title: `Trust ${cwd} — agents load its own config and this relay runs git there`,
+            title: t("Trust {path} — agents load its own config and this relay runs git there", { path: cwd }),
             type: "button",
           },
-          "Trust this folder"
+          t("Trust this folder")
         )
       : null
   );
@@ -624,10 +628,10 @@ export function ThreadWorkspaceField({
                   className: "link-button thread-workspace-unpin",
                   disabled: busy || undefined,
                   onClick: () => onPin?.(null),
-                  title: "Stop pinning and follow the tree the relay detects",
+                  title: t("Stop pinning and follow the tree the relay detects"),
                   type: "button",
                 },
-                "Unpin"
+                t("Unpin")
               )
             : null
         )

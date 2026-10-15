@@ -7,6 +7,7 @@ import { isWorkflowInProgressForThread } from "../shared/workflow-state.js";
 import { canComposeThread } from "../shared/thread-compose.js";
 import { providerLabel } from "../shared/provider-labels.js";
 import { workspaceBasename } from "./utils.js";
+import { t } from "../shared/i18n.js";
 
 function createActiveSessionThread(session) {
   if (!session?.active_thread_id || !session.current_cwd) {
@@ -19,8 +20,8 @@ function createActiveSessionThread(session) {
     name: workspaceBasename(session.current_cwd),
     provider: session.provider || "",
     preview: session.current_status
-      ? `Current session · ${session.current_status}`
-      : "Current remote session",
+      ? t("Current session · {status}", { status: session.current_status })
+      : t("Current remote session"),
     updated_at: Math.floor(Date.now() / 1000),
   };
 }
@@ -81,18 +82,18 @@ export function selectSessionRenderModel({ session, previousSession }) {
     // Checked before `activeThreadFrozen` so a reviewer that is also mid-review
     // still reads as permanently closed rather than temporarily busy.
     messagePlaceholder: taskReviewer
-      ? "This is a task reviewer — read only."
+      ? t("This is a task reviewer — read only.")
       : activeThreadFrozen
       ? activeThreadUnderWorkflow
-        ? "This session is locked by Code Flow…"
-        : "This session is being reviewed…"
+        ? t("This session is locked by Code Flow…")
+        : t("This session is being reviewed…")
       : !hasActiveSession
-      ? "Start a remote session first."
+      ? t("Start a remote session first.")
       // Derive the agent name from the active thread's own provider — a Claude
       // thread must read "Message Claude...", never a hardcoded "Codex".
       : providerLabel(session.provider)
-      ? `Message ${providerLabel(session.provider)} remotely...`
-      : "Message remotely...",
+      ? t("Message {agent} remotely...", { agent: providerLabel(session.provider) })
+      : t("Message remotely..."),
     scrollDebug: {
       thread: session.active_thread_id || "-",
       prevThread: previousSession?.active_thread_id || "-",
@@ -137,10 +138,10 @@ export function selectThreadsRenderModel({
   if (!remoteAuth) {
     return {
       activeThreadId,
-      countLabel: "Remote session history",
+      countLabel: t("Remote session history"),
       emptyMessage: relayDirectory?.length
-        ? "Open a relay to view its session history."
-        : "Pair a relay, then refresh remote history.",
+        ? t("Open a relay to view its session history.")
+        : t("Pair a relay, then refresh remote history."),
       groups: [],
     };
   }
@@ -148,7 +149,7 @@ export function selectThreadsRenderModel({
   if (error) {
     return {
       activeThreadId,
-      countLabel: "Error",
+      countLabel: t("Error"),
       emptyMessage: error,
       groups: [],
     };
@@ -170,8 +171,8 @@ export function selectThreadsRenderModel({
 
   return {
     activeThreadId,
-    countLabel: loading ? "Loading..." : summarizeThreadGroups(groups),
-    emptyMessage: groups.length ? null : "No remote sessions found yet.",
+    countLabel: loading ? t("Loading...") : summarizeThreadGroups(groups),
+    emptyMessage: groups.length ? null : t("No remote sessions found yet."),
     groups,
   };
 }
@@ -181,20 +182,23 @@ export function selectRelayDirectoryRenderModel({ relayDirectory, activeRelayId,
   const nicknameMap = nicknames || {};
 
   return {
-    countLabel: `${relays.length} ${relays.length === 1 ? "relay" : "relays"}`,
+    countLabel:
+      relays.length === 1
+        ? t("{count} relay", { count: relays.length })
+        : t("{count} relays", { count: relays.length }),
     emptyMessage: relays.length
       ? null
-      : "Pair a relay from your local machine to add it here.",
+      : t("Pair a relay from your local machine to add it here."),
     items: relays.map((relay) => {
       const id = relay.relayId || relay.brokerRoomId || relay.deviceId || "";
       const nickname = nicknameMap[relay.relayId] || null;
       return {
         active: activeRelayId === relay.relayId,
         actionLabel: relay.hasLocalProfile
-          ? "Open relay"
+          ? t("Open relay")
           : relay.needsLocalRePairing
-            ? "Re-pair relay"
-            : "Pair again",
+            ? t("Re-pair relay")
+            : t("Pair again"),
         id,
         isEnabled: Boolean(relay.hasLocalProfile && id),
         meta: nickname ? (relay.relayId || relay.brokerRoomId || relay.deviceId || "") : "",
@@ -206,7 +210,7 @@ export function selectRelayDirectoryRenderModel({ relayDirectory, activeRelayId,
           || relay.brokerRoomId
           || relay.deviceLabel
           || relay.deviceId
-          || "Unknown relay",
+          || t("Unknown relay"),
       };
     }),
   };
@@ -248,6 +252,6 @@ export function selectEmptyStateRenderModel({
     serverDisconnectedCopy:
       serverConnectionMessage
       || relayConnectionMessage
-      || "Server disconnected. Waiting for it to reconnect.",
+      || t("Server disconnected. Waiting for it to reconnect."),
   };
 }

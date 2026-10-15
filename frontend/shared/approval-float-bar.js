@@ -7,6 +7,7 @@ import {
   approvalFloatSubject,
   isApprovalCardOffscreen,
 } from "./approval-view.js";
+import { t } from "./i18n.js";
 import { applyTranscriptScrollAction } from "./transcript-scroll.js";
 
 const h = React.createElement;
@@ -110,12 +111,16 @@ export function ApprovalFloatBar({ approval }) {
     },
     h(
       "div",
-      { "aria-label": "Pending approval", className: "approval-float-bar", role: "region" },
+      { "aria-label": t("Pending approval"), className: "approval-float-bar", role: "region" },
       h("span", { "aria-hidden": "true", className: "approval-float-dot" }),
       h("span", { className: "approval-float-name" }, approvalFloatName(approval)),
       h("span", { className: "approval-float-subject", title: subject }, subject),
       moreLines > 0
-        ? h("span", { className: "approval-float-more" }, `+${moreLines} ${moreLines === 1 ? "line" : "lines"}`)
+        ? h(
+            "span",
+            { className: "approval-float-more" },
+            moreLines === 1 ? t("+{count} line", { count: moreLines }) : t("+{count} lines", { count: moreLines })
+          )
         : null,
       h(
         "button",
@@ -125,7 +130,7 @@ export function ApprovalFloatBar({ approval }) {
           onClick: handleJump,
           type: "button",
         },
-        "Jump"
+        t("Jump")
       ),
       h(
         "button",
@@ -135,7 +140,7 @@ export function ApprovalFloatBar({ approval }) {
           "data-approval-scope": "once",
           type: "button",
         },
-        "Approve"
+        t("Approve")
       )
     )
   );

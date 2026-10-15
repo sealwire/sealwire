@@ -5,6 +5,7 @@ import { ApprovalFloatBar } from "./approval-float-bar.js";
 import { StickToBottomFollower } from "./stick-to-bottom.js";
 import { dispatchTranscriptScrollActionEvent } from "./transcript-scroll.js";
 import { getTranscriptScrollController } from "./transcript-scroll-controller.js";
+import { t } from "./i18n.js";
 
 const h = React.createElement;
 
@@ -30,7 +31,7 @@ function onDisclosureCapture(event) {
 }
 
 function fallbackShortId(value) {
-  return value ? String(value).slice(0, 8) : "unknown";
+  return value ? String(value).slice(0, 8) : t("unknown");
 }
 
 export function ConversationEmptyState({
@@ -83,22 +84,22 @@ export function ConversationEmptyState({
 }
 
 export function ReadyConversationState({
-  readyCopy = "Session is live. Send the first prompt below when you're ready.",
-  readyTitle = "Session ready",
+  readyCopy = t("Session is live. Send the first prompt below when you're ready."),
+  readyTitle = t("Session ready"),
   session,
   shortId = fallbackShortId,
 }) {
   const detailParts = [];
 
   if (session?.current_cwd) {
-    detailParts.push(`Workspace: ${session.current_cwd}`);
+    detailParts.push(t("Workspace: {path}", { path: session.current_cwd }));
   }
   if (session?.active_thread_id) {
-    detailParts.push(`Session: ${shortId(session.active_thread_id)}`);
+    detailParts.push(t("Session: {id}", { id: shortId(session.active_thread_id) }));
   }
 
   return h(ConversationEmptyState, {
-    badge: "Ready",
+    badge: t("Ready"),
     className: "thread-empty-ready",
     copy: readyCopy,
     details: detailParts,

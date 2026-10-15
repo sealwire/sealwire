@@ -3,22 +3,24 @@
  * Pure utilities — no DOM, no timers.
  */
 
+import { currentLanguage, t } from "./shared/i18n.js";
+
 export const PROGRESS_VERBS = [
-  "Pondering",
-  "Cogitating",
-  "Hatching",
-  "Plotting",
-  "Brewing",
-  "Tinkering",
-  "Whittling",
-  "Stitching",
-  "Conjuring",
-  "Relaying",
-  "Channeling",
-  "Tunneling",
-  "Wiring",
-  "Vibing",
-  "Noodling",
+  t("Pondering"),
+  t("Cogitating"),
+  t("Hatching"),
+  t("Plotting"),
+  t("Brewing"),
+  t("Tinkering"),
+  t("Whittling"),
+  t("Stitching"),
+  t("Conjuring"),
+  t("Relaying"),
+  t("Channeling"),
+  t("Tunneling"),
+  t("Wiring"),
+  t("Vibing"),
+  t("Noodling"),
 ];
 
 // Per-phase stall thresholds in seconds. `null` disables stall detection
@@ -87,18 +89,23 @@ function capitalize(value) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+// English bends the tool's own name into a verb ("Bashing…"); other languages name the tool.
+function toolLabel(tool) {
+  const gerund = toolGerund(tool);
+  if (!gerund) return null;
+  return currentLanguage() === "en" ? `${gerund}…` : t("Using {tool}…", { tool: tool.trim() });
+}
+
 export function progressPhaseLabel(phase, currentTool, verb) {
   switch (phase) {
     case "streaming":
-      return `${verb ?? "Streaming"}…`;
-    case "tool": {
-      const gerund = toolGerund(currentTool);
-      return gerund ? `${gerund}…` : `${verb ?? "Working"}…`;
-    }
+      return verb ? `${verb}…` : t("Streaming…");
+    case "tool":
+      return toolLabel(currentTool) || (verb ? `${verb}…` : t("Working…"));
     case "waiting_approval":
-      return "Waiting on you";
+      return t("Waiting on you");
     case "thinking":
-      return `${verb ?? "Thinking"}…`;
+      return verb ? `${verb}…` : t("Thinking…");
     default:
       return null;
   }

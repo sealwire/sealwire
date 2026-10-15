@@ -16,6 +16,7 @@ export {
 } from "../shared/workspace-repair.js";
 
 import { normalizeWorkspaceRepairPlan } from "../shared/workspace-repair.js";
+import { t } from "../shared/i18n.js";
 
 // A recorded cwd is routinely wider than a phone. The banner's own CSS ellipsizes at the
 // END, which would eat the worktree name — the one segment that tells the user which
@@ -59,9 +60,9 @@ export function workspaceRepairSummary(plan) {
   if (!plan) {
     return { summary: "", summaryTitle: "" };
   }
-  const noun = plan.kind === "worktree" ? "Worktree" : "Folder";
+  const path = shortenPathForBanner(plan.recordedCwd);
   return {
-    summary: `${noun} gone: ${shortenPathForBanner(plan.recordedCwd)}`,
+    summary: plan.kind === "worktree" ? t("Worktree gone: {path}", { path }) : t("Folder gone: {path}", { path }),
     summaryTitle: plan.recordedCwd,
   };
 }
@@ -76,8 +77,8 @@ export function workspaceRepairHint(plan) {
     return "";
   }
   return plan.kind === "worktree"
-    ? `Re-creating it checks ${plan.branch} back out at that path.`
-    : "Re-creating it lets this session run there again.";
+    ? t("Re-creating it checks {branch} back out at that path.", { branch: plan.branch })
+    : t("Re-creating it lets this session run there again.");
 }
 
 /**
@@ -95,11 +96,11 @@ export function workspaceRepairAction(plan, { error = "", pending = false, threa
     kind: plan.kind,
     label: pending
       ? isWorktree
-        ? "Re-creating worktree…"
-        : "Creating folder…"
+        ? t("Re-creating worktree…")
+        : t("Creating folder…")
       : isWorktree
-        ? "Re-create worktree"
-        : "Create folder",
+        ? t("Re-create worktree")
+        : t("Create folder"),
     pending: Boolean(pending),
     recordedCwd: plan.recordedCwd,
     threadId,

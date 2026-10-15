@@ -16,6 +16,7 @@ import {
   getLocalTranscriptSlotSnapshot,
   subscribeLocalTranscriptSlot,
 } from "./transcript-slot.js";
+import { t } from "../shared/i18n.js";
 
 const h = React.createElement;
 
@@ -43,7 +44,7 @@ function LocalTranscriptSlot() {
 function IconRail() {
   return h(
     "nav",
-    { className: "icon-rail", "aria-label": "Primary" },
+    { className: "icon-rail", "aria-label": t("Primary") },
     h("img", {
       className: "icon-rail-logo",
       src: "/static/sealwire_mark.png",
@@ -63,8 +64,8 @@ function IconRail() {
         id: "icon-rail-settings",
         type: "button",
         disabled: true,
-        title: "Settings",
-        "aria-label": "Settings",
+        title: t("Settings"),
+        "aria-label": t("Settings"),
       },
       h("span", { className: "inline-icon", "aria-hidden": "true", dangerouslySetInnerHTML: { __html: SETTINGS_SVG } })
     )
@@ -144,7 +145,7 @@ function Sidebar() {
       "div",
       { className: "sidebar-bottom-bar sidebar-host-status", id: "sidebar-host-status" },
       h("span", { className: "sidebar-host-dot", id: "sidebar-host-dot", "aria-hidden": "true" }),
-      h("span", { className: "sidebar-host-label", id: "sidebar-host-label" }, "Local relay · Live"),
+      h("span", { className: "sidebar-host-label", id: "sidebar-host-label" }, t("Local relay · Live")),
       h(
         "button",
         {
@@ -152,8 +153,8 @@ function Sidebar() {
           id: "sidebar-settings",
           type: "button",
           disabled: true,
-          title: "Settings",
-          "aria-label": "Settings",
+          title: t("Settings"),
+          "aria-label": t("Settings"),
         },
         iconNode(SETTINGS_SVG)
       )
@@ -225,9 +226,9 @@ function ThreadDrawer() {
         // No "Sessions" caption here any more — the nav row directly above names
         // this view, and saying it twice was the clearest symptom of the old
         // arrangement. The count carries the label's job now.
-        h("p", { className: "sidebar-caption", id: "threads-count" }, "Loading workspace groups...")
+        h("p", { className: "sidebar-caption", id: "threads-count" }, t("Loading workspace groups..."))
       ),
-      h(RefreshButton, { id: "threads-refresh-button", label: "Refresh sessions" })
+      h(RefreshButton, { id: "threads-refresh-button", label: t("Refresh sessions") })
     ),
     h(
       "div",
@@ -239,7 +240,7 @@ function ThreadDrawer() {
           "data-thread-list-scroll-root": "",
           id: "threads-list",
         },
-        h("p", { className: "sidebar-empty" }, "Sessions will appear here once the relay loads saved workspaces.")
+        h("p", { className: "sidebar-empty" }, t("Sessions will appear here once the relay loads saved workspaces."))
       )
     )
   );
@@ -273,10 +274,10 @@ function ThreadContextMenu() {
       h(
         "div",
         { className: "context-menu-items", id: "thread-context-menu-items" },
-        h(MenuRow, { id: "fork-thread-button", label: "Fork session" }),
-        h(MenuRow, { id: "rename-thread-button", label: "Rename…", hint: "F2" }),
-        h(MenuRow, { id: "flag-thread-button", label: "Flag for follow-up" }),
-        h(MenuRow, { id: "archive-thread-button", label: "Archive session" }),
+        h(MenuRow, { id: "fork-thread-button", label: t("Fork session") }),
+        h(MenuRow, { id: "rename-thread-button", label: t("Rename…"), hint: "F2" }),
+        h(MenuRow, { id: "flag-thread-button", label: t("Flag for follow-up") }),
+        h(MenuRow, { id: "archive-thread-button", label: t("Archive session") }),
         h("div", { className: "context-menu-separator", role: "separator" }),
         // One row naming the session's project, opening the flyout below. Listing every
         // project at this level buried the session actions once there were a few.
@@ -285,16 +286,16 @@ function ThreadContextMenu() {
           {
             className: "context-menu-submenu-trigger",
             id: "thread-project-submenu-trigger",
-            label: "Project",
+            label: t("Project"),
             "aria-haspopup": "true",
             "aria-expanded": "false",
             "aria-controls": "thread-project-submenu",
           },
-          h("span", { className: "context-menu-hint", id: "thread-project-current-label" }, "None"),
+          h("span", { className: "context-menu-hint", id: "thread-project-current-label" }, t("None")),
           iconNode(CHEVRON_RIGHT_SVG, "context-menu-chevron")
         ),
         h("div", { className: "context-menu-separator", role: "separator" }),
-        h(MenuRow, { danger: true, id: "delete-thread-button", label: "Delete…" })
+        h(MenuRow, { danger: true, id: "delete-thread-button", label: t("Delete…") })
       ),
       // What Delete… and Archive turn the menu into. Filled by app.js.
       h(
@@ -305,8 +306,8 @@ function ThreadContextMenu() {
         h(
           "div",
           { className: "context-menu-confirm-actions" },
-          h("button", { className: "context-menu-confirm-cancel", id: "thread-menu-confirm-cancel", type: "button" }, "Cancel"),
-          h("button", { className: "context-menu-confirm-danger", id: "thread-menu-confirm-ok", type: "button" }, "Delete session")
+          h("button", { className: "context-menu-confirm-cancel", id: "thread-menu-confirm-cancel", type: "button" }, t("Cancel")),
+          h("button", { className: "context-menu-confirm-danger", id: "thread-menu-confirm-ok", type: "button" }, t("Delete session"))
         )
       )
     ),
@@ -320,10 +321,10 @@ function ThreadContextMenu() {
         { className: "context-menu-filter", hidden: true, id: "thread-project-filter" },
         iconNode(SEARCH_SVG),
         h("input", {
-          "aria-label": "Filter projects",
+          "aria-label": t("Filter projects"),
           autoComplete: "off",
           id: "thread-project-filter-input",
-          placeholder: "Filter projects",
+          placeholder: t("Filter projects"),
           spellCheck: false,
           type: "text",
         })
@@ -360,7 +361,7 @@ function InfoIcon() {
 function ChatHeader() {
   return h(ConversationHeader, {
     backButtonId: "go-console-home",
-    backLabel: "Back to console",
+    backLabel: t("Back to console"),
     composeButtonId: "new-session-compose-button",
     leftPanelToggleId: "toggle-left-panel",
     // No handlers: every button in here is wired by id from app.js, which is what lets
@@ -373,11 +374,11 @@ function ChatHeader() {
       infoButton: h(
         "button",
         {
-          "aria-label": "Session details",
+          "aria-label": t("Session details"),
           className: "header-icon-button chat-heading-info-button",
           id: "open-session-details",
           type: "button",
-          title: "Session details",
+          title: t("Session details"),
         },
         h(InfoIcon)
       ),
@@ -391,7 +392,7 @@ function ChatHeader() {
         hidden: true,
         id: "local-model-badge",
       }),
-      h("span", { className: "status-badge", id: "status-badge" }, "Idle"),
+      h("span", { className: "status-badge", id: "status-badge" }, t("Idle")),
       // Mobile-only Settings entry: the icon rail (which holds the gear) is hidden
       // <=960px, so this keeps every Settings page reachable in every
       // view (the header is always present, even in conversation where the sidebar
@@ -403,19 +404,19 @@ function ChatHeader() {
           id: "open-settings-header",
           type: "button",
           disabled: true,
-          title: "Settings",
-          "aria-label": "Settings",
+          title: t("Settings"),
+          "aria-label": t("Settings"),
         },
         iconNode(SETTINGS_SVG)
       ),
       h(
         "button",
         {
-          "aria-label": "Toggle side panel",
+          "aria-label": t("Toggle side panel"),
           className: "header-button header-panel-toggle header-panel-toggle-right",
           id: "toggle-right-panel",
           type: "button",
-          title: "Toggle side panel (\u2325\u2318B)",
+          title: t("Toggle side panel (\u2325\u2318B)"),
         },
         h(ToggleRightPanelIcon)
       )
@@ -426,7 +427,7 @@ function ChatHeader() {
 function OverviewStrip() {
   return h(
     "section",
-    { "aria-label": "Relay overview", className: "overview-strip", id: "overview-strip" },
+    { "aria-label": t("Relay overview"), className: "overview-strip", id: "overview-strip" },
     h("div", { className: "overview-status-bar", id: "overview-security-badges" })
   );
 }
@@ -499,7 +500,7 @@ function ComposerShell() {
         errorId: "composer-error",
         heldId: "composer-held",
         messageId: "message-input",
-        messagePlaceholder: "Start or open a session first.",
+        messagePlaceholder: t("Start or open a session first."),
         // app.js fills and reads the hidden select, and draws the visible picker into
         // the mount from it; the send path and its tests read #message-model's value.
         modelPicker: h(
@@ -521,23 +522,23 @@ function WorkspaceChangesRail() {
     {
       className: "right-rail",
       id: "workspace-changes-rail",
-      "aria-label": "Workspace overview",
+      "aria-label": t("Workspace overview"),
     },
     h("div", {
       className: "right-rail-resize",
       id: "right-rail-resize",
       role: "separator",
       "aria-orientation": "vertical",
-      "aria-label": "Resize workspace panel",
+      "aria-label": t("Resize workspace panel"),
       tabIndex: 0,
     }),
     h(
       "button",
       {
-        "aria-label": "Hide workspace panel",
+        "aria-label": t("Hide workspace panel"),
         className: "header-button header-panel-toggle rail-top-toggle",
         id: "rail-top-toggle",
-        title: "Hide workspace panel (⌥⌘B)",
+        title: t("Hide workspace panel (⌥⌘B)"),
         type: "button",
       },
       h(ToggleRightPanelIcon)
@@ -602,7 +603,7 @@ function SessionDetailsModal() {
     h(
       "div",
       { className: "modal-header" },
-      h("h2", null, "Relay details"),
+      h("h2", null, t("Relay details")),
       h("button", {
         className: "header-button close-modal-btn",
         id: "close-session-details-modal",
@@ -615,20 +616,20 @@ function SessionDetailsModal() {
       h(
         "section",
         { className: "details-section" },
-        h("h3", { className: "details-heading" }, "Workspace"),
-        h("p", { className: "details-path", id: "session-details-path" }, "No workspace path yet.")
+        h("h3", { className: "details-heading" }, t("Workspace")),
+        h("p", { className: "details-path", id: "session-details-path" }, t("No workspace path yet."))
       ),
       h(
         "section",
         { className: "details-section" },
-        h("h3", { className: "details-heading" }, "Environment"),
-        h("section", { className: "session-meta", id: "session-meta" }, h("span", { className: "meta-empty" }, "Session details will appear here."))
+        h("h3", { className: "details-heading" }, t("Environment")),
+        h("section", { className: "session-meta", id: "session-meta" }, h("span", { className: "meta-empty" }, t("Session details will appear here.")))
       ),
       h(
         "section",
         { className: "details-section" },
-        h("h3", { className: "details-heading" }, "Build"),
-        h("p", { className: "build-info-inline", id: "build-info-local" }, "Loading...")
+        h("h3", { className: "details-heading" }, t("Build")),
+        h("p", { className: "build-info-inline", id: "build-info-local" }, t("Loading..."))
       )
     )
   );
@@ -671,7 +672,7 @@ function WorkspaceDiffModal() {
 function SettingsModal() {
   return h(
     "dialog",
-    { className: "settings-modal panel-modal", id: "settings-modal", "aria-label": "Settings" },
+    { className: "settings-modal panel-modal", id: "settings-modal", "aria-label": t("Settings") },
     h("div", { className: "settings-root", id: "settings-root" }),
     h("datalist", { id: "workspace-suggestions" })
   );
@@ -684,7 +685,7 @@ function PairingApprovalModal() {
     h(
       "div",
       { className: "modal-header" },
-      h("h2", null, "Approve pairing"),
+      h("h2", null, t("Approve pairing")),
       h("button", {
         className: "header-button close-modal-btn",
         id: "close-pairing-approval-modal",
@@ -695,7 +696,7 @@ function PairingApprovalModal() {
       "section",
       { className: "panel-modal-body pairing-approval-shell" },
       h("p", { className: "panel-modal-copy", id: "pairing-approval-hint" },
-        "A remote device is requesting access. Approve or reject before the request times out."),
+        t("A remote device is requesting access. Approve or reject before the request times out.")),
       h("div", { className: "paired-devices-list", id: "pairing-approval-list" })
     )
   );

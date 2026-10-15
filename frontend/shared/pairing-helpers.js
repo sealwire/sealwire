@@ -1,3 +1,5 @@
+import { t } from "./i18n.js";
+
 export function pairingNowSeconds() {
   return Math.floor(Date.now() / 1000);
 }
@@ -79,9 +81,10 @@ export function formatPendingPairingsBannerLabel(
   const head = requests[0];
   const headLabel = head.label || shortId(head.device_id);
   if (requests.length === 1) {
-    return `Device "${headLabel}" wants to pair`;
+    return t("Device \"{name}\" wants to pair", { name: headLabel });
   }
   const extra = requests.length - 1;
-  const noun = extra === 1 ? "device" : "devices";
-  return `Device "${headLabel}" wants to pair, and ${extra} more ${noun}`;
+  return extra === 1
+    ? t("Device \"{name}\" wants to pair, and {count} more device", { name: headLabel, count: extra })
+    : t("Device \"{name}\" wants to pair, and {count} more devices", { name: headLabel, count: extra });
 }

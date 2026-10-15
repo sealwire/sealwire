@@ -1,3 +1,5 @@
+import { t } from "./i18n.js";
+
 /** Server string for `ListCommentsResponse.hand_back_unavailable_reason` on task runs. */
 export const TEAM_RUN_HAND_BACK_UNAVAILABLE =
   "hand-back is only supported for thread-scoped comments; a finished task run cannot accept handed-back line comments yet";
@@ -45,7 +47,7 @@ export function lineCommentHandBackDisabledReason(
   if (commentScopeKind(scope) === "team_run") {
     return TEAM_RUN_HAND_BACK_UNAVAILABLE;
   }
-  return "Hand-back is not available for this comment.";
+  return t("Hand-back is not available for this comment.");
 }
 
 /**

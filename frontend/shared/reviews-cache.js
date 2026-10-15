@@ -5,6 +5,7 @@
 // revision changes — so the reviewer panel stays populated during live turns (which drain
 // the snapshot's `active_review_jobs`) without re-fetching on every snapshot frame.
 
+import { t } from "./i18n.js";
 import { selectReusableReviewers } from "./reviewer-threads.js";
 
 /**
@@ -246,7 +247,7 @@ export function agentsPanelSlice(reviews, viewedThreadId, threads) {
     reviewedSession: reviewer?.parent_thread_id
       ? {
           threadId: reviewer.parent_thread_id,
-          title: reviewedThread?.name || reviewedThread?.preview || "Another session",
+          title: reviewedThread?.name || reviewedThread?.preview || t("Another session"),
           provider: reviewedThread?.provider || null,
         }
       : null,

@@ -7,6 +7,7 @@
  * access is feature-guarded so the pure helpers stay testable under Node.
  */
 
+import { t } from "./i18n.js";
 import { threadAttention } from "./thread-attention.js";
 
 let config = {
@@ -79,11 +80,16 @@ export function isDocumentForeground() {
  * @returns {{ title: string, body: string }}
  */
 export function formatThreadNotification(event, name) {
-  const label = name || "A session";
   if (event?.kind === "needs_input") {
-    return { title: "Agent needs your input", body: `${label} is waiting for you.` };
+    return {
+      title: t("Agent needs your input"),
+      body: name ? t("{name} is waiting for you.", { name }) : t("A session is waiting for you."),
+    };
   }
-  return { title: "Agent finished", body: `${label} completed its turn.` };
+  return {
+    title: t("Agent finished"),
+    body: name ? t("{name} completed its turn.", { name }) : t("A session completed its turn."),
+  };
 }
 
 /**

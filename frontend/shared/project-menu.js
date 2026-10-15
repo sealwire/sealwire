@@ -3,6 +3,8 @@
 // they unit-test without a DOM; app.js renders buttons from these descriptors and
 // wires the actual API calls.
 
+import { t } from "./i18n.js";
+
 /**
  * Ordered descriptors for the thread menu's "Project ›" submenu: the thread's OWN
  * Project first (marked current, so the submenu opens showing where the thread lives),
@@ -31,9 +33,9 @@ export function buildProjectMenuItems({ projects, currentProjectId } = {}) {
       isCurrent: project.id === current,
     });
   }
-  items.push({ kind: "create", label: "New project…" });
+  items.push({ kind: "create", label: t("New project…") });
   if (current) {
-    items.push({ kind: "unassign", label: "Remove from project" });
+    items.push({ kind: "unassign", label: t("Remove from project") });
   }
   return items;
 }

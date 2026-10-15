@@ -12,6 +12,7 @@ import {
   useCardBody,
   useFold,
 } from "./card-parts.js";
+import { t } from "./i18n.js";
 import { renderMarkdown } from "./markdown.js";
 import { providerLabel } from "./provider-labels.js";
 import { transcriptRowKey } from "./transcript-row-key.js";
@@ -91,7 +92,7 @@ export function briefSummary(text, instruction) {
 }
 
 function agentName(provider) {
-  return providerLabel(provider) || "the other agent";
+  return providerLabel(provider) || t("the other agent");
 }
 
 const HANDED_OVER_ICON = ["M2 8h9M8 4.5 11.5 8 8 11.5", "M14 3v10"];
@@ -136,7 +137,7 @@ function SummarySection({ section, body, anchorId, folds, detail = null }) {
  * Markdown split at its headings, three shown; a delegate card uses it for its text too.
  * A `body` the relay sent short always offers the rest, and loads it when opened.
  */
-export function SummarySections({ text, moreLabel = "Show full summary", footer = null, body = null }) {
+export function SummarySections({ text, moreLabel = t("Show full summary"), footer = null, body = null }) {
   const [expanded, setExpanded] = useState(false);
   const sections = parseHandoverSections(text);
   if (!sections.length) {
@@ -236,8 +237,10 @@ function SourceCard({ handover, members }) {
   const body = useCardBody(transcriptRowKey(summary), summary?.injection?.text_clipped);
   return h(HandoverCard, {
     icon: HANDED_OVER_ICON,
-    kicker: "Handed over",
-    title: handover.target_title ? `to ${target} · ${handover.target_title}` : `to ${target}`,
+    kicker: t("Handed over"),
+    title: handover.target_title
+      ? t("to {agent} · {title}", { agent: target, title: handover.target_title })
+      : t("to {agent}", { agent: target }),
     time: clockTime(handover.updated_at),
     summary: summary?.text || "",
     body,
@@ -245,9 +248,9 @@ function SourceCard({ handover, members }) {
       "span",
       { className: "handover-card-status" },
       h("span", { className: "handover-card-dot", "aria-hidden": "true" }),
-      `${target} picked it up`
+      t("{agent} picked it up", { agent: target })
     ),
-    link: h(OpenThreadLink, { threadId: handover.target_thread_id, label: "Open thread" }),
+    link: h(OpenThreadLink, { threadId: handover.target_thread_id, label: t("Open thread") }),
   });
 }
 
@@ -277,7 +280,7 @@ export function HandoverSourceEntry({
     outcome = h(
       "div",
       { className: "handover-line handover-failed", role: "status" },
-      h("span", { className: "handover-line-label" }, "Handover did not finish"),
+      h("span", { className: "handover-line-label" }, t("Handover did not finish")),
       handover.error ? h("span", { className: "handover-line-detail" }, handover.error) : null
     );
   } else if (handover.status === "working") {
@@ -285,8 +288,12 @@ export function HandoverSourceEntry({
       "div",
       { className: "handover-line", role: "status" },
       h(Spinner),
-      h("span", { className: "handover-line-label" }, "Preparing handover"),
-      h("span", { className: "handover-line-detail" }, `${sourceAgent} is summarizing this thread for ${target}`)
+      h("span", { className: "handover-line-label" }, t("Preparing handover")),
+      h(
+        "span",
+        { className: "handover-line-detail" },
+        t("{agent} is summarizing this thread for {target}", { agent: sourceAgent, target })
+      )
     );
   } else {
     outcome = h(
@@ -313,13 +320,13 @@ export function HandoverTargetEntry({ attrs, entry }) {
     { ...attrs, className: `${attrs.className} handover-brief`, "data-handover-id": handover.id },
     h(HandoverCard, {
       icon: PICKED_UP_ICON,
-      kicker: `Picked up from ${sourceAgent}`,
-      title: handover.source_title || "Another session",
+      kicker: t("Picked up from {agent}", { agent: sourceAgent }),
+      title: handover.source_title || t("Another session"),
       time: clockTime(handover.created_at),
       summary: briefSummary(entry.text, handover.instruction),
       body,
       footerStart: null,
-      link: h(OpenThreadLink, { threadId: handover.source_thread_id, label: "Source thread" }),
+      link: h(OpenThreadLink, { threadId: handover.source_thread_id, label: t("Source thread") }),
     })
   );
 }

@@ -1,22 +1,23 @@
+import { t } from "./i18n.js";
 import { providerLabel } from "./provider-labels.js";
 import { normalizeProviderList } from "./provider-settings.js";
 import { isWorkingThreadStatus } from "./thread-status.js";
 import { pendingApprovalForThread } from "./session-view-model.js";
 
 const REVIEW_STATUS_LABELS = {
-  pending_parent_recap: "Recapping changes",
-  waiting_for_parent_recap: "Recapping changes",
-  starting_reviewer: "Starting reviewer",
-  waiting_for_reviewer: "Reviewing",
-  waiting_to_post_back: "Posting review back",
-  posting_back: "Posting review back",
-  interrupting: "Stopping review…",
-  addressing_findings: "Author addressing findings…",
-  blocked: "Review blocked — action needed",
-  complete: "Review complete",
-  failed: "Review failed",
-  escalated: "Reviewer still has concerns",
-  cancelled: "Review cancelled",
+  pending_parent_recap: t("Recapping changes"),
+  waiting_for_parent_recap: t("Recapping changes"),
+  starting_reviewer: t("Starting reviewer"),
+  waiting_for_reviewer: t("Reviewing"),
+  waiting_to_post_back: t("Posting review back"),
+  posting_back: t("Posting review back"),
+  interrupting: t("Stopping review…"),
+  addressing_findings: t("Author addressing findings…"),
+  blocked: t("Review blocked — action needed"),
+  complete: t("Review complete"),
+  failed: t("Review failed"),
+  escalated: t("Reviewer still has concerns"),
+  cancelled: t("Review cancelled"),
 };
 
 const TERMINAL_REVIEW_STATUSES = new Set([
@@ -42,7 +43,7 @@ export function isTerminalReviewStatus(status) {
 }
 
 export function reviewStatusLabel(status) {
-  return REVIEW_STATUS_LABELS[status] || status || "Reviewing";
+  return REVIEW_STATUS_LABELS[status] || status || t("Reviewing");
 }
 
 export function reviewActivity(session) {
@@ -152,8 +153,8 @@ export function reviewChipTone(status) {
 // nothing review-related to surface. Single source of truth so the LOCAL and REMOTE
 // surfaces render the SAME wording/tone — the "under review" state must look identical on
 // both (the remote surface used to only freeze the composer and showed no status).
-export const REVIEW_BLOCKED_BADGE = { label: "Review blocked — action needed", tone: "alert" };
-export const REVIEW_IN_PROGRESS_BADGE = { label: "Review in progress", tone: "alert" };
+export const REVIEW_BLOCKED_BADGE = { label: t("Review blocked — action needed"), tone: "alert" };
+export const REVIEW_IN_PROGRESS_BADGE = { label: t("Review in progress"), tone: "alert" };
 
 export function reviewStatusBadge(session, activeThreadId) {
   // A blocked review locks the workspace until the user stops the reviewer — surface it

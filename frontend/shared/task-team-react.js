@@ -8,6 +8,7 @@
 import React from "react";
 
 import { composerButtonState } from "./thread-compose.js";
+import { t } from "./i18n.js";
 import { formatAttachmentBytes } from "./attachment-size.js";
 import { ConversationComposer } from "./composer.js";
 import { AgentWorkingIndicator } from "./conversation.js";
@@ -101,8 +102,8 @@ function TasksSidebarToggle() {
       type: "button",
       id: "tasks-sidebar-toggle",
       className: "header-button header-panel-toggle tasks-sidebar-toggle",
-      title: "Show navigation panel (\u2318B)",
-      "aria-label": "Show navigation panel",
+      title: t("Show navigation panel (\u2318B)"),
+      "aria-label": t("Show navigation panel"),
     },
     h(ToggleLeftPanelIcon)
   );
@@ -155,11 +156,11 @@ function TaskLockedPreview() {
     h(
       "div",
       { className: "task-locked-notice", role: "status" },
-      h("h2", { className: "task-locked-title" }, "Tasks is in development"),
+      h("h2", { className: "task-locked-title" }, t("Tasks is in development")),
       h(
         "p",
         { className: "task-locked-lede" },
-        "A task will be a written brief worked by a small team of agents, on its own branch, while you do something else. It is not finished yet, so it is switched off here."
+        t("A task will be a written brief worked by a small team of agents, on its own branch, while you do something else. It is not finished yet, so it is switched off here.")
       )
     )
   );
@@ -182,7 +183,7 @@ export function TaskWelcome({ runs, loading, error, onStartTask, orchReady = fal
       h(
         "div",
         { className: "task-screen-empty" },
-        h("h3", null, "Tasks unavailable"),
+        h("h3", null, t("Tasks unavailable")),
         h("p", null, String(error))
       )
     );
@@ -191,7 +192,7 @@ export function TaskWelcome({ runs, loading, error, onStartTask, orchReady = fal
     return h(
       "div",
       { className: "task-orch-body task-screen-centered" },
-      h("div", { className: "task-screen-empty" }, h("p", null, "Loading tasks…"))
+      h("div", { className: "task-screen-empty" }, h("p", null, t("Loading tasks…")))
     );
   }
 
@@ -199,15 +200,15 @@ export function TaskWelcome({ runs, loading, error, onStartTask, orchReady = fal
   return h(
     "div",
     { className: "task-orch-body task-welcome" },
-    h("h2", { className: "task-welcome-title" }, hasTasks || orchReady ? "Ask the Orchestrator" : "Start a task"),
+    h("h2", { className: "task-welcome-title" }, hasTasks || orchReady ? t("Ask the Orchestrator") : t("Start a task")),
     h(
       "p",
       { className: "task-welcome-lede" },
       orchReady
-        ? "Describe a task, ask about one on the left, or use New task for the brief form. The Orchestrator proposes before it starts anything."
+        ? t("Describe a task, ask about one on the left, or use New task for the brief form. The Orchestrator proposes before it starts anything.")
         : hasTasks
-          ? "Pick a task on the left, or describe a new one once the Orchestrator is available. Until then, New task still opens the brief."
-          : "A task is a written brief worked by a three-role team, in its own git worktree on its own branch. Nothing touches your working tree until you merge it."
+          ? t("Pick a task on the left, or describe a new one once the Orchestrator is available. Until then, New task still opens the brief.")
+          : t("A task is a written brief worked by a three-role team, in its own git worktree on its own branch. Nothing touches your working tree until you merge it.")
     ),
     hasTasks || orchReady
       ? null
@@ -217,17 +218,17 @@ export function TaskWelcome({ runs, loading, error, onStartTask, orchReady = fal
           h(
             "li",
             null,
-            h("b", null, "Team lead"),
-            " reads the brief, judges the size, and splits it into sub-tasks."
+            h("b", null, t("Team lead")),
+            ` ${t("reads the brief, judges the size, and splits it into sub-tasks.")}`
           ),
-          h("li", null, h("b", null, "Developer"), " builds one sub-task, with a fresh session each time."),
-          h("li", null, h("b", null, "Reviewer"), " checks the work against your scope and rules."),
-          h("li", null, "You get a branch, commits and a report — and a question if the team needs one.")
+          h("li", null, h("b", null, t("Developer")), ` ${t("builds one sub-task, with a fresh session each time.")}`),
+          h("li", null, h("b", null, t("Reviewer")), ` ${t("checks the work against your scope and rules.")}`),
+          h("li", null, t("You get a branch, commits and a report — and a question if the team needs one."))
         ),
     h(
       "button",
       { type: "button", className: "task-screen-start", onClick: () => onStartTask?.() },
-      "New task"
+      t("New task")
     )
   );
 }
@@ -310,7 +311,7 @@ export function OrchestratorPane({
         // carries no CSS here — every `.chat-thread` rule is scoped under
         // `.chat-shell[data-view="conversation"]`, and this pane is "tasks".
         className: "task-orch-transcript chat-thread",
-        "aria-label": "Orchestrator conversation",
+        "aria-label": t("Orchestrator conversation"),
       },
       emptyTranscript && !transcriptLoading
         ? h(TaskWelcome, { runs, loading, error, onStartTask, orchReady: true })
@@ -338,9 +339,10 @@ export function OrchestratorPane({
             readyState: transcriptLoading ? null : {
               // The title too, not only the copy: the default is "Session ready",
               // and this pane is not a session.
-              readyTitle: "Ask the Orchestrator",
-              readyCopy:
-                "Ask about a task, or describe a new one. The Orchestrator will propose before it starts anything.",
+              readyTitle: t("Ask the Orchestrator"),
+              readyCopy: t(
+                "Ask about a task, or describe a new one. The Orchestrator will propose before it starts anything."
+              ),
             },
           })
     );
@@ -348,11 +350,11 @@ export function OrchestratorPane({
     body = h(
       "div",
       { className: "task-orch-body" },
-      h("h2", { className: "task-welcome-title" }, selectedRun.title || "Untitled task"),
+      h("h2", { className: "task-welcome-title" }, selectedRun.title || t("Untitled task")),
       h(
         "p",
         { className: "task-welcome-lede" },
-        `${teamStatusLabel(selectedRun.status)}. The seats and branch are on the left.`
+        t("{status}. The seats and branch are on the left.", { status: teamStatusLabel(selectedRun.status) })
       )
     );
   } else {
@@ -361,15 +363,15 @@ export function OrchestratorPane({
 
   return h(
     "section",
-    { className: "task-orch", "aria-label": "Orchestrator" },
+    { className: "task-orch", "aria-label": t("Orchestrator") },
     h(
       "header",
       { className: "task-orch-header" },
       h(TasksSidebarToggle),
-      h("div", { className: "task-orch-brand" }, h("span", { className: "task-orch-mark" }, "S"), "Orchestrator"),
+      h("div", { className: "task-orch-brand" }, h("span", { className: "task-orch-mark" }, "S"), t("Orchestrator")),
       waitingCount > 0
-        ? h("span", { className: "task-orch-waiting" }, `${waitingCount} waiting on you`)
-        : h("span", { className: "task-orch-waiting is-quiet" }, "Nothing waiting"),
+        ? h("span", { className: "task-orch-waiting" }, t("{count} waiting on you", { count: waitingCount }))
+        : h("span", { className: "task-orch-waiting is-quiet" }, t("Nothing waiting")),
       // The way out when the secretary is wedged: its provider session can die
       // (a restart drops cursor's) while the thread still resolves, so nothing
       // self-heals and every turn answers the same error. No confirm step —
@@ -380,8 +382,8 @@ export function OrchestratorPane({
             {
               type: "button",
               className: "task-orch-refresh",
-              title: "Start a new Orchestrator conversation. The old one is kept.",
-              "aria-label": "Restart the Orchestrator",
+              title: t("Start a new Orchestrator conversation. The old one is kept."),
+              "aria-label": t("Restart the Orchestrator"),
               disabled: resetBusy,
               onClick: onReset,
             },
@@ -392,7 +394,7 @@ export function OrchestratorPane({
     pendingProposals.length
       ? h(
           "div",
-          { className: "task-orch-proposals", "aria-label": "Pending proposals" },
+          { className: "task-orch-proposals", "aria-label": t("Pending proposals") },
           ...pendingProposals.map((proposal) =>
             h(OrchestratorProposalCard, {
               key: proposal.id,
@@ -460,7 +462,7 @@ function OrchestratorWorkingIndicator({ activity }) {
     return () => clearInterval(timer);
   }, [working]);
 
-  const label = stalled ? "Stalled?" : progressPhaseLabel(phase, tool, verb ?? undefined);
+  const label = stalled ? t("Stalled?") : progressPhaseLabel(phase, tool, verb ?? undefined);
   if (!label) {
     return null;
   }
@@ -471,14 +473,14 @@ function OrchestratorWorkingIndicator({ activity }) {
 
 // The seats, in pipeline order, with the label the card shows for each.
 const PROPOSAL_SEATS = [
-  ["tl", "Planner"],
-  ["dev", "Implementer"],
-  ["reviewer", "Reviewer"],
+  ["tl", t("Planner")],
+  ["dev", t("Implementer")],
+  ["reviewer", t("Reviewer")],
 ];
 
 const PAIR_PROPOSAL_SEATS = [
-  ["dev", "Pair programmer"],
-  ["reviewer", "Reviewer"],
+  ["dev", t("Pair programmer")],
+  ["reviewer", t("Reviewer")],
 ];
 
 // "codex \u00b7 gpt-5.6-codex \u00b7 max", skipping whatever was not chosen.
@@ -497,11 +499,11 @@ function seatAgentLabel(agent) {
 /// Which parts of the task definition this card rewrites, in the order the
 /// brief reads. Names match the labels the team sees, not the wire keys.
 const SPEC_FIELD_LABELS = [
-  ["title", "title"],
-  ["context", "context"],
-  ["acceptance_criteria", "acceptance criteria"],
-  ["agreed_scope", "agreed scope"],
-  ["quality_rules", "quality rules"],
+  ["title", t("title")],
+  ["context", t("context")],
+  ["acceptance_criteria", t("acceptance criteria")],
+  ["agreed_scope", t("agreed scope")],
+  ["quality_rules", t("quality rules")],
 ];
 
 function rewrittenFields(proposal) {
@@ -540,7 +542,7 @@ function ProposalAgentSummary({ proposal }) {
       h(
         "li",
         { key, className: "task-orch-proposal-agent" },
-        h("span", { className: "task-orch-proposal-agent-seat" }, `${label}:`),
+        h("span", { className: "task-orch-proposal-agent-seat" }, t("{label}:", { label })),
         " ",
         h("span", { className: "task-orch-proposal-agent-value" }, value),
       ),
@@ -561,7 +563,7 @@ function timeUntil(startsAt, now) {
   if (secondsAway <= 0) {
     return null;
   }
-  return secondsAway < 60 ? "under a minute" : formatRelativeTime(now, startsAt);
+  return secondsAway < 60 ? t("under a minute") : formatRelativeTime(now, startsAt);
 }
 
 /**
@@ -577,19 +579,19 @@ function scheduleSentence(proposal, nowSeconds) {
   if (!startsAt) {
     // Reachable: the tool may stage `auto_start` with no `start_in_minutes`.
     // Nothing fires without a time, so the card must not imply it will.
-    return armed ? "No start time, so it will not start on its own." : null;
+    return armed ? t("No start time, so it will not start on its own.") : null;
   }
   const now = nowSeconds == null ? Math.floor(Date.now() / 1000) : Number(nowSeconds);
   const stamp = formatTimestamp(startsAt);
   const away = timeUntil(startsAt, now);
   if (armed) {
     return away
-      ? `Starts on its own in ${away}, on ${stamp}.`
-      : `Starts on its own — due now, ${stamp}.`;
+      ? t("Starts on its own in {away}, on {stamp}.", { away, stamp })
+      : t("Starts on its own — due now, {stamp}.", { stamp });
   }
   return away
-    ? `Planned for ${stamp}, in ${away}. Waiting for you to press Start task.`
-    : `Planned for ${stamp}. Waiting for you to press Start task.`;
+    ? t("Planned for {stamp}, in {away}. Waiting for you to press Start task.", { stamp, away })
+    : t("Planned for {stamp}. Waiting for you to press Start task.", { stamp });
 }
 
 function OrchestratorProposalCard({
@@ -611,7 +613,7 @@ function OrchestratorProposalCard({
       h(
         "span",
         { className: "task-orch-card-tag" },
-        proposal.kind === "reopen_task" ? "Reopen task" : "Propose task"
+        proposal.kind === "reopen_task" ? t("Reopen task") : t("Propose task")
       ),
       // A reopen names no team: it puts the task back on the one it already ran
       // with. Falling back to "Default" would claim a choice nobody made.
@@ -619,11 +621,11 @@ function OrchestratorProposalCard({
         "span",
         { className: "task-orch-card-state" },
         proposal.kind === "reopen_task"
-          ? "continues on its own branch"
+          ? t("continues on its own branch")
           : proposal.team_name || "Default"
       )
     ),
-    h("h3", { className: "task-orch-card-title" }, proposal.title || "Untitled task"),
+    h("h3", { className: "task-orch-card-title" }, proposal.title || t("Untitled task")),
     proposal.why
       ? h("p", { className: "task-orch-card-body" }, proposal.why)
       : proposal.context
@@ -635,7 +637,7 @@ function OrchestratorProposalCard({
       ? h(
           "p",
           { className: "task-orch-card-note" },
-          `Rewrites the ${rewrittenFields(proposal).join(", ")} for this run.`
+          t("Rewrites the {fields} for this run.", { fields: rewrittenFields(proposal).join(t(", ")) })
         )
       : null,
     h(ProposalAgentSummary, { proposal }),
@@ -651,7 +653,7 @@ function OrchestratorProposalCard({
           disabled: busy || !onConfirm,
           onClick: () => onConfirm?.(proposal.id),
         },
-        "Start task"
+        t("Start task")
       ),
       // Quiet even when armed: solid is what "Start task" uses, and two accent
       // buttons side by side would argue about which one starts the work. The
@@ -666,7 +668,7 @@ function OrchestratorProposalCard({
           onClick: () => onToggleAutoStart?.(proposal.id, !armed),
         },
         armed ? h("span", { "aria-hidden": "true" }, "✓ ") : null,
-        "Start automatically"
+        t("Start automatically")
       ),
       h(
         "button",
@@ -676,7 +678,7 @@ function OrchestratorProposalCard({
           disabled: busy || !onDismiss,
           onClick: () => onDismiss?.(proposal.id),
         },
-        "Dismiss"
+        t("Dismiss")
       )
     )
   );
@@ -753,9 +755,9 @@ function OrchestratorComposer({
           disabled: !canPropose,
           onClick: propose,
         },
-        "Propose as task"
+        t("Propose as task")
       ),
-      h("span", { className: "task-orch-chip is-disabled" }, "How much today?")
+      h("span", { className: "task-orch-chip is-disabled" }, t("How much today?"))
     ),
     h(
       "form",
@@ -784,8 +786,8 @@ function OrchestratorComposer({
         messageId: "task-orch-input",
         sendButtonId: "task-orch-send",
         messagePlaceholder: disabled
-          ? "Opening the Orchestrator…"
-          : "Message the Orchestrator. To stage a task, use Propose (first line = title)…",
+          ? t("Opening the Orchestrator…")
+          : t("Message the Orchestrator. To stage a task, use Propose (first line = title)…"),
         models: [],
         actionsBeforeSend: null,
         attachmentArea: orchestratorAttachments({ pending, busy, onRemoveAttachment }),
@@ -819,7 +821,7 @@ function orchestratorAttachments({ pending, busy, onRemoveAttachment }) {
   return pending.length
       ? h(
           "ul",
-          { className: "task-orch-attachments", "aria-label": "Attached images" },
+          { className: "task-orch-attachments", "aria-label": t("Attached images") },
           ...pending.map((attachment) =>
             h(
               "li",
@@ -828,11 +830,11 @@ function orchestratorAttachments({ pending, busy, onRemoveAttachment }) {
                 "span",
                 { className: "task-orch-attachment-name" },
                 attachment.size == null
-                  ? attachment.name || "Image"
+                  ? attachment.name || t("Image")
                   // The size was plumbed all the way here and then never shown,
                   // so the same paste produced a different chip in each of this
                   // document's two composers. Same formatter as the other one.
-                  : `${attachment.name || "Image"} · ${formatAttachmentBytes(attachment.size)}`
+                  : `${attachment.name || t("Image")} · ${formatAttachmentBytes(attachment.size)}`
               ),
               onRemoveAttachment
                 ? h(
@@ -840,7 +842,7 @@ function orchestratorAttachments({ pending, busy, onRemoveAttachment }) {
                     {
                       type: "button",
                       className: "task-orch-attachment-remove",
-                      "aria-label": `Remove ${attachment.name || "image"}`,
+                      "aria-label": t("Remove {name}", { name: attachment.name || t("image") }),
                       disabled: busy,
                       onClick: () => onRemoveAttachment(attachment.id),
                     },
@@ -856,10 +858,10 @@ function orchestratorAttachments({ pending, busy, onRemoveAttachment }) {
 
 function OrchestratorAttentionCard({ run, attention, onOpenThread }) {
   const [tag, state] = {
-    question: ["Needs you", "Paused for a decision"],
-    blocked: ["Needs you", "Paused for a decision"],
-    escalated: ["Finished", "Ran out of rounds"],
-    failed: ["Finished", "Task stopped"],
+    question: [t("Needs you"), t("Paused for a decision")],
+    blocked: [t("Needs you"), t("Paused for a decision")],
+    escalated: [t("Finished"), t("Ran out of rounds")],
+    failed: [t("Finished"), t("Task stopped")],
   }[attention.reason];
   return h(
     "div",
@@ -870,7 +872,7 @@ function OrchestratorAttentionCard({ run, attention, onOpenThread }) {
       h("span", { className: "task-orch-card-tag" }, tag),
       h("span", { className: "task-orch-card-state" }, state)
     ),
-    h("h3", { className: "task-orch-card-title" }, run.title || "Untitled task"),
+    h("h3", { className: "task-orch-card-title" }, run.title || t("Untitled task")),
     h("p", { className: "task-orch-card-body" }, attention.text),
     attention.reason === "question" && run.awaiting?.thread_id
       ? h(
@@ -880,7 +882,7 @@ function OrchestratorAttentionCard({ run, attention, onOpenThread }) {
             className: "task-orch-card-action",
             onClick: () => onOpenThread?.(run.awaiting.thread_id),
           },
-          "Answer it"
+          t("Answer it")
         )
       : null,
     h(
@@ -924,7 +926,7 @@ export function TaskSidebarList({
         h("div", { className: "task-locked-bar" }),
         h("div", { className: "task-locked-bar" })
       ),
-      h("p", { className: "task-sidebar-empty" }, "In development")
+      h("p", { className: "task-sidebar-empty" }, t("In development"))
     );
   }
   const list = runs || [];
@@ -936,15 +938,15 @@ export function TaskSidebarList({
       "button",
       { type: "button", className: "task-sidebar-new", onClick: () => onStartTask?.() },
       h("span", { className: "task-sidebar-new-plus" }, "+"),
-      "New task"
+      t("New task")
     ),
     // The error outranks the loading state. Without it a persistent failure reads
     // as "Loading…" here forever while the main area says the relay is
     // unreachable — the two halves of one screen disagreeing about one fetch.
     !runs && error
-      ? h("p", { className: "task-sidebar-empty is-error" }, "Tasks unavailable.")
+      ? h("p", { className: "task-sidebar-empty is-error" }, t("Tasks unavailable."))
       : !runs && loading
-        ? h("p", { className: "task-sidebar-empty" }, "Loading…")
+        ? h("p", { className: "task-sidebar-empty" }, t("Loading…"))
       : list.length
         ? h(
             "div",
@@ -980,14 +982,14 @@ export function TaskSidebarList({
                         ]
                           .filter(Boolean)
                           .join(" "),
-                        title: run.title || "Untitled task",
+                        title: run.title || t("Untitled task"),
                         onClick: () => onOpenTask?.(run.team_run_id),
                       },
                       h("span", { className: `task-sidebar-dot${tone ? ` is-${tone}` : ""}` }),
                       h(
                         "span",
                         { className: "task-sidebar-body" },
-                        h("span", { className: "task-sidebar-title" }, run.title || "Untitled task"),
+                        h("span", { className: "task-sidebar-title" }, run.title || t("Untitled task")),
                         h(
                           "span",
                           { className: "task-sidebar-meta" },
@@ -1003,7 +1005,7 @@ export function TaskSidebarList({
         : h(
             "p",
             { className: "task-sidebar-empty" },
-            "No tasks yet. A task runs on its own branch while you do something else."
+            t("No tasks yet. A task runs on its own branch while you do something else.")
           ),
     typeof onOpenTeams === "function"
       ? h(
@@ -1013,11 +1015,11 @@ export function TaskSidebarList({
             className: "task-sidebar-teams",
             onClick: () => onOpenTeams(),
           },
-          h("span", { className: "task-sidebar-teams-label" }, "Teams"),
+          h("span", { className: "task-sidebar-teams-label" }, t("Teams")),
           h(
             "span",
             { className: "task-sidebar-teams-meta" },
-            teamsSummary || "1 team"
+            teamsSummary || t("1 team")
           )
         )
       : null
@@ -1036,8 +1038,8 @@ function SeatNode({ seat, onOpenThread }) {
       className: `team-seat${stateClass}${openable ? "" : " is-empty"}`,
       disabled: !openable,
       title: openable
-        ? `Open ${seat.label}'s transcript`
-        : `${seat.label} has not been seated yet`,
+        ? t("Open {role}'s transcript", { role: seat.label })
+        : t("{role} has not been seated yet", { role: seat.label }),
       onClick: () => (openable ? onOpenThread?.(seat.threadId) : undefined),
     },
     h(
@@ -1050,14 +1052,14 @@ function SeatNode({ seat, onOpenThread }) {
       "span",
       { className: "team-seat-note" },
       seat.state === "needs_input"
-        ? "Waiting on you"
+        ? t("Waiting on you")
         : seat.state === "working"
-          ? "Working"
+          ? t("Working")
           : seat.state === "reviewing"
-            ? "Reviewing"
+            ? t("Reviewing")
             : openable
-              ? "Idle"
-              : "Not started"
+              ? t("Idle")
+              : t("Not started")
     ),
     seat.subTaskTitle
       ? h("span", { className: "team-seat-subtask" }, seat.subTaskTitle)
@@ -1069,7 +1071,7 @@ export function TeamDiagram({ run, onOpenThread }) {
   const seats = teamSeats(run);
   return h(
     "section",
-    { className: "team-diagram", "aria-label": "The team" },
+    { className: "team-diagram", "aria-label": t("The team") },
     ...seats.map((seat) => h(SeatNode, { key: seat.role, seat, onOpenThread }))
   );
 }
@@ -1082,7 +1084,7 @@ export function TeamRoleFlow({ run, onOpenThread, tokenByRole = null }) {
   const seats = teamSeats(run);
   return h(
     "ol",
-    { className: "team-role-flow", "aria-label": "Role flow" },
+    { className: "team-role-flow", "aria-label": t("Role flow") },
     ...seats.map((seat, index) => {
       const openable = Boolean(seat.threadId);
       const tokens = tokenByRole?.[seat.role];
@@ -1096,14 +1098,14 @@ export function TeamRoleFlow({ run, onOpenThread, tokenByRole = null }) {
               : "queued";
       const note =
         seat.state === "needs_input"
-          ? "Waiting on you"
+          ? t("Waiting on you")
           : seat.state === "working"
-            ? "Working"
+            ? t("Working")
             : seat.state === "reviewing"
-              ? "Reviewing"
+              ? t("Reviewing")
               : openable
-                ? "Done"
-                : "Queued";
+                ? t("Done")
+                : t("Queued");
       return h(
         "li",
         {
@@ -1178,16 +1180,18 @@ function SubTaskRow({ task, isCurrent }) {
           "span",
           {
             className: "task-subtask-digest",
-            title: "Finished — the run has not folded this sub-task in yet",
+            title: t("Finished — the run has not folded this sub-task in yet"),
           },
-          "finalizing"
+          t("finalizing")
         )
       : null,
     task.rounds_used
       ? h(
           "span",
-          { className: "task-subtask-rounds", title: "Review rounds used" },
-          `${task.rounds_used} round${task.rounds_used === 1 ? "" : "s"}`
+          { className: "task-subtask-rounds", title: t("Review rounds used") },
+          task.rounds_used === 1
+            ? t("{count} round", { count: task.rounds_used })
+            : t("{count} rounds", { count: task.rounds_used })
         )
       : null
   );
@@ -1223,10 +1227,10 @@ function TaskActions({ run, onAction, onDelete, pending, error }) {
             type: "button",
             className: "task-action is-delete",
             disabled: Boolean(pending),
-            title: "Permanently delete this task and all of its sessions",
+            title: t("Permanently delete this task and all of its sessions"),
             onClick: () => onDelete(run.team_run_id),
           },
-          pending === "delete" ? "…" : "Delete task"
+          pending === "delete" ? "…" : t("Delete task")
         )
       : null,
     error ? h("p", { className: "task-action-error" }, String(error)) : null
@@ -1260,17 +1264,17 @@ export function TaskDetail({
               "button",
               { type: "button", className: "task-screen-back", onClick: () => onBack?.() },
               h(BackGlyph),
-              "All tasks"
+              t("All tasks")
             )
           ),
       h(
         "div",
         { className: "task-screen-empty" },
-        h("h3", null, "That task is gone"),
+        h("h3", null, t("That task is gone")),
         h(
           "p",
           null,
-          "The relay no longer has a record of it. Any branch it created is still on disk."
+          t("The relay no longer has a record of it. Any branch it created is still on disk.")
         )
       )
     );
@@ -1290,7 +1294,7 @@ export function TaskDetail({
           h(
             "span",
             null,
-            `Parallel ${capacity.parallelUsed ?? "—"}/${capacity.parallelCap ?? "—"}`
+            t("Parallel {used}/{cap}", { used: capacity.parallelUsed ?? "—", cap: capacity.parallelCap ?? "—" })
           ),
           capacity.todayLabel
             ? h("span", null, ` · ${capacity.todayLabel}`)
@@ -1309,18 +1313,18 @@ export function TaskDetail({
               "button",
               { type: "button", className: "task-screen-back", onClick: () => onBack?.() },
               h(BackGlyph),
-              "All tasks"
+              t("All tasks")
             ),
         h(
           "div",
           { className: "task-detail-titles" },
-          h("h2", { className: "task-screen-title" }, run.title || "Untitled task"),
+          h("h2", { className: "task-screen-title" }, run.title || t("Untitled task")),
           h(
             "p",
             { className: "task-screen-subtitle" },
             h("span", { className: "task-card-branch" }, h(BranchGlyph), run.branch || "—"),
             run.target_ref
-              ? h("span", null, ` vs ${run.target_ref.replace(/^refs\/heads\//, "")}`)
+              ? h("span", null, ` ${t("vs {ref}", { ref: run.target_ref.replace(/^refs\/heads\//, "") })}`)
               : null
           )
         )
@@ -1350,7 +1354,7 @@ export function TaskDetail({
                   className: "task-banner-action",
                   onClick: () => onOpenThread?.(run.awaiting.thread_id),
                 },
-                "Answer it"
+                t("Answer it")
               )
             : null
         )
@@ -1368,7 +1372,7 @@ export function TaskDetail({
       ? h(
           "p",
           { className: "task-screen-hint" },
-          "The task is paused, so you can talk to the team lead — open its session to redirect the work."
+          t("The task is paused, so you can talk to the team lead — open its session to redirect the work.")
         )
       : null,
 
@@ -1385,7 +1389,7 @@ export function TaskDetail({
           h(
             "h3",
             { className: "task-section-title" },
-            `Sub-tasks (${progress.done}/${progress.total})`
+            t("Sub-tasks ({done}/{total})", { done: progress.done, total: progress.total })
           ),
           h(
             "ul",
@@ -1405,7 +1409,7 @@ export function TaskDetail({
       ? h(
           "section",
           { className: "task-unresolved" },
-          h("h3", { className: "task-section-title" }, "Unresolved"),
+          h("h3", { className: "task-section-title" }, t("Unresolved")),
           h(
             "ul",
             null,
@@ -1418,7 +1422,7 @@ export function TaskDetail({
       ? h(
           "section",
           { className: "task-changes" },
-          h("h3", { className: "task-section-title" }, "Changes on this branch"),
+          h("h3", { className: "task-section-title" }, t("Changes on this branch")),
           changesPanel
         )
       : null
@@ -1441,7 +1445,7 @@ function TaskWorkspaceResizeHandle() {
     id: "task-workspace-resize",
     role: "separator",
     "aria-orientation": "vertical",
-    "aria-label": "Resize Orchestrator panel",
+    "aria-label": t("Resize Orchestrator panel"),
     tabIndex: 0,
   });
 }
@@ -1460,10 +1464,10 @@ function TasksToolbar({ viewMode, onChangeViewMode, runningCount, capacity, onSt
   return h(
     "header",
     { className: "task-surface-toolbar" },
-    h("h2", { className: "task-surface-title" }, "Tasks"),
+    h("h2", { className: "task-surface-title" }, t("Tasks")),
     h(
       "div",
-      { className: "task-surface-modes", role: "tablist", "aria-label": "Task view" },
+      { className: "task-surface-modes", role: "tablist", "aria-label": t("Task view") },
       ...TASK_VIEW_MODES.map((mode) =>
         h(
           "button",
@@ -1475,7 +1479,7 @@ function TasksToolbar({ viewMode, onChangeViewMode, runningCount, capacity, onSt
             className: `task-surface-mode${viewMode === mode ? " is-active" : ""}`,
             onClick: () => onChangeViewMode?.(mode),
           },
-          mode === "list" ? "List" : "Board"
+          mode === "list" ? t("List") : t("Board")
         )
       )
     ),
@@ -1484,7 +1488,7 @@ function TasksToolbar({ viewMode, onChangeViewMode, runningCount, capacity, onSt
       "span",
       { className: "task-surface-stat" },
       h("span", { className: "task-surface-stat-dot" }),
-      `${runningCount} running`
+      t("{count} running", { count: runningCount })
     ),
     // `todayLabel` is the WHOLE label ("Today 42%"), as TaskDetail's capacity
     // line consumes it. Only the empty case supplies the word.
@@ -1493,17 +1497,17 @@ function TasksToolbar({ viewMode, onChangeViewMode, runningCount, capacity, onSt
       : h(
           "span",
           { className: "task-surface-stat" },
-          "Today ",
+          `${t("Today")} `,
           h(
             "span",
-            { className: "task-surface-unknown", title: "Today's spend is not reported yet" },
+            { className: "task-surface-unknown", title: t("Today's spend is not reported yet") },
             "—"
           )
         ),
     h(
       "button",
       { type: "button", className: "task-surface-new", onClick: () => onStartTask?.() },
-      "New task"
+      t("New task")
     )
   );
 }
@@ -1557,12 +1561,12 @@ export function TaskTeamScreen({
 
   const detailPane = h(
     "aside",
-    { className: "task-workspace-detail", "aria-label": "Task detail" },
+    { className: "task-workspace-detail", "aria-label": t("Task detail") },
     waitingOnFetch
       ? h(
           "div",
           { className: "task-screen task-screen-centered is-embedded" },
-          h("div", { className: "task-screen-empty" }, h("p", null, "Loading task…"))
+          h("div", { className: "task-screen-empty" }, h("p", null, t("Loading task…")))
         )
       : selectedRunId
         ? h(TaskDetail, {
@@ -1575,7 +1579,7 @@ export function TaskTeamScreen({
             actionError,
             changesPanel,
             embedded: true,
-            capacity: capacity || { parallelUsed: "—", parallelCap: "—", todayLabel: "Today —" },
+            capacity: capacity || { parallelUsed: "—", parallelCap: "—", todayLabel: `${t("Today")} —` },
           })
         : h(
             "div",
@@ -1586,15 +1590,15 @@ export function TaskTeamScreen({
               h(
                 "span",
                 null,
-                `Parallel ${capacity?.parallelUsed ?? "—"}/${capacity?.parallelCap ?? "—"}`
+                t("Parallel {used}/{cap}", { used: capacity?.parallelUsed ?? "—", cap: capacity?.parallelCap ?? "—" })
               ),
-              h("span", null, ` · ${capacity?.todayLabel || "Today —"}`)
+              h("span", null, ` · ${capacity?.todayLabel || `${t("Today")} —`}`)
             ),
             h(
               "div",
               { className: "task-screen-empty" },
-              h("h3", null, "No task selected"),
-              h("p", null, "Pick one on the left to see its seats and branch.")
+              h("h3", null, t("No task selected")),
+              h("p", null, t("Pick one on the left to see its seats and branch."))
             )
           )
   );

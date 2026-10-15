@@ -1,4 +1,5 @@
 import { describeSessionStatus } from "../shared/session-status.js";
+import { t } from "../shared/i18n.js";
 import { REVIEW_BLOCKED_BADGE, REVIEW_IN_PROGRESS_BADGE } from "../shared/review-state.js";
 
 /**
@@ -43,8 +44,8 @@ export function selectStatusBadge({
     return {
       text:
         pendingPairingCount === 1
-          ? "Pairing request"
-          : `${pendingPairingCount} pairing requests`,
+          ? t("Pairing request")
+          : t("{count} pairing requests", { count: pendingPairingCount }),
       tone: "alert",
     };
   }
@@ -54,17 +55,17 @@ export function selectStatusBadge({
     return { text: status.primaryLabel, tone: "offline" };
   }
   if (workflowBlocked) {
-    return { text: "Code Flow blocked — action needed", tone: "alert" };
+    return { text: t("Code Flow blocked — action needed"), tone: "alert" };
   }
   if (reviewBlocked) {
     return { text: REVIEW_BLOCKED_BADGE.label, tone: REVIEW_BLOCKED_BADGE.tone };
   }
   if (stalled) {
-    return { text: "Stalled?", tone: "alert" };
+    return { text: t("Stalled?"), tone: "alert" };
   }
   if (activeThreadFrozen) {
     if (activeThreadWorkflowFrozen) {
-      return { text: "Code Flow in progress", tone: "alert" };
+      return { text: t("Code Flow in progress"), tone: "alert" };
     }
     return { text: REVIEW_IN_PROGRESS_BADGE.label, tone: REVIEW_IN_PROGRESS_BADGE.tone };
   }

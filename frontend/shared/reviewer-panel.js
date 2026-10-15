@@ -10,6 +10,7 @@ import {
   threadCount,
 } from "./agents-ledger.js";
 import { clockTime } from "./card-parts.js";
+import { t } from "./i18n.js";
 import { renderMarkdown } from "./markdown.js";
 import { providerMark } from "./provider-mark.js";
 import { transcriptPageIsFromAnotherGeneration } from "./transcript-generation.js";
@@ -84,10 +85,12 @@ export function renderReviewerText(text) {
 // only honestly say how long it has been QUIET — never how long it has been running.
 function sinceLabel(at, live) {
   const rel = formatRelativeTime(at);
+  // Against the formatter's own "now", so it still matches once that word is translated.
+  const now = rel === formatRelativeTime(0);
   if (live) {
-    return rel === "now" ? "working" : `working ${rel}`;
+    return now ? t("working") : t("working {time}", { time: rel });
   }
-  return rel === "now" ? "just now" : `${rel} ago`;
+  return now ? t("just now") : t("{time} ago", { time: rel });
 }
 
 function LiveDot() {
@@ -128,7 +131,7 @@ function RoundRows({ rounds }) {
   );
 }
 
-function LedgerMenu({ items, label = "More actions" }) {
+function LedgerMenu({ items, label = t("More actions") }) {
   const [open, setOpen] = React.useState(false);
   const rootRef = React.useRef(null);
   const triggerRef = React.useRef(null);
@@ -209,18 +212,18 @@ export const GOAL_STATES_NEEDING_USER = new Set([
 ]);
 
 const GOAL_STATUS_LABEL = {
-  active: "Working",
-  awaiting_user: "Needs you",
-  blocked: "Stuck",
-  out_of_turns: "Out of turns",
-  interrupted: "Stopped",
+  active: t("Working"),
+  awaiting_user: t("Needs you"),
+  blocked: t("Stuck"),
+  out_of_turns: t("Out of turns"),
+  interrupted: t("Stopped"),
 };
 
 const GOAL_FLAG_TONE = { awaiting_user: "needs-you", blocked: "blocker" };
 
 function goalStatusLabel(goal) {
   if (goal.status === "complete_claimed") {
-    return `${providerLabel(goal.provider) || "The agent"} says done`;
+    return t("{agent} says done", { agent: providerLabel(goal.provider) || t("The agent") });
   }
   return GOAL_STATUS_LABEL[goal.status] || goal.status;
 }
@@ -239,8 +242,8 @@ function GoalErrorLine({ error, onDismiss = null }) {
           {
             type: "button",
             className: "reviewer-goal-error-dismiss",
-            "aria-label": "Dismiss",
-            title: "Dismiss",
+            "aria-label": t("Dismiss"),
+            title: t("Dismiss"),
             onClick: onDismiss,
           },
           "\u00d7"
@@ -261,7 +264,7 @@ function expandToggleProps(expanded, setExpanded, showMoreTitle) {
     role: "button",
     tabIndex: 0,
     "aria-expanded": expanded,
-    title: expanded ? "Show less" : showMoreTitle,
+    title: expanded ? t("Show less") : showMoreTitle,
   };
 }
 
@@ -308,20 +311,20 @@ function GoalActions({ goal, steps, onStop, onResume, onEdit, onReply, onSendOpt
       "div",
       { className: "reviewer-goal-foot" },
       steps.length
-        ? h("span", { className: "reviewer-goal-progress" }, `${done} of ${steps.length} done`)
+        ? h("span", { className: "reviewer-goal-progress" }, t("{done} of {total} done", { done, total: steps.length }))
         : null,
       spacer,
-      onEdit ? h(GoalLink, { onClick: leavingPanel(() => onEdit(goal.objective)) }, "Edit") : null,
-      stop ? h(GoalLink, { quiet: true, onClick: stop }, "Cancel") : null
+      onEdit ? h(GoalLink, { onClick: leavingPanel(() => onEdit(goal.objective)) }, t("Edit")) : null,
+      stop ? h(GoalLink, { quiet: true, onClick: stop }, t("Cancel")) : null
     );
   }
   if (goal.status === "complete_claimed") {
     return h(
       "div",
       { className: "reviewer-card-actions" },
-      resume ? h(GoalButton, { onClick: resume }, "Not done — keep going") : null,
+      resume ? h(GoalButton, { onClick: resume }, t("Not done — keep going")) : null,
       spacer,
-      stop ? h(GoalLink, { onClick: stop }, "Mark done") : null
+      stop ? h(GoalLink, { onClick: stop }, t("Mark done")) : null
     );
   }
   if (goal.status === "awaiting_user") {
@@ -331,25 +334,25 @@ function GoalActions({ goal, steps, onStop, onResume, onEdit, onReply, onSendOpt
       ...(onSendOption ? goalListOf(goal.options) : []).map((option, index) =>
         h(GoalButton, { key: `${index}:${option}`, primary: true, onClick: () => onSendOption(option) }, option)
       ),
-      reply ? h(GoalButton, { key: "reply", onClick: reply }, "Reply…") : null
+      reply ? h(GoalButton, { key: "reply", onClick: reply }, t("Reply…")) : null
     );
   }
   if (goal.status === "blocked") {
     return h(
       "div",
       { className: "reviewer-card-actions" },
-      reply ? h(GoalButton, { onClick: reply }, "Reply…") : null,
+      reply ? h(GoalButton, { onClick: reply }, t("Reply…")) : null,
       spacer,
-      stop ? h(GoalLink, { quiet: true, onClick: stop }, "Cancel goal") : null
+      stop ? h(GoalLink, { quiet: true, onClick: stop }, t("Cancel goal")) : null
     );
   }
   // Out of turns or interrupted: the same objective can be picked back up.
   return h(
     "div",
     { className: "reviewer-card-actions" },
-    resume ? h(GoalButton, { onClick: resume }, "Keep going") : null,
+    resume ? h(GoalButton, { onClick: resume }, t("Keep going")) : null,
     spacer,
-    stop ? h(GoalLink, { quiet: true, onClick: stop }, "Cancel goal") : null
+    stop ? h(GoalLink, { quiet: true, onClick: stop }, t("Cancel goal")) : null
   );
 }
 
@@ -387,8 +390,10 @@ function GoalSlot({
     React.Fragment,
     null,
     h(LedgerHeading, {
-      label: "Goal",
-      meta: working ? `turn ${goal.turns} of ${goal.max_turns}` : `${goal.turns} turns used`,
+      label: t("Goal"),
+      meta: working
+        ? t("turn {turn} of {max}", { turn: goal.turns, max: goal.max_turns })
+        : t("{count} turns used", { count: goal.turns }),
       trailing: h(
         "span",
         { className: `reviewer-goal-status ${statusTone}` },
@@ -404,7 +409,7 @@ function GoalSlot({
         {
           className: `reviewer-card-title reviewer-goal-title${expanded ? " is-expanded" : ""}`,
           // Clamped by default so a dump cannot push the panel; click expands in place.
-          ...expandToggleProps(expanded, setExpanded, goal.objective ? "Show full goal" : undefined),
+          ...expandToggleProps(expanded, setExpanded, goal.objective ? t("Show full goal") : undefined),
         },
         goal.objective
       ),
@@ -433,7 +438,7 @@ function GoalSlot({
                   className: `reviewer-card-result reviewer-goal-report${
                     reportExpanded ? " is-expanded" : ""
                   }`,
-                  ...expandToggleProps(reportExpanded, setReportExpanded, "Show full report"),
+                  ...expandToggleProps(reportExpanded, setReportExpanded, t("Show full report")),
                 },
             goal.outcome
           )
@@ -554,21 +559,21 @@ function ReviewSlot({
       ? h(
           "p",
           { className: "reviewer-card-result", key: "note" },
-          findings.note || "The full reply is in the reviewer's session."
+          findings.note || t("The full reply is in the reviewer's session.")
         )
       : null,
     wantsText && review.status === "loading" && !review.text
       ? h(
           "p",
           { className: "reviewer-card-note", key: "loading" },
-          terminal ? "Loading review…" : "Loading the reviewer's latest message…"
+          terminal ? t("Loading review…") : t("Loading the reviewer's latest message…")
         )
       : null,
     wantsText && review.status === "error" && !review.text
       ? h(
           "p",
           { className: "reviewer-card-error", key: "load-err" },
-          `Couldn't load the reviewer's messages: ${review.error}`
+          t("Couldn't load the reviewer's messages: {error}", { error: review.error })
         )
       : null,
     wantsText && review.text
@@ -578,7 +583,7 @@ function ReviewSlot({
           // Labelled only while running, so it is clear this is the reviewer mid-turn
           // rather than the review it will post back.
           !terminal
-            ? h("p", { className: "reviewer-card-note" }, "Reviewer's latest message:")
+            ? h("p", { className: "reviewer-card-note" }, t("Reviewer's latest message:"))
             : null,
           renderReviewerText(review.text)
         )
@@ -589,13 +594,13 @@ function ReviewSlot({
     React.Fragment,
     null,
     h(LedgerHeading, {
-      label: "Review",
+      label: t("Review"),
       meta,
-      metaTitle: job.reviewer_effort ? `${meta} · effort ${job.reviewer_effort}` : meta,
+      metaTitle: job.reviewer_effort ? t("{meta} · effort {effort}", { meta, effort: job.reviewer_effort }) : meta,
       // Short sha only: the reviewer's own session id is a bare uuid and says nothing
       // about WHAT was reviewed, which is the only identity worth a slot here.
       trailing: ledger.sha
-        ? h("span", { className: "reviewer-sha", title: "Reviewed commit" }, ledger.sha)
+        ? h("span", { className: "reviewer-sha", title: t("Reviewed commit") }, ledger.sha)
         : null,
     }),
     h(
@@ -638,8 +643,8 @@ function ReviewSlot({
                   // Name only via aria-label — visible "Open review" text was the
                   // button we removed for design 19a; keep the string out of the DOM.
                   "aria-label": threadName
-                    ? `Open ${threadName}`
-                    : "Open the reviewer's session",
+                    ? t("Open {name}", { name: threadName })
+                    : t("Open the reviewer's session"),
                   onClick: (event) => {
                     event.stopPropagation();
                     openReviewer();
@@ -660,10 +665,10 @@ function ReviewSlot({
                 // sheet's copies don't share a dialog id — otherwise the sheet's button
                 // opens the hidden rail's dialog and looks dead on mobile.
                 panelId: `${panelId}-recard-${job.id}`,
-                label: "Re-review",
+                label: t("Re-review"),
                 title: canRequest
-                  ? "Re-review the current changes with this reviewer (reuse preselected)"
-                  : "Available when the agent is idle",
+                  ? t("Re-review the current changes with this reviewer (reuse preselected)")
+                  : t("Available when the agent is idle"),
                 providerOptions: reviewModel.providerOptions || [],
                 models: reviewModel.models || [],
                 defaultProvider: reviewModel.defaultProvider || "",
@@ -687,16 +692,16 @@ function ReviewSlot({
               })
             : null,
           h(LedgerMenu, {
-            label: "Review actions",
+            label: t("Review actions"),
             items: [
               !terminal && onResolveReview
                 ? {
                     key: "stop",
-                    label: job.status === "blocked" ? "Stop reviewer & unlock" : "Stop review",
+                    label: job.status === "blocked" ? t("Stop reviewer & unlock") : t("Stop review"),
                     title:
                       job.status === "blocked"
-                        ? "The reviewer turn couldn't be stopped and the workspace is locked. Stop it to unlock."
-                        : "Stop this review now and unlock the reviewed session.",
+                        ? t("The reviewer turn couldn't be stopped and the workspace is locked. Stop it to unlock.")
+                        : t("Stop this review now and unlock the reviewed session."),
                     onSelect: () => onResolveReview(job.id),
                   }
                 : null,
@@ -705,10 +710,10 @@ function ReviewSlot({
                     danger: true,
                     disabled: !terminal,
                     key: "delete",
-                    label: "Delete review",
+                    label: t("Delete review"),
                     title: terminal
-                      ? "Delete this review and its reviewer session (the findings stay in the conversation)"
-                      : "Stop the reviewer before deleting it",
+                      ? t("Delete this review and its reviewer session (the findings stay in the conversation)")
+                      : t("Stop the reviewer before deleting it"),
                     onSelect: () => onDeleteReview(job.id),
                   }
                 : null,
@@ -837,7 +842,7 @@ function agentMark(provider, name) {
   // Only invent a letter when we have a real name and no shipped mark. Never for
   // the "another agent" placeholder — that used to paint "a", then "?", both of
   // which looked like a broken logo rather than an unknown peer.
-  if (mark || !name || name === "another agent") {
+  if (mark || !name || name === "another agent" || name === t("another agent")) {
     return mark;
   }
   return h(
@@ -851,7 +856,7 @@ function ReviewedSessionSlot({ session, onOpen }) {
   return h(
     React.Fragment,
     null,
-    h(LedgerHeading, { label: "Reviewing for" }),
+    h(LedgerHeading, { label: t("Reviewing for") }),
     h(
       "section",
       { className: "reviewer-agent reviewer-review-source" },
@@ -880,7 +885,7 @@ function ReviewedSessionSlot({ session, onOpen }) {
                   "data-open-thread": session.threadId,
                   onClick: leavingPanel(() => onOpen(session.threadId)),
                 },
-                "Reviewed thread"
+                t("Reviewed thread")
               )
             )
           )
@@ -899,7 +904,7 @@ function HandoverItem({ item, onOpen = null }) {
       "div",
       { className: "reviewer-agent-head" },
       agentMark(item.provider, item.name),
-      h("span", { className: "reviewer-handover-direction" }, item.direction === "from" ? "From" : "To"),
+      h("span", { className: "reviewer-handover-direction" }, item.direction === "from" ? t("From") : t("To")),
       h("span", { className: "reviewer-agent-name reviewer-handover-name" }, item.name),
       item.state
         ? h("span", { className: `reviewer-ask-state is-${item.state.replace(/\s+/g, "-")}` }, item.state)
@@ -957,7 +962,7 @@ function AgentGroup({ group, onOpen = null, fetchAskDetail = null, onDecideModel
         "span",
         { className: `reviewer-agent-state${group.working ? " is-live" : ""}` },
         group.working ? h(LiveDot) : null,
-        group.working ? sinceLabel(group.updatedAt, true) : "idle"
+        group.working ? sinceLabel(group.updatedAt, true) : t("idle")
       )
     ),
     ...group.threads.map((thread) =>
@@ -1045,12 +1050,12 @@ export function ReviewerPanel({
   const delegatedToYou = agents.filter((group) => group.inbound);
   const { pickedUp, handedOver } = handoverLedger(handovers, parentThreadId);
   const handoverSections = [
-    ["Picked up", pickedUp],
-    ["Handed over", handedOver],
+    [t("Picked up"), pickedUp],
+    [t("Handed over"), handedOver],
   ].filter(([, items]) => items.length);
   const delegationSections = [
-    ["Delegated", delegated],
-    ["Delegated to you", delegatedToYou],
+    [t("Delegated"), delegated],
+    [t("Delegated to you"), delegatedToYou],
   ].filter(([, groups]) => groups.length);
   // Both gated on the feature switch, so a thread that has ONLY hidden workflow runs falls
   // through to the empty state's call to action rather than rendering a populated panel
@@ -1103,7 +1108,7 @@ export function ReviewerPanel({
           ? h(
               "article",
               { className: "reviewer-card reviewer-goal" },
-              h(LedgerHeading, { label: "Goal" }),
+              h(LedgerHeading, { label: t("Goal") }),
               h(GoalErrorLine, { error: goalError, onDismiss: onDismissGoalError })
             )
           : null,
@@ -1158,15 +1163,15 @@ export function ReviewerPanel({
             h(
               "p",
               { className: "reviewer-empty-copy" },
-              "Other agents working on this appear here — one you delegated to, one reviewing the current changes, or the session this was handed over to. Each runs in its own session you can open and continue."
+              t("Other agents working on this appear here — one you delegated to, one reviewing the current changes, or the session this was handed over to. Each runs in its own session you can open and continue.")
             ),
             !canRequest && !canStartWorkflow
               ? h(
                   "p",
                   { className: "reviewer-empty-hint" },
                   canLaunchWorkflow
-                    ? "Available when the author session is idle and writable."
-                    : "Available when the agent is idle."
+                    ? t("Available when the author session is idle and writable.")
+                    : t("Available when the agent is idle.")
                 )
               : null
           )
@@ -1180,10 +1185,10 @@ export function ReviewerPanel({
           canLaunch
             ? h(ReviewLauncher, {
                 panelId,
-                label: "Request review",
+                label: t("Request review"),
                 title: canRequest
-                  ? "Ask another agent to review the current changes"
-                  : "Available when the agent is idle",
+                  ? t("Ask another agent to review the current changes")
+                  : t("Available when the agent is idle"),
                 providerOptions: reviewModel.providerOptions || [],
                 models: reviewModel.models || [],
                 defaultProvider: reviewModel.defaultProvider || "",
@@ -1204,10 +1209,10 @@ export function ReviewerPanel({
           canLaunchWorkflow
             ? h(CodeFlowLauncher, {
                 panelId: `${panelId}-code-flow`,
-                label: "Run code flow",
+                label: t("Run code flow"),
                 title: canStartWorkflow
-                  ? "Run the author, reviewer, and revise loop"
-                  : "Available on an idle writable author session with no active review or workflow",
+                  ? t("Run the author, reviewer, and revise loop")
+                  : t("Available on an idle writable author session with no active review or workflow"),
                 providerOptions: workflowModel.providerOptions || [],
                 models: workflowModel.models || [],
                 defaultProvider: workflowModel.defaultProvider || "",

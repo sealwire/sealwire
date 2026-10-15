@@ -10,31 +10,30 @@ import { surfaceText } from "./surface-wording.js";
 
 const h = React.createElement;
 
+// Keyed by the full label in the page's language: the badge arrives already translated.
+const COMPACT_STATUS_LABELS = new Map(
+  [
+    [t("Approval required"), t("Approval")],
+    [t("Re-pair required"), t("Re-pair")],
+    [t("Pairing failed"), t("Failed")],
+    [t("Review in progress"), t("Review")],
+    [t("Review blocked — action needed"), t("Review blocked")],
+    [t("Code Flow in progress"), "Code Flow"],
+    [t("Code Flow blocked — action needed"), t("Code Flow blocked")],
+  ].map(([label, compact]) => [label.toLowerCase(), compact])
+);
+
 function compactStatusLabel(label) {
   const normalized = String(label || "").trim().toLowerCase();
-
-  switch (normalized) {
-    case "approval required":
-      return "Approval";
-    case "re-pair required":
-      return "Re-pair";
-    case "pairing failed":
-      return "Failed";
-    case "review in progress":
-      return "Review";
-    case "review blocked — action needed":
-      return "Review blocked";
-    case "code flow in progress":
-      return "Code Flow";
-    case "code flow blocked — action needed":
-      return "Code Flow blocked";
-    default:
-      return label
-        ? String(label)
-            .trim()
-            .replace(/\b\w/g, (char) => char.toUpperCase())
-        : "";
+  const compact = COMPACT_STATUS_LABELS.get(normalized);
+  if (compact) {
+    return compact;
   }
+  return label
+    ? String(label)
+        .trim()
+        .replace(/\b\w/g, (char) => char.toUpperCase())
+    : "";
 }
 
 function shouldShowHeaderStatusBadge(statusBadge) {
@@ -47,10 +46,10 @@ function relaySubtitle(relay) {
   }
 
   if (relay.needsLocalRePairing) {
-    return surfaceText("Local credentials are missing in this browser. Pair this relay again to restore encrypted access.");
+    return t(surfaceText("Local credentials are missing in this browser. Pair this relay again to restore encrypted access."));
   }
 
-  return surfaceText("Grant exists, but this browser does not have local encrypted access yet.");
+  return t(surfaceText("Grant exists, but this browser does not have local encrypted access yet."));
 }
 
 function InfoIcon() {
@@ -89,7 +88,7 @@ export function WorkspaceHeading({ header, statusBadge, onOpenInfo, titleNode = 
             id: "remote-workspace-title",
             title: header?.titleTitle || "",
           },
-          header?.title || surfaceText("Pair this browser")
+          header?.title || t(surfaceText("Pair this browser"))
         ),
     statusNode: showStatus
       ? h(
@@ -107,11 +106,11 @@ export function WorkspaceHeading({ header, statusBadge, onOpenInfo, titleNode = 
       ? h(
           "button",
           {
-            "aria-label": "Session details",
+            "aria-label": t("Session details"),
             className: "header-icon-button chat-heading-info-button",
             id: "remote-open-session-details",
             onClick: onOpenInfo,
-            title: "Session details",
+            title: t("Session details"),
             type: "button",
           },
           h(InfoIcon)
@@ -188,7 +187,7 @@ export function SessionMetaPanel({ model }) {
       h(
         "span",
         { className: "meta-chip", key: `${chip.label}:${chip.value}` },
-        h("strong", null, `${chip.label}:`),
+        h("strong", null, t("{label}:", { label: chip.label })),
         h("span", null, chip.value)
       )
     ),
@@ -379,19 +378,19 @@ function RelayHomeCard({ nickname, onRenameRelay, onSelectRelay, relay }) {
     || relay.brokerRoomId
     || relay.deviceLabel
     || relay.deviceId
-    || "Unknown relay";
+    || t("Unknown relay");
   const title = nickname || fallbackTitle;
   const subtitle = relay.hasLocalProfile
     ? relay.deviceLabel || relay.deviceId
     : relay.needsLocalRePairing
-      ? surfaceText("Local credentials are missing in this browser. Pair this relay again to restore remote access.")
-      : surfaceText("This browser can see the grant, but it does not have local encrypted access for this relay yet.");
-  const meta = relay.grantedAt ? `Granted ${formatTimestamp(relay.grantedAt)}` : null;
+      ? t(surfaceText("Local credentials are missing in this browser. Pair this relay again to restore remote access."))
+      : t(surfaceText("This browser can see the grant, but it does not have local encrypted access for this relay yet."));
+  const meta = relay.grantedAt ? t("Granted {time}", { time: formatTimestamp(relay.grantedAt) }) : null;
   const cta = relay.hasLocalProfile
-    ? "Open relay"
+    ? t("Open relay")
     : relay.needsLocalRePairing
-      ? surfaceText("Re-pair in this browser")
-      : surfaceText("Pair again in this browser");
+      ? t(surfaceText("Re-pair in this browser"))
+      : t(surfaceText("Pair again in this browser"));
 
   const canRename = Boolean(onRenameRelay && relay.relayId);
   const [editing, setEditing] = React.useState(false);
@@ -430,7 +429,7 @@ function RelayHomeCard({ nickname, onRenameRelay, onSelectRelay, relay }) {
             commitEditing();
           },
         },
-        h("label", { className: "relay-home-card-edit-label", htmlFor: `relay-rename-${relayId}` }, "Rename relay"),
+        h("label", { className: "relay-home-card-edit-label", htmlFor: `relay-rename-${relayId}` }, t("Rename relay")),
         h("input", {
           autoFocus: true,
           className: "relay-home-card-edit-input",
@@ -449,11 +448,11 @@ function RelayHomeCard({ nickname, onRenameRelay, onSelectRelay, relay }) {
         h(
           "div",
           { className: "relay-home-card-edit-actions" },
-          h("button", { className: "relay-home-card-edit-save", type: "submit" }, "Save"),
+          h("button", { className: "relay-home-card-edit-save", type: "submit" }, t("Save")),
           h(
             "button",
             { className: "relay-home-card-edit-cancel", onClick: cancelEditing, type: "button" },
-            "Cancel"
+            t("Cancel")
           ),
           nickname
             ? h(
@@ -466,7 +465,7 @@ function RelayHomeCard({ nickname, onRenameRelay, onSelectRelay, relay }) {
                   },
                   type: "button",
                 },
-                "Reset"
+                t("Reset")
               )
             : null
         )
@@ -502,29 +501,33 @@ function RelayHomeCard({ nickname, onRenameRelay, onSelectRelay, relay }) {
       ? h(
           "button",
           {
-            "aria-label": nickname ? `Rename ${title}` : `Give ${title} a nickname`,
+            "aria-label": nickname
+              ? t("Rename {name}", { name: title })
+              : t("Give {name} a nickname", { name: title }),
             className: "relay-home-card-rename",
             onClick: startEditing,
             type: "button",
           },
-          nickname ? "Rename" : "Nickname"
+          nickname ? t("Rename") : t("Nickname")
         )
       : null
   );
 }
 
 export function MissingCredentialsState({ remoteAuth }) {
-  const relayLabel = remoteAuth?.relayLabel || remoteAuth?.deviceLabel || "This relay";
+  const relayLabel = remoteAuth?.relayLabel || remoteAuth?.deviceLabel || t("This relay");
   return h(
     "div",
     { className: "thread-empty relay-home-empty" },
-    h("span", { className: "thread-empty-badge" }, "Re-pair required"),
-    h("h2", null, "Local credentials missing"),
+    h("span", { className: "thread-empty-badge" }, t("Re-pair required")),
+    h("h2", null, t("Local credentials missing")),
     h(
       "p",
       null,
-      relayLabel + surfaceText(" is still known to this browser, but its local encrypted credentials are unavailable.")
+      t(surfaceText("{relay} is still known to this browser, but its local encrypted credentials are unavailable."), {
+        relay: relayLabel,
+      })
     ),
-    h("p", null, "Pair this relay again on this device to restore remote access.")
+    h("p", null, t("Pair this relay again on this device to restore remote access."))
   );
 }

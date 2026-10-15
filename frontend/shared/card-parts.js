@@ -2,6 +2,8 @@
 // the skeleton.
 import React, { useContext, useEffect, useRef, useState } from "react";
 
+import { t } from "./i18n.js";
+
 const h = React.createElement;
 
 export function clockTime(seconds) {
@@ -109,18 +111,18 @@ export function CardBodyStatus({ body }) {
       "div",
       { className: "card-body-status", role: "status", "data-card-body-loading": "true" },
       h(Spinner),
-      "Loading the rest…"
+      t("Loading the rest…")
     );
   }
   if (body?.failed) {
     return h(
       "div",
       { className: "card-body-status is-failed", role: "status" },
-      "Could not load the rest.",
+      t("Could not load the rest."),
       h(
         "button",
         { type: "button", className: "handover-card-link", "data-card-body-retry": "true", onClick: body.load },
-        "Try again"
+        t("Try again")
       )
     );
   }
@@ -138,7 +140,7 @@ export function ShowAllButton({ open, onToggle, label }) {
       onClick: onToggle,
     },
     h(Caret, { open }),
-    open ? "Show less" : label
+    open ? t("Show less") : label
   );
 }
 

@@ -25,6 +25,7 @@ import {
 } from "../transcript/details.js";
 import { hydrateLocalTranscript, loadOlderLocalTranscript } from "../transcript/hydration.js";
 import { clearTranscriptHydration, restoreHydratedTranscript } from "../transcript/store.js";
+import { t } from "../../shared/i18n.js";
 
 export function createTranscriptController(ctx) {
   const {
@@ -84,7 +85,7 @@ export function createTranscriptController(ctx) {
 
     if (!response.ok || !payload.ok) {
       throw relayError(
-        payload?.error?.message || "Failed to load transcript history",
+        payload?.error?.message || t("Failed to load transcript history"),
         payload?.error?.code
       );
     }

@@ -15,6 +15,7 @@ import {
 } from "./context-menu-react.js";
 import { isImeComposing } from "./composer-keys.js";
 import { describeProjectDelete } from "./destructive-confirm-copy.js";
+import { t } from "./i18n.js";
 import { filterProjectRows } from "./project-picker-model.js";
 import { hasFinePrimaryPointer } from "./pointer-class.js";
 import { CHECK_SVG, SEARCH_SVG } from "../svg.js";
@@ -28,11 +29,11 @@ function rowKey(row) {
 export function ProjectMenu({
   // Active project only: a rename landing on another row is unrecoverable.
   activeProject = null,
-  createLabel = "New project…",
+  createLabel = t("New project…"),
   // From `buildProjectPickerRows`, so what a row says is decided in one place.
   defaultRow = null,
-  filterPlaceholder = "Switch project…",
-  heading = "Projects",
+  filterPlaceholder = t("Switch project…"),
+  heading = t("Projects"),
   id = null,
   // Taken as a prop rather than via forwardRef: the owner needs the menu node to
   // position it, and a plain prop keeps this a plain function component.
@@ -65,7 +66,7 @@ export function ProjectMenu({
   const pinned = filtering ? [] : [...topRows, ...(defaultRow ? [defaultRow] : [])];
   const projects = filterProjectRows(projectRows, query);
   const createEntry = onCreateProject
-    ? { create: true, label: filtering ? `Create “${query.trim()}”` : createLabel }
+    ? { create: true, label: filtering ? t("Create “{name}”", { name: query.trim() }) : createLabel }
     : null;
   const entries = [...pinned, ...projects, ...(createEntry ? [createEntry] : [])];
 
@@ -187,18 +188,18 @@ export function ProjectMenu({
     }) : h(
       "div",
       { className: "project-menu-toolbar" },
-      pinned.length ? optionRow(pinned[0]) : h(MenuHeading, null, heading || "Projects"),
+      pinned.length ? optionRow(pinned[0]) : h(MenuHeading, null, heading || t("Projects")),
       h(
         "button",
         {
-          "aria-label": "Search projects",
+          "aria-label": t("Search projects"),
           className: "project-menu-search-toggle",
           onClick: () => {
             // iOS needs the input mounted and focused before this tap finishes.
             flushSync(() => setSearchExpanded(true));
           },
           role: "menuitem",
-          title: "Search projects",
+          title: t("Search projects"),
           type: "button",
         },
         h(MenuGlyph, { svg: SEARCH_SVG })
@@ -247,7 +248,7 @@ export function ProjectMenu({
                     role: "menuitem",
                     type: "button",
                   },
-                  h("span", { className: "context-menu-label" }, "Rename project…")
+                  h("span", { className: "context-menu-label" }, t("Rename project…"))
                 )
               : null,
             onDeleteProject
@@ -263,7 +264,7 @@ export function ProjectMenu({
                     role: "menuitem",
                     type: "button",
                   },
-                  h("span", { className: "context-menu-label" }, "Delete project…")
+                  h("span", { className: "context-menu-label" }, t("Delete project…"))
                 )
               : null
           )

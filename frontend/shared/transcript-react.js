@@ -69,6 +69,7 @@ import { isFailedTranscriptEntry, isPartialTranscriptEntry } from "./transcript-
 import { MarkdownEditorLinksContext, renderMarkdown, renderStreamingMarkdown } from "./markdown.js";
 import { didPrependOlderTranscript } from "./transcript-scroll.js";
 import { getTranscriptScrollController } from "./transcript-scroll-controller.js";
+import { t } from "./i18n.js";
 
 const h = React.createElement;
 
@@ -106,7 +107,7 @@ function previewText(value) {
 function renderCommandPreviewText(value) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   if (!text) {
-    return "(empty)";
+    return t("(empty)");
   }
   if (text.length <= 160) {
     return text;
@@ -117,7 +118,7 @@ function renderCommandPreviewText(value) {
 function renderToolPreviewText(value) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   if (!text) {
-    return "(empty)";
+    return t("(empty)");
   }
   if (text.length <= 180) {
     return text;
@@ -164,15 +165,15 @@ function ExpandableBlock({
   preformatted = false,
   value,
 }) {
-  const full = value || "(empty)";
+  const full = value || t("(empty)");
   if (!isCollapsible(value)) {
     return preformatted
       ? h("pre", { className }, full)
       : h("div", { className }, full);
   }
 
-  const summaryLabel = preformatted ? "Expand" : "Show more";
-  const collapseLabel = preformatted ? "Collapse" : "Show less";
+  const summaryLabel = preformatted ? t("Expand") : t("Show more");
+  const collapseLabel = preformatted ? t("Collapse") : t("Show less");
   const contentClass = preformatted ? `${className} collapsible-pre` : className;
   const ContentTag = preformatted ? "pre" : "div";
 
@@ -208,7 +209,7 @@ function ExpandableBlock({
 // (shared/transcript-hydration-store.js) guarantees a completing entry's text
 // is still the full body, so completed always gets the ordinary full parse.
 function renderMessageBody(text, isStreaming = false) {
-  if (!text) return "(empty)";
+  if (!text) return t("(empty)");
   return isStreaming ? renderStreamingMarkdown(text) : renderMarkdown(text);
 }
 
@@ -230,7 +231,7 @@ function keepSelection(event) {
   event.preventDefault();
 }
 
-function messageCopyButton(value, labelled, title = "Copy response", onMouseDown = undefined) {
+function messageCopyButton(value, labelled, title = t("Copy response"), onMouseDown = undefined) {
   return h(
     "button",
     {
@@ -251,7 +252,7 @@ function messageCopyButton(value, labelled, title = "Copy response", onMouseDown
       "aria-hidden": "true",
       dangerouslySetInnerHTML: { __html: CHECK_SVG },
     }),
-    labelled ? h("span", { className: "message-action-label" }, "Copy") : null
+    labelled ? h("span", { className: "message-action-label" }, t("Copy")) : null
   );
 }
 
@@ -271,7 +272,7 @@ function renderMessageActions(entry, { showFork = false, canAsk = false, settled
           type: "button",
           className: "message-ask-button",
           "data-ask-message": value,
-          title: "Ask about this message",
+          title: t("Ask about this message"),
           onMouseDown: keepSelection,
         },
         h("span", {
@@ -279,7 +280,7 @@ function renderMessageActions(entry, { showFork = false, canAsk = false, settled
           "aria-hidden": "true",
           dangerouslySetInnerHTML: { __html: ASK_SVG },
         }),
-        h("span", { className: "message-action-label" }, "Ask")
+        h("span", { className: "message-action-label" }, t("Ask"))
       )
     : null;
   const fork = showFork
@@ -289,8 +290,8 @@ function renderMessageActions(entry, { showFork = false, canAsk = false, settled
           type: "button",
           className: "message-fork-button",
           "data-fork-from-item": transcriptRowKey(entry) || "",
-          title: "Fork from here",
-          "aria-label": "Fork conversation from this message",
+          title: t("Fork from here"),
+          "aria-label": t("Fork conversation from this message"),
         },
         h("span", {
           className: "message-fork-icon",
@@ -310,7 +311,7 @@ function renderMessageActions(entry, { showFork = false, canAsk = false, settled
   }
   return h(
     "div",
-    { className: "message-toolbar", role: "toolbar", "aria-label": "Message actions" },
+    { className: "message-toolbar", role: "toolbar", "aria-label": t("Message actions") },
     ask,
     ask && hasText ? h("span", { className: "message-toolbar-sep", "aria-hidden": "true" }) : null,
     hasText ? messageCopyButton(value, false) : null,
@@ -331,7 +332,7 @@ export function renderSelectionToolbar(popover, onAsk = null) {
     {
       className: "selection-toolbar",
       role: "toolbar",
-      "aria-label": "Selection actions",
+      "aria-label": t("Selection actions"),
       style: { left: `${popover.left}px`, top: `${popover.top}px` },
     },
     onAsk
@@ -341,7 +342,7 @@ export function renderSelectionToolbar(popover, onAsk = null) {
             type: "button",
             className: "message-ask-button",
             "data-ask-message": popover.text,
-            title: "Ask about the selection",
+            title: t("Ask about the selection"),
             onMouseDown: keepSelection,
             onClick: onAsk,
           },
@@ -350,11 +351,11 @@ export function renderSelectionToolbar(popover, onAsk = null) {
             "aria-hidden": "true",
             dangerouslySetInnerHTML: { __html: ASK_SVG },
           }),
-          h("span", { className: "message-action-label" }, "Ask")
+          h("span", { className: "message-action-label" }, t("Ask"))
         )
       : null,
     onAsk ? h("span", { className: "message-toolbar-sep", "aria-hidden": "true" }) : null,
-    messageCopyButton(popover.text, false, "Copy selection", keepSelection)
+    messageCopyButton(popover.text, false, t("Copy selection"), keepSelection)
   );
 }
 
@@ -679,7 +680,7 @@ function CommandEntry({ entry, isJustPrepended = false, options = null, inGroup 
         itemId,
         expanded,
         status: entry.status,
-        title: renderCommandPreviewText(command || "(empty)"),
+        title: renderCommandPreviewText(command),
         titleIsCode: true,
         output,
       }),
@@ -700,7 +701,7 @@ function CommandEntry({ entry, isJustPrepended = false, options = null, inGroup 
             cut: isPartialTranscriptEntry(source),
           }),
       expanded && loading && (!detailEntry || isPartialTranscriptEntry(source))
-        ? h("p", { className: "command-detail-note" }, "Loading full command output…")
+        ? h("p", { className: "command-detail-note" }, t("Loading full command output…"))
         : null
     )
   );
@@ -720,8 +721,15 @@ function isOutputCut(entry, output) {
 
 // An opened row whose full body could not be fetched still holds only the start.
 function CutCopyNote() {
-  return h("div", { className: "tool-run-cut-note" }, "Only the start of this output is here.");
+  return h("div", { className: "tool-run-cut-note" }, t("Only the start of this output is here."));
 }
+
+// Statuses a row can end on besides success and failure; anything newer shows as sent.
+const END_STATUS_WORDS = {
+  cancelled: t("cancelled"),
+  declined: t("declined"),
+  interrupted: t("interrupted"),
+};
 
 function isRunningStatus(status) {
   return status === "running" || status === "in_progress" || status === "inProgress";
@@ -737,9 +745,9 @@ function toolRunStatusTag(status, output, { exitLine = false } = {}) {
   }
   if (isFailedTranscriptEntry({ status: value })) {
     const exit = exitLine ? /^\s*Exit code (\d+)/.exec(String(output || "")) : null;
-    return { label: exit ? `exit ${exit[1]}` : "failed", failed: true };
+    return { label: exit ? t("exit {code}", { code: exit[1] }) : t("failed"), failed: true };
   }
-  return { label: value, failed: false };
+  return { label: END_STATUS_WORDS[value] || value, failed: false };
 }
 
 function ToolRunRow({
@@ -812,11 +820,11 @@ function ToolRunFailureTail({ itemId, status, output, command, cut = false }) {
     "div",
     { className: "tool-run-output" },
     cut
-      ? h("span", { className: "tool-run-output-note" }, "Only the start of the output is here.")
+      ? h("span", { className: "tool-run-output-note" }, t("Only the start of the output is here."))
       : h(
           React.Fragment,
           null,
-          hidden ? h("span", { className: "tool-run-output-more" }, `… ${hidden} lines`) : null,
+          hidden ? h("span", { className: "tool-run-output-more" }, t("… {count} lines", { count: hidden })) : null,
           h("pre", { className: "tool-run-output-tail" }, lines.slice(hidden).join("\n"))
         ),
     h(
@@ -826,12 +834,12 @@ function ToolRunFailureTail({ itemId, status, output, command, cut = false }) {
         ? h(
             "button",
             { type: "button", "data-item-id": itemId, "data-transcript-toggle": "entry" },
-            "Full output"
+            t("Full output")
           )
         : null,
       // A cut copy's command may be cut as well; copying half a heredoc is worse than none.
       command && !cut
-        ? h("button", { type: "button", "data-copy-message": command }, "Copy command")
+        ? h("button", { type: "button", "data-copy-message": command }, t("Copy command"))
         : null
     )
   );
@@ -861,9 +869,9 @@ function reasoningPreview(text) {
 
 function reasoningLabel(status) {
   const value = status || "completed";
-  if (value === "running") return "Thinking";
-  if (value === "completed") return "Thought";
-  return `Thought · ${value}`;
+  if (value === "running") return t("Thinking");
+  if (value === "completed") return t("Thought");
+  return t("Thought · {status}", { status: END_STATUS_WORDS[value] || value });
 }
 
 function ReasoningEntryImpl({
@@ -918,7 +926,7 @@ function ReasoningEntryImpl({
                   "data-transcript-toggle": "group",
                   type: "button",
                 },
-                showAll ? "Show less" : "Show all"
+                showAll ? t("Show less") : t("Show all")
               )
             : null
         )
@@ -1007,7 +1015,7 @@ function UnifiedDiff({ value }) {
     : parsedRows;
   return h(
     "div",
-    { "aria-label": "File diff", className: "diff-view", role: "region" },
+    { "aria-label": t("File diff"), className: "diff-view", role: "region" },
     ...visibleRows.map((row, index) =>
       h(DiffLine, { key: `${index}:${row.line}`, row })
     ),
@@ -1020,7 +1028,7 @@ function UnifiedDiff({ value }) {
             onClick: () => setShowAll(true),
             type: "button",
           },
-          "Show remaining diff"
+          t("Show remaining diff")
         )
       : null
   );
@@ -1045,12 +1053,12 @@ export function shouldAutoLoadFileChangeDiffs(tool, hasResolvedDetail, isExpande
 // add or a delete is a modification — providers spell that several ways
 // ("update", "modify", …) and the glyph shouldn't care which.
 const CHANGE_GLYPHS = {
-  add: { letter: "A", label: "Added", modifier: "is-add" },
-  create: { letter: "A", label: "Added", modifier: "is-add" },
-  delete: { letter: "D", label: "Deleted", modifier: "is-del" },
-  remove: { letter: "D", label: "Deleted", modifier: "is-del" },
+  add: { letter: "A", label: t("Added"), modifier: "is-add" },
+  create: { letter: "A", label: t("Added"), modifier: "is-add" },
+  delete: { letter: "D", label: t("Deleted"), modifier: "is-del" },
+  remove: { letter: "D", label: t("Deleted"), modifier: "is-del" },
 };
-const MODIFIED_GLYPH = { letter: "M", label: "Modified", modifier: "is-mod" };
+const MODIFIED_GLYPH = { letter: "M", label: t("Modified"), modifier: "is-mod" };
 
 export function changeGlyph(changeType) {
   return CHANGE_GLYPHS[String(changeType || "").toLowerCase()] || MODIFIED_GLYPH;
@@ -1103,7 +1111,7 @@ function FileDiffSection({
   // workspace-diff rail keeps the two surfaces (and neighboring tools) in step.
   const header = h(
     "summary",
-    { className: "diff-file-section-header", title: change.path || "unknown" },
+    { className: "diff-file-section-header", title: change.path || t("unknown") },
     h("span", { className: `diff-file-glyph ${glyph.modifier}`, title: glyph.label }, glyph.letter),
     h(
       "span",
@@ -1135,7 +1143,7 @@ function FileDiffSection({
             : h(
                 "p",
                 { className: "diff-file-empty" },
-                diffsOmitted ? "Loading diff…" : "Diff unavailable for this file."
+                diffsOmitted ? t("Loading diff…") : t("Diff unavailable for this file.")
               )
         )
       : null
@@ -1471,10 +1479,10 @@ export function AskUserDetailPendingCard({
   onRetryDetail = null,
 }) {
   const status = detailError
-    ? "Question detail failed"
+    ? t("Question detail failed")
     : detailLoading
-      ? "Loading question detail"
-      : "Waiting for question detail";
+      ? t("Loading question detail")
+      : t("Waiting for question detail");
   return h(
     "article",
     transcriptEntryDomAttrs(
@@ -1492,7 +1500,7 @@ export function AskUserDetailPendingCard({
         h(
           "div",
           { className: "ask-user-meta" },
-          h("span", { className: "ask-user-tag" }, `${providerLabel(provider)} asks`),
+          h("span", { className: "ask-user-tag" }, t("{agent} asks", { agent: providerLabel(provider) })),
           h("span", { className: "ask-user-topic" }),
           h("span", { className: "ask-user-status" }, status)
         ),
@@ -1506,8 +1514,8 @@ export function AskUserDetailPendingCard({
             "p",
             { className: "ask-user-question-text" },
             questionCount > 1
-              ? `${questionCount} questions are loading.`
-              : "The question is loading."
+              ? t("{count} questions are loading.", { count: questionCount })
+              : t("The question is loading.")
           ),
           detailError
             ? h("div", { className: "ask-user-error", role: "alert" }, detailError)
@@ -1523,7 +1531,7 @@ export function AskUserDetailPendingCard({
                   disabled: detailLoading,
                   onClick: () => onRetryDetail(),
                 },
-                detailLoading ? "Loading…" : "Try again"
+                detailLoading ? t("Loading…") : t("Try again")
               )
             : null
         )
@@ -1551,8 +1559,8 @@ function askUserOptionLabel(label) {
   return h(
     "div",
     { className: "ask-user-option-label" },
-    text || "(no label)",
-    recommended ? h("span", { className: "ask-user-recommended" }, "Recommended") : null
+    text || t("(no label)"),
+    recommended ? h("span", { className: "ask-user-recommended" }, t("Recommended")) : null
   );
 }
 
@@ -1564,16 +1572,16 @@ function askUserAnswerSummary(questions, answers, status) {
   if (picked.length) {
     return picked.join(" · ");
   }
-  return status === "completed" ? "Answered" : "Waiting for answer";
+  return status === "completed" ? t("Answered") : t("Waiting for answer");
 }
 
 function AskUserReadOnlyCard({ entry, isJustPrepended, itemId, questions, answers, status, expanded = false }) {
   const headerStatus = answers.size > 0 || status === "completed"
-    ? "Answered"
-    : "Waiting for answer";
+    ? t("Answered")
+    : t("Waiting for answer");
   const expandKey = askUserExpandKey(itemId);
   const topic = questions.length > 1
-    ? `${questions.length} questions`
+    ? t("{count} questions", { count: questions.length })
     : questions[0].header || questions[0].question;
   return h(
     "article",
@@ -1598,7 +1606,7 @@ function AskUserReadOnlyCard({ entry, isJustPrepended, itemId, questions, answer
           : {}),
       },
       h("span", { "aria-hidden": "true", className: "ask-user-summary-chevron" }, expanded ? "▾" : "▸"),
-      h("span", { className: "ask-user-summary-verb" }, "Asked"),
+      h("span", { className: "ask-user-summary-verb" }, t("Asked")),
       h("span", { className: "ask-user-summary-topic" }, topic),
       h("span", { "aria-hidden": "true", className: "ask-user-summary-arrow" }, "→"),
       h("span", { className: "ask-user-summary-answer" }, askUserAnswerSummary(questions, answers, status))
@@ -1610,7 +1618,7 @@ function AskUserReadOnlyCard({ entry, isJustPrepended, itemId, questions, answer
           h(
             "div",
             { className: "ask-user-meta" },
-            h("span", { className: "ask-user-tag" }, "Claude asked"),
+            h("span", { className: "ask-user-tag" }, t("Claude asked")),
             h("span", { className: "ask-user-status" }, headerStatus)
           ),
           ...questions.map((q, qIndex) => {
@@ -1627,7 +1635,7 @@ function AskUserReadOnlyCard({ entry, isJustPrepended, itemId, questions, answer
               q.header
                 ? h("div", { className: "ask-user-question-header" }, q.header)
                 : null,
-              h("p", { className: "ask-user-question-text" }, q.question || "(no question)"),
+              h("p", { className: "ask-user-question-text" }, q.question || t("(no question)")),
               q.options.length
                 ? h(
                     "div",
@@ -1660,7 +1668,7 @@ function AskUserReadOnlyCard({ entry, isJustPrepended, itemId, questions, answer
                 ? h(
                     "div",
                     { className: "ask-user-freeform-answer" },
-                    h("span", { className: "ask-user-freeform-answer-label" }, "Answer: "),
+                    h("span", { className: "ask-user-freeform-answer-label" }, t("Answer: ")),
                     answerLabel
                   )
                 : null
@@ -1854,12 +1862,14 @@ export function AskUserWizard({
         h(
           "div",
           { className: "ask-user-meta" },
-          h("span", { className: "ask-user-tag" }, `${providerLabel(provider)} asks`),
+          h("span", { className: "ask-user-tag" }, t("{agent} asks", { agent: providerLabel(provider) })),
           h("span", { className: "ask-user-topic" }, currentQuestion.header || ""),
           h(
             "span",
             { className: "ask-user-status" },
-            isSubmitting ? "Sending answer…" : `${safeIndex + 1} of ${questions.length}`
+            isSubmitting
+              ? t("Sending answer…")
+              : t("{current} of {total}", { current: safeIndex + 1, total: questions.length })
           )
         ),
         h(AskUserQuestionStep, {
@@ -1887,7 +1897,7 @@ export function AskUserWizard({
                 disabled: isSubmitting || !everyQuestionAnswerable,
                 onClick: sendAll,
               },
-              isSubmitting ? "Sending…" : "Answer"
+              isSubmitting ? t("Sending…") : t("Answer")
             )
           : h(
               "button",
@@ -1897,7 +1907,7 @@ export function AskUserWizard({
                 disabled: !currentAnswerable || isSubmitting,
                 onClick: goNext,
               },
-              "Continue"
+              t("Continue")
             ),
         questions.length > 1
           ? h(
@@ -1908,7 +1918,7 @@ export function AskUserWizard({
                 disabled: isFirstQuestion || isSubmitting,
                 onClick: goPrev,
               },
-              "Back"
+              t("Back")
             )
           : null,
         h("span", { className: "ask-user-footer-spacer" }),
@@ -1920,7 +1930,7 @@ export function AskUserWizard({
             disabled: isSubmitting || !submitAnswers,
             onClick: skipQuestion,
           },
-          isPiDialog ? "Cancel" : `Let ${providerLabel(provider)} decide`
+          isPiDialog ? t("Cancel") : t("Let {agent} decide", { agent: providerLabel(provider) })
         )
       ),
       askUserError
@@ -1947,13 +1957,13 @@ function AskUserQuestionStep({
   return h(
     "section",
     { className: "ask-user-question" },
-    h("p", { className: "ask-user-question-text" }, q.question || "(no question)"),
+    h("p", { className: "ask-user-question-text" }, q.question || t("(no question)")),
     h(
       "div",
       {
         className: "ask-user-options",
         role: q.multiSelect ? "group" : "radiogroup",
-        "aria-label": q.header || q.question || "Options",
+        "aria-label": q.header || q.question || t("Options"),
       },
       ...q.options.map((opt, oIndex) => {
         const isPicked = selectedLabels.has(opt.label);
@@ -1996,12 +2006,12 @@ function AskUserQuestionStep({
           htmlFor: notesId,
         },
         h("span", { "aria-hidden": "true", className: "ask-user-option-mark is-other" }),
-        h("span", { className: "ask-user-notes-label" }, "Something else"),
+        h("span", { className: "ask-user-notes-label" }, t("Something else")),
         h("textarea", {
           className: "ask-user-notes-input",
           id: notesId,
           rows: 1,
-          placeholder: "Something else…",
+          placeholder: t("Something else…"),
           value: notesValue,
           disabled: isSubmitting,
           onChange: (event) => onNotesChange(event.target.value),
@@ -2039,8 +2049,8 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
     : tool;
 
   const status = entry.status || "completed";
-  const nameLabel = tool.name || "Tool";
-  const fallbackTitle = tool.title || toolEntry.text || entry.text || "Tool call";
+  const nameLabel = tool.name || t("Tool");
+  const fallbackTitle = tool.title || toolEntry.text || entry.text || t("Tool call");
   const primary = tool.command || tool.path || tool.url || tool.query || "";
   const titleDiffers = fallbackTitle && fallbackTitle !== nameLabel && fallbackTitle !== primary;
   const title = titleDiffers ? fallbackTitle : "";
@@ -2135,7 +2145,7 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
                     ? h(ToolLogBlock, {
                         expandKey: inputExpandKey,
                         expanded: Boolean(inputExpandKey && options?.expandedKeys?.has(inputExpandKey)),
-                        label: "input",
+                        label: t("input"),
                         value: tool.input_preview,
                       })
                     : null,
@@ -2149,7 +2159,7 @@ function GenericToolEntry({ entry, isJustPrepended = false, options = null, inGr
                     value: tool.result_preview,
                   }),
                   loading && (!detailEntry || isPartialTranscriptEntry(toolEntry))
-                    ? h("div", { className: "tool-log-note" }, "Loading full item details…")
+                    ? h("div", { className: "tool-log-note" }, t("Loading full item details…"))
                     : null,
                   isPartialTranscriptEntry(toolEntry) && !loading
                     ? h(CutCopyNote)
@@ -2192,10 +2202,10 @@ function ErrorEntry({ entry, isJustPrepended = false }) {
       h(
         "div",
         { className: "message-meta" },
-        h("strong", null, "Turn failed"),
-        h("span", null, entry.status || "failed")
+        h("strong", null, t("Turn failed")),
+        h("span", null, !entry.status || entry.status === "failed" ? t("failed") : entry.status)
       ),
-      h("div", { className: "message-body" }, entry.text || "Claude turn failed.")
+      h("div", { className: "message-body" }, entry.text || t("Claude turn failed."))
     )
   );
 }
@@ -2215,7 +2225,7 @@ function FallbackEntry({ entry, isJustPrepended = false }) {
         h("strong", null, entry.kind || "system"),
         h("span", null, entry.status || "completed")
       ),
-      h("div", { className: "message-body" }, entry.text || "(empty)")
+      h("div", { className: "message-body" }, entry.text || t("(empty)"))
     )
   );
 }
@@ -2307,32 +2317,31 @@ export function toolKindOf(tool) {
   return TOOL_NAME_KINDS[name] || null;
 }
 
-// [one, many] for the lead ("Ran 2 commands") and for the summary after it.
+// The lead ("Ran 2 commands") and the summary after it, by count.
 const KIND_LEADS = {
-  run: ["Ran 1 command", "Ran N commands"],
-  edit: ["Edited 1 file", "Edited N files"],
-  read: ["Read 1 file", "Read N files"],
-  search: ["Searched once", "Searched N times"],
-  fetch: ["Fetched 1 page", "Fetched N pages"],
-  other: ["Used 1 tool", "Used N tools"],
-  think: ["Thought once", "Thought N times"],
+  run: (count) => (count === 1 ? t("Ran {count} command", { count }) : t("Ran {count} commands", { count })),
+  edit: (count) => (count === 1 ? t("Edited {count} file", { count }) : t("Edited {count} files", { count })),
+  read: (count) => (count === 1 ? t("Read {count} file", { count }) : t("Read {count} files", { count })),
+  search: (count) => (count === 1 ? t("Searched once") : t("Searched {count} times", { count })),
+  fetch: (count) => (count === 1 ? t("Fetched {count} page", { count }) : t("Fetched {count} pages", { count })),
+  other: (count) => (count === 1 ? t("Used {count} tool", { count }) : t("Used {count} tools", { count })),
+  think: (count) => (count === 1 ? t("Thought once") : t("Thought {count} times", { count })),
 };
 const KIND_TAILS = {
-  run: ["1 command", "N commands"],
-  edit: ["1 file edited", "N files edited"],
-  read: ["1 file read", "N files read"],
-  search: ["1 search", "N searches"],
-  fetch: ["1 fetch", "N fetches"],
-  other: ["1 tool", "N tools"],
-  think: ["1 thought", "N thoughts"],
+  run: (count) => (count === 1 ? t("{count} command", { count }) : t("{count} commands", { count })),
+  edit: (count) => (count === 1 ? t("{count} file edited", { count }) : t("{count} files edited", { count })),
+  read: (count) => (count === 1 ? t("{count} file read", { count }) : t("{count} files read", { count })),
+  search: (count) => (count === 1 ? t("{count} search", { count }) : t("{count} searches", { count })),
+  fetch: (count) => (count === 1 ? t("{count} fetch", { count }) : t("{count} fetches", { count })),
+  other: (count) => (count === 1 ? t("{count} tool", { count }) : t("{count} tools", { count })),
+  think: (count) => (count === 1 ? t("{count} thought", { count }) : t("{count} thoughts", { count })),
 };
 // Fixed order so the line does not reshuffle between renders; the first kind present leads.
 const KIND_ORDER = ["run", "edit", "read", "search", "fetch", "other", "think"];
 const MAX_SUMMARY_PARTS = 3;
 
 function kindPhrase(table, kind, count) {
-  const [one, many] = table[kind];
-  return count === 1 ? one : many.replace("N", String(count));
+  return table[kind](count);
 }
 
 export function workGroupSummary(group) {
@@ -2356,7 +2365,7 @@ export function workGroupSummary(group) {
 
   const present = KIND_ORDER.filter((kind) => counts.get(kind));
   if (!present.length) {
-    return { lead: `${entries.length} steps`, rest: [] };
+    return { lead: t("{count} steps", { count: entries.length }), rest: [] };
   }
   const [leadKind, ...others] = present;
   const rest = others
@@ -2364,7 +2373,7 @@ export function workGroupSummary(group) {
     .map((kind) => kindPhrase(KIND_TAILS, kind, counts.get(kind)));
   const dropped = others.slice(MAX_SUMMARY_PARTS).reduce((sum, kind) => sum + counts.get(kind), 0);
   if (dropped > 0) {
-    rest.push(`+${dropped} more`);
+    rest.push(t("+{count} more", { count: dropped }));
   }
   return { lead: kindPhrase(KIND_LEADS, leadKind, counts.get(leadKind)), rest };
 }
@@ -2654,7 +2663,7 @@ function WorkGroupEntry({ group, options = null }) {
       rest.length
         ? h("span", { className: "work-group-rest" }, rest.map((part) => ` · ${part}`).join(""))
         : null,
-      failed ? h("span", { className: "work-group-failed" }, ` · ${failed} failed`) : null,
+      failed ? h("span", { className: "work-group-failed" }, ` · ${t("{count} failed", { count: failed })}`) : null,
       added > 0
         ? h("span", { className: "work-group-chip-add" }, `+${added}`)
         : null,
@@ -2671,7 +2680,7 @@ function WorkGroupEntry({ group, options = null }) {
 function turnDiffUndoAction(itemId, applyState) {
   const rolledBack = applyState === "rolled_back";
   const action = rolledBack ? "reapply" : "rollback";
-  const label = rolledBack ? "Reapply" : "Undo";
+  const label = rolledBack ? t("Reapply") : t("Undo");
   return h(
     "div",
     { className: "tool-file-actions" },
@@ -2699,7 +2708,9 @@ function DiffGroupEntry({ group, options = null }) {
     (entry) => entry?.tool?.item_type !== "turnDiff"
   ).length;
   const count = fileCount || editCount || (group?.entries?.length || 0);
-  const label = `${count} file ${count === 1 ? "change" : "changes"}`;
+  const label = count === 1
+    ? t("{count} file change", { count })
+    : t("{count} file changes", { count });
 
   // The turnDiff is folded into the chip rather than rendered as its own card
   // (its per-file diffs are already shown by the inline fileChange members on
@@ -2787,7 +2798,7 @@ function OmittedEntryImpl({ entry, isJustPrepended = false, provider = "", showA
         "div",
         { className: "message-body message-body-loading", role: "status" },
         h("span", { className: "transcript-entry-loading", "aria-hidden": "true" }, "•••"),
-        h("span", { className: "sr-only" }, "Loading message…")
+        h("span", { className: "sr-only" }, t("Loading message…"))
       )
     )
   );
@@ -3032,7 +3043,7 @@ export function ApprovalCard({ approval, options = null }) {
   return h(
     "article",
     {
-      "aria-label": "Approval required",
+      "aria-label": t("Approval required"),
       className: "chat-message chat-message-system chat-message-approval",
       ...(id ? { "data-approval-id": id, "data-transcript-content-key": "approval", "data-transcript-anchor": `approval:${id}` } : {}),
     },
@@ -3053,7 +3064,7 @@ export function ApprovalCard({ approval, options = null }) {
         detail ? h("p", { className: "approval-copy" }, detail) : null,
         // No provider name: the card carries no provider field to name one.
         showFallbackCopy
-          ? h("p", { className: "approval-copy" }, "The agent is waiting for a remote approval.")
+          ? h("p", { className: "approval-copy" }, t("The agent is waiting for a remote approval."))
           : null,
         subject || cwd || raw
           ? h(
@@ -3091,8 +3102,8 @@ export function ApprovalCard({ approval, options = null }) {
                       ? h(
                           "span",
                           // The exact path, never clipped: it is the blast radius being authorised.
-                          { className: "approval-scope-chip", title: `Working directory: ${cwd}` },
-                          h("span", { className: "approval-scope-label" }, "in"),
+                          { className: "approval-scope-chip", title: t("Working directory: {path}", { path: cwd }) },
+                          h("span", { className: "approval-scope-label" }, t("in")),
                           h("span", { className: "approval-scope-path" }, cwd)
                         )
                       : null,
@@ -3106,7 +3117,7 @@ export function ApprovalCard({ approval, options = null }) {
                             "data-transcript-toggle": "group",
                             type: "button",
                           },
-                          "raw input"
+                          t("raw input")
                         )
                       : null
                   )
@@ -3126,7 +3137,7 @@ export function ApprovalCard({ approval, options = null }) {
             "data-approval-scope": "once",
             type: "button",
           },
-          "Approve"
+          t("Approve")
         ),
         approval.supports_session_scope
           ? h(
@@ -3137,7 +3148,7 @@ export function ApprovalCard({ approval, options = null }) {
                 "data-approval-scope": "session",
                 type: "button",
               },
-              "Allow for this session"
+              t("Allow for this session")
             )
           : null,
         h("span", { "aria-hidden": "true", className: "approval-actions-spacer" }),
@@ -3149,7 +3160,7 @@ export function ApprovalCard({ approval, options = null }) {
             "data-approval-scope": "once",
             type: "button",
           },
-          "Deny"
+          t("Deny")
         )
       )
     )
@@ -3190,7 +3201,7 @@ function TranscriptHistorySkeleton() {
     "div",
     {
       "aria-busy": "true",
-      "aria-label": "Loading earlier transcript",
+      "aria-label": t("Loading earlier transcript"),
       className: "transcript-history-skeletons",
       role: "status",
     },
@@ -3713,7 +3724,7 @@ export function TranscriptContent({
           key: "transcript-ask-user-pinned",
           className: "transcript-ask-user-pinned",
           role: "region",
-          "aria-label": "Question waiting for your answer",
+          "aria-label": t("Question waiting for your answer"),
           // The turn is parked on this. Announced because a reader who is not
           // watching the screen otherwise gets nothing: the card arrives far below
           // the fold of a long conversation, and nothing else says the agent stopped.

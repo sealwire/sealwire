@@ -2,11 +2,13 @@
 // naming the catalogue it came from — the pair can never go inconsistent.
 
 import { buildModelSelectOptions } from "./composer.js";
+import { t } from "./i18n.js";
 import { providerLabel } from "./provider-labels.js";
 import { providerPicksFolderDefaultModel } from "./provider-settings.js";
 
 // Naming a concrete model here would claim a choice the request does not carry.
-const DEFAULT_MODEL_LABEL = "Default";
+const DEFAULT_MODEL_LABEL = t("Default");
+const DEFAULT_TAG = t("default");
 
 function catalogFor(providerModels, provider) {
   return providerModels?.[provider] || [];
@@ -48,22 +50,22 @@ export function buildModelPickerGroups({
       label: option.display_name || option.model,
       provider,
       selected: isSelectedProvider && option.model === selectedModel,
-      tag: option.is_default && !folderDefault ? "default" : null,
+      tag: option.is_default && !folderDefault ? DEFAULT_TAG : null,
       value: option.model,
     }));
     const providerDefault = {
-      label: "Use provider default",
+      label: t("Use provider default"),
       provider,
       selected: isSelectedProvider && !selectedModel,
       tag: null,
       value: "",
     };
     if (folderDefault && offerProviderDefault && rendered.length) {
-      rendered.unshift({ ...providerDefault, label: "Default for this folder" });
+      rendered.unshift({ ...providerDefault, label: t("Default for this folder") });
     }
     const shown = rendered.length ? rendered : [providerDefault];
     const chosen = shown.find((option) => option.selected);
-    const fallback = folderDefault ? null : rendered.find((option) => option.tag === "default");
+    const fallback = folderDefault ? null : rendered.find((option) => option.tag === DEFAULT_TAG);
 
     return {
       // A cold catalogue still gets a CHOOSABLE row carrying an empty model id:

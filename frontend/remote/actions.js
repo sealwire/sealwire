@@ -25,6 +25,7 @@ import {
 import { currentRelayBinding, sendBrokerFrame } from "./broker-client.js";
 import { relayError } from "../shared/transcript-protocol.js";
 import { surfaceText } from "./surface-wording.js";
+import { t } from "../shared/i18n.js";
 
 // One deadline for every action. Not because they are all quick — the relay still
 // awaits list_threads and send_message in its single receive loop, and a cold Codex
@@ -36,8 +37,9 @@ const REMOTE_ACTION_TIMEOUT_MS = 15_000;
 const WRITE_RETRY_WINDOW_MS = 5 * 60 * 1000;
 // A relay that keeps asking for re-authorization is not answered by asking forever.
 const MAX_REAUTHORIZATIONS = 2;
-const OUTCOME_UNKNOWN_MESSAGE =
-  "It is not known whether this ran: the connection to the relay was lost for too long. Check the session before doing it again.";
+const OUTCOME_UNKNOWN_MESSAGE = t(
+  "It is not known whether this ran: the connection to the relay was lost for too long. Check the session before doing it again."
+);
 
 let onApplySessionSnapshot = () => {};
 let onSyncRemoteSnapshot = async () => {};
@@ -103,10 +105,10 @@ export async function ensureRemoteClaim({
   syncAfterClaim = false,
 } = {}) {
   if (!state.remoteAuth) {
-    throw new Error(surfaceText("this browser is not paired yet"));
+    throw new Error(t(surfaceText("this browser is not paired yet")));
   }
   if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
-    throw new Error("broker socket is not connected");
+    throw new Error(t("broker socket is not connected"));
   }
   if (!force && hasUsableSessionClaim(CLAIM_REFRESH_SKEW_MS)) {
     return state.remoteAuth.sessionClaim;
@@ -248,7 +250,7 @@ export function scheduleClaimRefresh() {
 export function abandonStalledClaim() {
   for (const [actionId, pending] of [...state.pendingActions.entries()]) {
     if (pending?.actionType === "claim_challenge" || pending?.actionType === "claim_device") {
-      rejectPendingAction(actionId, new Error("the relay restarted before answering"));
+      rejectPendingAction(actionId, new Error(t("the relay restarted before answering")));
     }
   }
   clearClaimLifecycle();
@@ -585,7 +587,7 @@ function rejectPendingAction(actionId, error) {
 
 async function decryptPayloadWithDeviceTokens(envelope) {
   if (!state.remoteAuth) {
-    throw new Error(surfaceText("this browser is not paired yet"));
+    throw new Error(t(surfaceText("this browser is not paired yet")));
   }
 
   return decryptJson(state.remoteAuth.payloadSecret, envelope);
@@ -593,10 +595,10 @@ async function decryptPayloadWithDeviceTokens(envelope) {
 
 async function dispatchRemoteAction(actionType, request) {
   if (!state.remoteAuth) {
-    throw new Error(surfaceText("this browser is not paired yet"));
+    throw new Error(t(surfaceText("this browser is not paired yet")));
   }
   if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
-    throw new Error("broker socket is not connected");
+    throw new Error(t("broker socket is not connected"));
   }
 
   const actionId = makeActionId(actionType);
@@ -621,17 +623,17 @@ async function dispatchRemoteAction(actionType, request) {
 
 export async function dispatchRemoteActionWithoutReply(actionType, request) {
   if (!state.remoteAuth) {
-    throw new Error(surfaceText("this browser is not paired yet"));
+    throw new Error(t(surfaceText("this browser is not paired yet")));
   }
   const socket = state.socket;
   if (requiresSessionClaim(actionType)) {
     await ensureRemoteClaim({ reason: `${actionType} preflight` });
   }
   if (!socket || socket.readyState !== WebSocket.OPEN) {
-    throw new Error("broker socket is not connected");
+    throw new Error(t("broker socket is not connected"));
   }
   if (requiresSessionClaim(actionType) && !state.remoteAuth.sessionClaim) {
-    throw new Error("device is not claimed yet");
+    throw new Error(t("device is not claimed yet"));
   }
 
   const actionId = makeActionId(actionType);
@@ -641,7 +643,7 @@ export async function dispatchRemoteActionWithoutReply(actionType, request) {
 
 async function buildClaimChallengePayload(actionId) {
   if (!state.socketPeerId) {
-    throw new Error("broker peer id is not ready yet");
+    throw new Error(t("broker peer id is not ready yet"));
   }
   const deviceKeypair = await ensureDeviceIdentity();
   const proof = await signClaimInitProof(
@@ -656,7 +658,7 @@ async function buildClaimChallengePayload(actionId) {
 
 async function buildClaimDevicePayload(actionId, request) {
   if (!state.socketPeerId) {
-    throw new Error("broker peer id is not ready yet");
+    throw new Error(t("broker peer id is not ready yet"));
   }
   if (!request?.challenge_id || !request?.challenge) {
     throw new Error("claim_device requires a claim challenge");
@@ -714,14 +716,14 @@ function nextRequestSeq(sid) {
 /// attempt; a resend reuses it so the relay recognises the same write.
 async function buildSignedActionPayload(actionId, actionType, request, op) {
   if (!hasUsableSessionClaim()) {
-    throw new Error("device is not claimed yet");
+    throw new Error(t("device is not claimed yet"));
   }
   const binding = currentRelayBinding();
   if (!binding) {
-    throw new Error("the relay identity is not pinned on this phone; pair it again");
+    throw new Error(t("the relay identity is not pinned on this phone; pair it again"));
   }
   if (!state.socketPeerId) {
-    throw new Error("broker peer id is not ready yet");
+    throw new Error(t("broker peer id is not ready yet"));
   }
   const auth = state.remoteAuth;
   const time = relayClockNow();
@@ -774,7 +776,7 @@ async function buildSignedActionPayload(actionId, actionType, request, op) {
 async function sendRemoteActionFrame(actionId, actionType, request) {
   const socket = state.socket;
   if (!socket || socket.readyState !== WebSocket.OPEN) {
-    throw new Error("broker socket is not connected");
+    throw new Error(t("broker socket is not connected"));
   }
   if (actionType === "claim_challenge") {
     sendBrokerFrame(await buildClaimChallengePayload(actionId), socket);
@@ -850,7 +852,11 @@ async function reauthorizePendingAction(actionId) {
   if ((pending.reauthorizations || 0) >= MAX_REAUTHORIZATIONS) {
     rejectPendingAction(
       actionId,
-      new Error(`the relay would not accept this ${pending.actionType} request; reconnect and try again`)
+      new Error(
+        t("the relay would not accept this {action} request; reconnect and try again", {
+          action: pending.actionType,
+        })
+      )
     );
     return;
   }
@@ -883,7 +889,7 @@ function extendPendingActionDeadline(actionId) {
   pending.timeoutId = window.setTimeout(() => {
     rejectPendingAction(
       actionId,
-      new Error(`remote ${pending.actionType} timed out waiting for relay response`)
+      new Error(t("remote {action} timed out waiting for relay response", { action: pending.actionType }))
     );
   }, REMOTE_ACTION_TIMEOUT_MS);
 }
@@ -893,7 +899,7 @@ function registerPendingAction(actionId, actionType, request) {
     const timeoutId = window.setTimeout(() => {
       rejectPendingAction(
         actionId,
-        new Error(`remote ${actionType} timed out waiting for relay response`)
+        new Error(t("remote {action} timed out waiting for relay response", { action: actionType }))
       );
     }, REMOTE_ACTION_TIMEOUT_MS);
 

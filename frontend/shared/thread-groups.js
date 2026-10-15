@@ -1,11 +1,13 @@
+import { t } from "./i18n.js";
+
 function workspaceBasename(cwd) {
   if (!cwd) {
-    return "workspace";
+    return t("workspace");
   }
 
   const trimmed = String(cwd).replace(/[\\/]+$/, "");
   const parts = trimmed.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) || trimmed || "workspace";
+  return parts.at(-1) || trimmed || t("workspace");
 }
 
 export function canonicalizeWorkspace(cwd) {
@@ -13,7 +15,7 @@ export function canonicalizeWorkspace(cwd) {
 }
 
 export const UNKNOWN_WORKSPACE_CWD = "__unknown_workspace__";
-export const UNKNOWN_WORKSPACE_LABEL = "Unknown workspace";
+export const UNKNOWN_WORKSPACE_LABEL = t("Unknown workspace");
 
 // `UNKNOWN_WORKSPACE_CWD` is a DISPLAY grouping key, not a directory. It must
 // never flow into a cwd operation: the local group header is clickable and its
@@ -24,7 +26,7 @@ export function isUnknownWorkspace(cwd) {
 }
 
 export const UNASSIGNED_PROJECT_KEY = "__unassigned__";
-export const UNASSIGNED_PROJECT_LABEL = "Unassigned";
+export const UNASSIGNED_PROJECT_LABEL = t("Unassigned");
 
 // Like UNKNOWN_WORKSPACE_CWD, the "Unassigned" bucket key is a DISPLAY grouping
 // sentinel, not a real project id: it must never be sent to an assign/unassign
@@ -290,15 +292,20 @@ export function summarizeThreadGroups(groups, options = {}) {
   const totalThreads = safeGroups.reduce((count, group) => count + (group.threads?.length || 0), 0);
 
   if (totalThreads === 0 && safeGroups.length === 0) {
-    return "No saved sessions yet.";
+    return t("No saved sessions yet.");
   }
 
-  const sessions = `${totalThreads} ${totalThreads === 1 ? "session" : "sessions"}`;
+  const sessions = totalThreads === 1
+    ? t("{count} session", { count: totalThreads })
+    : t("{count} sessions", { count: totalThreads });
 
   if (options.groupBy === "project") {
     // The "__unassigned__" bucket is NOT a project — count only real projects.
     const projectCount = safeGroups.filter((group) => group.projectId).length;
-    return `${projectCount} ${projectCount === 1 ? "project" : "projects"} · ${sessions}`;
+    const projects = projectCount === 1
+      ? t("{count} project", { count: projectCount })
+      : t("{count} projects", { count: projectCount });
+    return `${projects} · ${sessions}`;
   }
 
   // A pinned project group is not a folder. Counting it as one would make this
@@ -306,5 +313,8 @@ export function summarizeThreadGroups(groups, options = {}) {
   // covers its rows, so nothing goes uncounted by leaving it out here. The
   // project's own name is on the switcher, so it needs no second mention.
   const folderCount = safeGroups.filter((group) => !group.projectId).length;
-  return `${folderCount} ${folderCount === 1 ? "folder" : "folders"} · ${sessions}`;
+  const folders = folderCount === 1
+    ? t("{count} folder", { count: folderCount })
+    : t("{count} folders", { count: folderCount });
+  return `${folders} · ${sessions}`;
 }

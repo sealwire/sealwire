@@ -7,6 +7,7 @@ import { applyPairingQuery, beginPairing, forgetCurrentDevice, handleEncryptedPa
 import { mountIosInstallHint } from "./ios-install.js";
 import { registerRemotePwa } from "./pwa.js";
 import { renderLog } from "./session-surface.js";
+import { t } from "../shared/i18n.js";
 import { sidebarGestureDebugEnabled } from "./sidebar-debug-flag.js";
 import { acceptRemoteReview, actOnRemoteGoalCard, applyFileChange, applySessionSnapshot, recheckRemoteSignedOutProviders, applyTranscriptDelta, applyTranscriptEvent, cancelRemoteThreadSearch, cancelRemoteThreadsPoll, clearSessionRuntime, decideRemoteModelRequest, delegateRemote, deleteRemoteReview, fetchAskDetail, fetchAskUserQuestionDetail, fetchRemoteProviderModels, fetchRemoteProviders, fetchRemoteThreadTranscript, fetchTranscriptEntryDetail, forkRemoteSession, handoverOutcomes, handoverRemote, probeRemoteThreadsExist, refreshRemoteThreads, repairRemoteWorkspace, requestRemoteReview, resolveRemoteReview, resolveRemoteWorkflow, resetDeclaredWatchedThreads, resumeRemoteSession, sendMessage, beginGoalActionOn, clearGoalErrorOn, setComposerError, setComposerHeld, setGoalError, setRemoteGoal, startRemoteSession, startRemoteWorkflow, stopActiveTurn, stopRemoteGoal, submitAskUserAnswer, submitDecision, syncRemoteSnapshot, updateRemoteSessionSettings, viewRemoteThread } from "./session-ops.js";
 import { clearActiveRelaySelection, ensureDeviceIdentity, hasActivePairing, hydrateStoredRemoteSecrets, selectRelayProfile, state } from "./state.js";
@@ -115,7 +116,7 @@ export function ensureRemoteRuntimeConfigured() {
       // Stop the recurring thread poll while the socket is down; recovery on the
       // next broker-ready re-arms it via refreshRemoteThreads.
       cancelRemoteThreadsPoll();
-      rejectPendingActions("broker socket disconnected");
+      rejectPendingActions(t("broker socket disconnected"));
     },
     onRelayPresence: handleRelayPresence,
   });

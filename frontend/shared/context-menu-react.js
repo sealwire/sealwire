@@ -5,6 +5,7 @@ import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { positionContextMenuElement } from "./context-menu-position.js";
+import { t } from "./i18n.js";
 import { CHECK_SVG, CHEVRON_RIGHT_SVG, PLUS_SVG, SEARCH_SVG } from "../svg.js";
 
 const h = React.createElement;
@@ -252,7 +253,7 @@ export function MenuConfirm({ body = null, confirmLabel, onCancel, onConfirm, ti
       h(
         "button",
         { className: "context-menu-confirm-cancel", onClick: onCancel, ref: cancelRef, type: "button" },
-        "Cancel"
+        t("Cancel")
       ),
       h(
         "button",

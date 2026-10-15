@@ -1,15 +1,25 @@
 // What a menu's in-place confirm says before something is removed. Result first,
 // then what goes with it: reviewer sessions are only mentioned when there are some.
 
-function plural(count, one, many) {
-  return count === 1 ? one : many;
-}
+import { t } from "./i18n.js";
 
 function reviewerSentence(count, owner) {
-  if (!count) {
-    return "";
+  if (owner === "their") {
+    return count === 1
+      ? t("Their {count} reviewer session is deleted too.", { count })
+      : t("Their {count} reviewer sessions are deleted too.", { count });
   }
-  return ` ${owner} ${count} reviewer ${plural(count, "session is", "sessions are")} deleted too.`;
+  return count === 1
+    ? t("Its {count} reviewer session is deleted too.", { count })
+    : t("Its {count} reviewer sessions are deleted too.", { count });
+}
+
+// Chinese runs two sentences together where English puts a space.
+function withReviewers(body, count, owner) {
+  if (!count) {
+    return body;
+  }
+  return t("{sentence} {next}", { sentence: body, next: reviewerSentence(count, owner) });
 }
 
 /**
@@ -26,27 +36,31 @@ export function describeThreadRemoval({
   const count = titles.length;
   if (action === "archive") {
     return {
-      title: `Archive “${titles[0] || "this session"}”?`,
-      body: `Removes it from local history.${reviewerSentence(reviewerCount, "Its")}`,
-      confirmLabel: "Archive session",
+      title: t("Archive “{title}”?", { title: titles[0] || t("this session") }),
+      body: withReviewers(t("Removes it from local history."), reviewerCount, "its"),
+      confirmLabel: t("Archive session"),
     };
   }
   if (count > 1) {
     return {
-      title: `Delete ${count} sessions?`,
-      body:
-        "Removes their session files from local storage. This can’t be undone."
-        + reviewerSentence(reviewerCount, "Their"),
-      confirmLabel: `Delete ${count} sessions`,
+      title: t("Delete {count} sessions?", { count }),
+      body: withReviewers(
+        t("Removes their session files from local storage. This can’t be undone."),
+        reviewerCount,
+        "their"
+      ),
+      confirmLabel: t("Delete {count} sessions", { count }),
     };
   }
-  const storage = providerName ? `local ${providerName} storage` : "local storage";
+  const body = providerName
+    ? t("Removes the session file from local {provider} storage. This can’t be undone.", {
+        provider: providerName,
+      })
+    : t("Removes the session file from local storage. This can’t be undone.");
   return {
-    title: `Delete “${titles[0] || "this session"}”?`,
-    body:
-      `Removes the session file from ${storage}. This can’t be undone.`
-      + reviewerSentence(reviewerCount, "Its"),
-    confirmLabel: "Delete session",
+    title: t("Delete “{title}”?", { title: titles[0] || t("this session") }),
+    body: withReviewers(body, reviewerCount, "its"),
+    confirmLabel: t("Delete session"),
   };
 }
 
@@ -59,10 +73,11 @@ export function describeProjectDelete({ name = "", sessionCount = 0 } = {}) {
     return null;
   }
   return {
-    title: `Delete project “${name}”?`,
+    title: t("Delete project “{name}”?", { name }),
     body:
-      `Its ${sessionCount} ${plural(sessionCount, "session leaves", "sessions leave")} the project. `
-      + "No sessions are deleted.",
-    confirmLabel: "Delete project",
+      sessionCount === 1
+        ? t("Its {count} session leaves the project. No sessions are deleted.", { count: sessionCount })
+        : t("Its {count} sessions leave the project. No sessions are deleted.", { count: sessionCount }),
+    confirmLabel: t("Delete project"),
   };
 }

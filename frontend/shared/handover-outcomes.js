@@ -29,8 +29,10 @@
 // second visit. The lists stay short because the relay's reasons are its own authored
 // sentences and an actor's unread outcomes are quota-bounded.
 
+import { t } from "./i18n.js";
+
 function reasonOf(handover) {
-  return String(handover?.error || "").trim() || "the relay did not say why";
+  return String(handover?.error || "").trim() || t("the relay did not say why");
 }
 
 /** The ids this line gives a reason for — which, by construction, is all of them. */
@@ -48,9 +50,9 @@ function spokenFor(handovers = []) {
 export function handoverFailureText(handovers = []) {
   const reasons = (handovers || []).map(reasonOf);
   if (!reasons.length) return "";
-  if (reasons.length === 1) return `Handing over did not finish: ${reasons[0]}`;
+  if (reasons.length === 1) return t("Handing over did not finish: {reason}", { reason: reasons[0] });
   const spelled = reasons.map((reason, index) => `(${index + 1}) ${reason}`).join(" ");
-  return `${reasons.length} handovers did not finish. ${spelled}`;
+  return t("{count} handovers did not finish. {reasons}", { count: reasons.length, reasons: spelled });
 }
 
 /**

@@ -1,4 +1,5 @@
 import React from "react";
+import { t } from "./i18n.js";
 import {
   providerHasFilesystemSandbox,
   providerSettings,
@@ -26,16 +27,16 @@ export function isSessionIdle(session) {
 export function sessionBusyReason(session) {
   if (!session) return null;
   if (session.active_turn_id) {
-    return "Settings unlock when the agent is idle.";
+    return t("Settings unlock when the agent is idle.");
   }
   if (
     Array.isArray(session.pending_approvals)
     && session.pending_approvals.length > 0
   ) {
-    return "Settings locked while an approval is pending.";
+    return t("Settings locked while an approval is pending.");
   }
   if (isAgentStatusWorking(session.current_status)) {
-    return `Settings locked while status is ${String(session.current_status).toLowerCase()}.`;
+    return t("Settings locked while status is {status}.", { status: String(session.current_status).toLowerCase() });
   }
   return null;
 }
@@ -85,7 +86,7 @@ export function SessionSettingsButton({
   const settings = providerSettings(provider);
   const idle = isSessionIdle(session);
   const disabled = !idle || busy;
-  const hint = busy ? "Applying…" : sessionBusyReason(session);
+  const hint = busy ? t("Applying…") : sessionBusyReason(session);
   // Providers without a real filesystem boundary must not render a control
   // implying one — see `providerHasFilesystemSandbox`.
   const showSandbox = providerHasFilesystemSandbox(provider);
@@ -121,8 +122,11 @@ export function SessionSettingsButton({
         className: "session-settings-toggle",
         "aria-expanded": open ? "true" : "false",
         "aria-haspopup": "dialog",
-        "aria-label": "Session settings",
-        title: hint || `Session settings — ${currentApproval || "permissions"}`,
+        "aria-label": t("Session settings"),
+        title: hint
+          || (currentApproval
+            ? t("Session settings — {mode}", { mode: currentApproval })
+            : t("Session settings — permissions")),
         onClick: () => setOpen((prev) => !prev),
       },
       h(
@@ -137,13 +141,13 @@ export function SessionSettingsButton({
           {
             className: "session-settings-popover",
             role: "dialog",
-            "aria-label": "Session settings",
+            "aria-label": t("Session settings"),
           },
           h(
             "div",
             { className: "session-settings-section" },
             h("h3", { className: "session-settings-section-title" },
-              settings.approvalLabel || "Permission mode"),
+              settings.approvalLabel || t("Permission mode")),
             h(ApprovalCards, {
               options: settings.approvalOptions || [],
               value: currentApproval,
@@ -156,7 +160,7 @@ export function SessionSettingsButton({
                 "div",
                 { className: "session-settings-section" },
                 h("h3", { className: "session-settings-section-title" },
-                  settings.effortLabel || "Effort"),
+                  settings.effortLabel || t("Effort")),
                 h(SegmentedControl, {
                   id: "session-settings-effort",
                   options: effortOptions,
@@ -171,7 +175,7 @@ export function SessionSettingsButton({
                 "div",
                 { className: "session-settings-section" },
                 h("h3", { className: "session-settings-section-title" },
-                  settings.sandboxLabel || "File access"),
+                  settings.sandboxLabel || t("File access")),
                 h(SegmentedControl, {
                   id: "session-settings-sandbox",
                   options: sandboxOptions(),
@@ -190,7 +194,7 @@ export function SessionSettingsButton({
 function ApprovalCards({ options = [], value, disabled, onChange }) {
   return h(
     "div",
-    { className: "approval-cards", role: "radiogroup", "aria-label": "Permission mode" },
+    { className: "approval-cards", role: "radiogroup", "aria-label": t("Permission mode") },
     ...options.map((option) => {
       const selected = option.value === value;
       return h(

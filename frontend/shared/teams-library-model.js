@@ -4,6 +4,8 @@
 // provide the offline fallback and the wire→UI reshape (snake_case on the
 // wire, camelCase in the React tree).
 
+import { t } from "./i18n.js";
+
 export const BUILTIN_TEAM_ID = "builtin";
 export const BUILTIN_PAIR_TEAM_ID = "pair";
 
@@ -169,7 +171,7 @@ export function normalizeCatalogTeam(raw) {
   const stats = raw.stats || {};
   return {
     id: raw.id,
-    name: raw.name || "Untitled team",
+    name: raw.name || t("Untitled team"),
     persistent: raw.persistent !== false,
     roleCount: raw.role_count ?? raw.roleCount ?? roles.length,
     focus: raw.focus || null,
@@ -239,13 +241,21 @@ export function selectLibraryTeam(teams, teamId) {
 export function teamLibraryMeta(team) {
   const stats = team?.stats;
   if (stats && Number.isFinite(stats.tasks7d) && stats.tasks7d > 0) {
-    const avg = stats.avgTokens != null ? ` · avg ${formatCompactTokens(stats.avgTokens)}` : "";
+    const avg = stats.avgTokens != null
+      ? ` · ${t("avg {tokens}", { tokens: formatCompactTokens(stats.avgTokens) })}`
+      : "";
     const pass =
       stats.passed != null && stats.total != null ? ` · ${stats.passed}/${stats.total}` : "";
-    return `${stats.tasks7d} task${stats.tasks7d === 1 ? "" : "s"}/7d${avg}${pass}`;
+    const count = stats.tasks7d === 1
+      ? t("{count} task/7d", { count: stats.tasks7d })
+      : t("{count} tasks/7d", { count: stats.tasks7d });
+    return `${count}${avg}${pass}`;
   }
   const n = team?.roleCount ?? team?.roles?.length ?? 0;
-  return n ? `${n} role${n === 1 ? "" : "s"} · no runs yet` : "No roles";
+  if (!n) return t("No roles");
+  return n === 1
+    ? t("{count} role · no runs yet", { count: n })
+    : t("{count} roles · no runs yet", { count: n });
 }
 
 function formatCompactTokens(n) {

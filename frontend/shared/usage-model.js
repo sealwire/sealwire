@@ -16,6 +16,8 @@
 //   A cost carries its provenance. Estimates can come from an SDK or the local
 //   table; neither is silently promoted into a billed amount.
 
+import { t } from "./i18n.js";
+
 /**
  * A token count, short enough to sit in a headline.
  *
@@ -207,17 +209,17 @@ export function rollupCost(groups = []) {
  */
 export function costLabel({ cost_usd: cost, cost_source: source } = {}) {
   if (source === "unavailable" || cost === null || cost === undefined) {
-    return { text: "—", estimated: false, title: "This provider does not report cost." };
+    return { text: "—", estimated: false, title: t("This provider does not report cost.") };
   }
   const money = `$${Number(cost).toFixed(2)}`;
   if (source === "estimated") {
     return {
       text: money,
       estimated: true,
-      title: "Estimated from list prices, not a billed amount.",
+      title: t("Estimated from list prices, not a billed amount."),
     };
   }
-  return { text: money, estimated: false, title: "Reported by the provider." };
+  return { text: money, estimated: false, title: t("Reported by the provider.") };
 }
 
 /**
@@ -353,8 +355,8 @@ export function priceAgeNote(asOf, now = Date.now()) {
   if (days < 90) return null;
   const months = Math.round(days / 30);
   return months >= 12
-    ? "over a year old — update sealwire for current prices"
-    : `${months} months old — update sealwire for current prices`;
+    ? t("over a year old — update sealwire for current prices")
+    : t("{months} months old — update sealwire for current prices", { months });
 }
 
 /**

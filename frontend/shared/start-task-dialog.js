@@ -7,6 +7,7 @@
 // this form is the only chance to set them.
 
 import React from "react";
+import { t } from "./i18n.js";
 import { BUILTIN_TEAM_ID, listLibraryTeams } from "./teams-library-model.js";
 
 const h = React.createElement;
@@ -16,39 +17,39 @@ const h = React.createElement;
 export const TASK_FIELDS = Object.freeze([
   {
     key: "title",
-    label: "Task",
+    label: t("Task"),
     required: true,
     rows: 1,
-    placeholder: "Add a streaming parser to the loader",
-    hint: "One line. It names the branch, so keep it short.",
+    placeholder: t("Add a streaming parser to the loader"),
+    hint: t("One line. It names the branch, so keep it short."),
   },
   {
     key: "context",
-    label: "Context",
+    label: t("Context"),
     rows: 4,
-    placeholder: "Where this lives, what already exists, anything the team cannot discover by reading the code.",
-    hint: "The team lead gets this and nothing else to start with.",
+    placeholder: t("Where this lives, what already exists, anything the team cannot discover by reading the code."),
+    hint: t("The team lead gets this and nothing else to start with."),
   },
   {
     key: "acceptance_criteria",
-    label: "Done means",
+    label: t("Done means"),
     rows: 3,
-    placeholder: "Parses all three encodings. Existing loader tests still pass.",
-    hint: "How you will know it worked.",
+    placeholder: t("Parses all three encodings. Existing loader tests still pass."),
+    hint: t("How you will know it worked."),
   },
   {
     key: "agreed_scope",
-    label: "Scope",
+    label: t("Scope"),
     rows: 3,
-    placeholder: "The parser only. Do not touch the loader's public API.",
-    hint: "Immutable once the task starts — the review gate measures against this.",
+    placeholder: t("The parser only. Do not touch the loader's public API."),
+    hint: t("Immutable once the task starts — the review gate measures against this."),
   },
   {
     key: "quality_rules",
-    label: "Rules",
+    label: t("Rules"),
     rows: 3,
-    placeholder: "No unwrap in library code. Every new branch gets a test.",
-    hint: "Also immutable, and also part of what the reviewer checks.",
+    placeholder: t("No unwrap in library code. Every new branch gets a test."),
+    hint: t("Also immutable, and also part of what the reviewer checks."),
   },
 ]);
 
@@ -65,7 +66,7 @@ function Field({ field, value, onChange, idPrefix }) {
       "label",
       { className: "sidebar-label", htmlFor: id },
       field.label,
-      field.required ? h("span", { className: "start-task-required" }, "required") : null
+      field.required ? h("span", { className: "start-task-required" }, t("required")) : null
     ),
     h("textarea", {
       id,
@@ -83,7 +84,7 @@ function TeamSelector({ teams, value, onChange, idPrefix }) {
   return h(
     "fieldset",
     { className: "start-task-field start-task-team-field" },
-    h("legend", { className: "sidebar-label" }, "Team"),
+    h("legend", { className: "sidebar-label" }, t("Team")),
     h(
       "div",
       { className: "start-task-team-options" },
@@ -114,7 +115,7 @@ function TeamSelector({ teams, value, onChange, idPrefix }) {
             h(
               "span",
               { className: "start-task-team-meta" },
-              `${team.roleCount ?? team.roles?.length ?? 0} roles`
+              t("{count} roles", { count: team.roleCount ?? team.roles?.length ?? 0 })
             )
           )
         );
@@ -157,7 +158,7 @@ export function StartTaskDialog({
     h(
       "div",
       { className: "modal-header" },
-      h("h2", null, "New task"),
+      h("h2", null, t("New task")),
       h(
         "button",
         { className: "header-button close-modal-btn", onClick: closeDialog, type: "button" },
@@ -170,7 +171,7 @@ export function StartTaskDialog({
       h(
         "p",
         { className: "start-task-intro" },
-        "Pick a team structure for this task. The task still runs in a fresh git worktree on its own branch, so nothing touches your working tree."
+        t("Pick a team structure for this task. The task still runs in a fresh git worktree on its own branch, so nothing touches your working tree.")
       ),
       h(TeamSelector, {
         teams,
@@ -190,7 +191,7 @@ export function StartTaskDialog({
       h(
         "div",
         { className: "start-task-field" },
-        h("label", { className: "sidebar-label", htmlFor: `${id}-cwd` }, "Workspace"),
+        h("label", { className: "sidebar-label", htmlFor: `${id}-cwd` }, t("Workspace")),
         h("input", {
           id: `${id}-cwd`,
           type: "text",
@@ -214,25 +215,25 @@ export function StartTaskDialog({
         h(
           "p",
           { className: "start-task-hint" },
-          "Any directory in the repository to fork from. Blank uses the relay's current workspace."
+          t("Any directory in the repository to fork from. Blank uses the relay's current workspace.")
         )
       ),
       h(
         "div",
         { className: "start-task-field" },
-        h("label", { className: "sidebar-label", htmlFor: `${id}-branch` }, "Fork from"),
+        h("label", { className: "sidebar-label", htmlFor: `${id}-branch` }, t("Fork from")),
         h("input", {
           id: `${id}-branch`,
           type: "text",
           autoComplete: "off",
           value: fields.target_branch ?? "",
-          placeholder: "the workspace's current branch",
+          placeholder: t("the workspace's current branch"),
           onChange: (event) => onFieldChange?.("target_branch", event.target.value),
         }),
         h(
           "p",
           { className: "start-task-hint" },
-          "The task's changes are reviewed against this branch's merge base."
+          t("The task's changes are reviewed against this branch's merge base.")
         )
       ),
       error ? h("p", { className: "start-task-error" }, String(error)) : null
@@ -243,7 +244,7 @@ export function StartTaskDialog({
       h(
         "button",
         { className: "header-button", type: "button", onClick: closeDialog },
-        "Cancel"
+        t("Cancel")
       ),
       h(
         "button",
@@ -256,7 +257,7 @@ export function StartTaskDialog({
           // and the error has to land on the form that produced it.
           onClick: () => onStart?.(),
         },
-        pending ? "Starting…" : "Start task"
+        pending ? t("Starting…") : t("Start task")
       )
     )
   );

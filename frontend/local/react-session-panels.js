@@ -1,4 +1,5 @@
 import React from "react";
+import { t } from "../shared/i18n.js";
 
 const h = React.createElement;
 
@@ -69,7 +70,7 @@ export function SessionMetaPanel({ chips = [], emptyMessage = "" }) {
       h(
         "span",
         { className: "meta-chip", key: `${chip.label}:${chip.value}` },
-        h("strong", null, `${chip.label}:`),
+        h("strong", null, t("{label}:", { label: chip.label })),
         h("span", null, chip.value)
       )
     ),

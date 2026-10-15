@@ -28,6 +28,7 @@
 
 import React from "react";
 
+import { t } from "./i18n.js";
 import { BELL_SVG, SEARCH_SVG, X_SVG } from "../svg.js";
 import { ToggleLeftPanelIcon } from "./panel-icons.js";
 
@@ -82,14 +83,14 @@ export function SidebarBrand() {
  * for any surface that still wants to name a different binding.
  */
 export function SidebarSearchToggle({ open = false, onToggle = null, shortcutHint = "" } = {}) {
-  const title = shortcutHint ? `Search sessions (${shortcutHint})` : "Search sessions";
+  const title = shortcutHint ? t("Search sessions ({shortcut})", { shortcut: shortcutHint }) : t("Search sessions");
   return h(
     "button",
     {
       className: open ? "header-button sidebar-search-toggle is-active" : "header-button sidebar-search-toggle",
       type: "button",
       title,
-      "aria-label": "Search sessions",
+      "aria-label": t("Search sessions"),
       "aria-expanded": String(Boolean(open)),
       onClick: onToggle ? () => onToggle(!open) : undefined,
     },
@@ -109,8 +110,8 @@ export function SidebarBellToggle({ on = false, onToggle = null } = {}) {
     {
       className: on ? "header-button sidebar-bell-toggle is-active" : "header-button sidebar-bell-toggle",
       type: "button",
-      title: "Filter by activity",
-      "aria-label": "Filter by activity",
+      title: t("Filter by activity"),
+      "aria-label": t("Filter by activity"),
       "aria-pressed": String(Boolean(on)),
       onClick: onToggle ? () => onToggle(!on) : undefined,
     },
@@ -185,11 +186,11 @@ export function SidebarSearchField({
       autoComplete: "off",
       ref: inputRef,
       className: "sidebar-search-input",
-      placeholder: "Search session titles",
+      placeholder: t("Search session titles"),
       spellCheck: false,
       type: "search",
       value: query,
-      "aria-label": "Search session titles",
+      "aria-label": t("Search session titles"),
       onChange: onInput ? (event) => onInput(event.target.value) : undefined,
       onKeyDown: (event) => {
         if (event.key === "Escape") {
@@ -203,8 +204,8 @@ export function SidebarSearchField({
       {
         className: "sidebar-search-clear",
         type: "button",
-        title: "Clear search",
-        "aria-label": "Clear search",
+        title: t("Clear search"),
+        "aria-label": t("Clear search"),
         // Clears the query but leaves the field OPEN and focused — the user is still
         // searching, they just want to start the term again. Closing here would be a
         // different gesture than the one they made.
@@ -244,7 +245,7 @@ export function SidebarResizeHandle({ id }) {
     id,
     role: "separator",
     "aria-orientation": "vertical",
-    "aria-label": "Resize navigation panel",
+    "aria-label": t("Resize navigation panel"),
     tabIndex: 0,
   });
 }
@@ -268,10 +269,10 @@ export function SidebarCollapseToggle({ id }) {
   return h(
     "button",
     {
-      "aria-label": "Hide navigation panel",
+      "aria-label": t("Hide navigation panel"),
       className: "header-button header-panel-toggle sidebar-top-toggle",
       id,
-      title: "Hide navigation panel (⌘B)",
+      title: t("Hide navigation panel (⌘B)"),
       type: "button",
     },
     h(ToggleLeftPanelIcon)

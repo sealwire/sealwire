@@ -1,5 +1,6 @@
 import React from "react";
 
+import { t } from "./i18n.js";
 import { buildModelPickerGroups, selectedModelChip } from "./model-picker-model.js";
 import { providerPicksFolderDefaultModel } from "./provider-settings.js";
 import { selectReviewerCatalogState } from "./review-state.js";
@@ -279,12 +280,12 @@ export function ReviewPanel({
         })
       );
       if (result === false) {
-        setError("Couldn't start the review — check the activity log for details.");
+        setError(t("Couldn't start the review — check the activity log for details."));
         return;
       }
       close();
     } catch (err) {
-      setError(err?.message || "Couldn't start the review.");
+      setError(err?.message || t("Couldn't start the review."));
     } finally {
       setSubmitting(false);
     }
@@ -296,17 +297,17 @@ export function ReviewPanel({
     selectedProvider: reviewerProvider,
   });
   const reviewerChip = !reviewerProvider
-    ? "Choose a provider"
+    ? t("Choose a provider")
     : isReuse && !shownModel
-      ? "Current model"
+      ? t("Current model")
       : modelChip.value;
 
   const sessionOptions = [
-    { value: "clean", label: "New clean reviewer session", chip: "New reviewer" },
+    { value: "clean", label: t("New clean reviewer session"), chip: t("New reviewer") },
     ...reusableForProvider.map((entry) => ({
       value: entry.reviewerThreadId,
-      label: `Reuse: ${entry.label}`,
-      title: `Reuse: ${entry.label}`,
+      label: t("Reuse: {name}", { name: entry.label }),
+      title: t("Reuse: {name}", { name: entry.label }),
     })),
   ];
   const session = sessionOptions.find((option) => option.value === selectedReviewerThreadId);
@@ -327,7 +328,7 @@ export function ReviewPanel({
         h(
           "button",
           { className: "session-dialog-cancel", key: "cancel", onClick: close, type: "button" },
-          "Cancel"
+          t("Cancel")
         ),
         h(
           "button",
@@ -339,17 +340,17 @@ export function ReviewPanel({
             onClick: submit,
             type: "button",
           },
-          busy ? "Starting…" : "Start review",
+          busy ? t("Starting…") : t("Start review"),
           h(SubmitShortcutHint)
         ),
       ],
-      footerHint: "Runs in its own session, posts findings here",
+      footerHint: t("Runs in its own session, posts findings here"),
       id,
       onRequestClose: () => {
         setError(null);
         onRequestClose?.();
       },
-      title: "Request review",
+      title: t("Request review"),
     },
     // Which tree is reviewed; a mid-session worktree move is otherwise invisible.
     workspace || onPinWorkspace
@@ -359,7 +360,7 @@ export function ReviewPanel({
             busy: busy || workspaceBusy,
             error: workspaceError,
             id: `${id}-workspace`,
-            label: "Working tree to review",
+            label: t("Working tree to review"),
             onClose: onCloseWorkspace,
             onOpen: onOpenWorkspace,
             onPin: onPinWorkspace,
@@ -369,19 +370,19 @@ export function ReviewPanel({
         })
       : null,
     h(PromptCard, {
-      hint: "Optional",
+      hint: t("Optional"),
       id: `${id}-instructions`,
       key: "instructions",
       onChange: setInstructions,
       onSubmit: submit,
-      placeholder: "e.g. focus on the storage refactor and its tests",
+      placeholder: t("e.g. focus on the storage refactor and its tests"),
       value: instructions,
     }),
     h(
       SettingPillRow,
       { key: "pills" },
       h(ModelPicker, {
-        ariaLabel: "Reviewer model",
+        ariaLabel: t("Reviewer model"),
         groups: reviewerModelGroups({
           activeProvider,
           isReuse,
@@ -418,24 +419,24 @@ export function ReviewPanel({
       h(SettingPill, {
         id: `${id}-effort`,
         key: "effort",
-        label: "Effort",
+        label: t("Effort"),
         onSelect: setReviewerEffort,
         options: markSelected(
           [
             ...(isReuse && reuseEntry?.effort
               ? []
-              : [{ value: "", label: isReuse ? "Keep current effort" : "Model default" }]),
+              : [{ value: "", label: isReuse ? t("Keep current effort") : t("Model default") }]),
             ...effortOptions.map((effort) => ({ value: effort, label: effort })),
           ],
           shownEffort
         ),
-        value: shownEffort || (isReuse ? "current" : "default"),
+        value: shownEffort || (isReuse ? t("current") : t("default")),
       }),
       h(SettingPill, {
         className: "reviewer-session-pill" + (sessionAutoSwitched ? " reviewer-session-autoswitched" : ""),
         id: `${id}-reviewer-session`,
         key: "session",
-        label: "Session",
+        label: t("Session"),
         menuClassName: "reviewer-session-menu",
         onSelect: selectReviewerSession,
         options: markSelected(sessionOptions, selectedReviewerThreadId),
@@ -445,7 +446,7 @@ export function ReviewPanel({
       h(SettingPill, {
         id: `${id}-recap-source`,
         key: "briefing",
-        label: "Briefing",
+        label: t("Briefing"),
         onSelect: setRecapSource,
         options: markSelected(BRIEFING_OPTIONS, recapSource),
         value: briefing?.chip || recapSource,
@@ -453,7 +454,7 @@ export function ReviewPanel({
       h(SettingPill, {
         id: `${id}-max-rounds`,
         key: "rounds",
-        label: "Rounds",
+        label: t("Rounds"),
         onSelect: (value) => setMaxRounds(clampReviewRounds(value)),
         options: markSelected(ROUND_OPTIONS, String(rounds)),
         value: String(rounds),
@@ -464,21 +465,21 @@ export function ReviewPanel({
       ? h(
           "p",
           { className: "session-dialog-note", key: "dropped-reuse" },
-          "That reviewer session can't review this working tree — a reviewer stays in the tree it was created in — so this review starts a clean one."
+          t("That reviewer session can't review this working tree — a reviewer stays in the tree it was created in — so this review starts a clean one.")
         )
       : null,
     isReuse
       ? h(
           "p",
           { className: "session-dialog-note", key: "reuse" },
-          "Reusing this reviewer session — it keeps its earlier review context. Switching the provider starts a new reviewer instead."
+          t("Reusing this reviewer session — it keeps its earlier review context. Switching the provider starts a new reviewer instead.")
         )
       : null,
     rounds > 1
       ? h(
           "p",
           { className: "session-dialog-note", key: "rounds" },
-          "The reviewer and the author iterate until the reviewer approves or the rounds run out (then it's handed back to you). The author session must be able to edit without approval prompts."
+          t("The reviewer and the author iterate until the reviewer approves or the rounds run out (then it's handed back to you). The author session must be able to edit without approval prompts.")
         )
       : null,
     // A rejected request stays here (the modal no longer closes optimistically),
@@ -492,22 +493,22 @@ export function ReviewPanel({
 const BRIEFING_OPTIONS = [
   {
     value: "last_message",
-    label: "Use the author's last message (faster)",
-    chip: "Last message",
-    subtitle: "The latest message plus the diff — no extra turn; recaps if there's none yet.",
+    label: t("Use the author's last message (faster)"),
+    chip: t("Last message"),
+    subtitle: t("The latest message plus the diff — no extra turn; recaps if there's none yet."),
   },
   {
     value: "recap",
-    label: "Ask the author to recap the changes",
-    chip: "Recap",
-    subtitle: "The author summarizes its changes first — most context, but an extra turn.",
+    label: t("Ask the author to recap the changes"),
+    chip: t("Recap"),
+    subtitle: t("The author summarizes its changes first — most context, but an extra turn."),
   },
 ];
 
 const ROUND_OPTIONS = Array.from({ length: 10 }, (_, index) => ({
   value: String(index + 1),
   label: String(index + 1),
-  subtitle: index === 0 ? "A single review" : null,
+  subtitle: index === 0 ? t("A single review") : null,
 }));
 
 function providerValues(providerOptions) {
@@ -552,7 +553,7 @@ function reviewerModelGroups({
     const current = group.provider === reviewerProvider;
     return {
       ...group,
-      hint: current && isReuse && !reviewerModel ? "Current" : group.hint,
+      hint: current && isReuse && !reviewerModel ? t("Current") : group.hint,
       label: named?.label || group.label,
     };
   });
@@ -567,7 +568,7 @@ function catalogStatusNote({ catalog, onEnsureProviderModels, reviewerProvider }
     return h(
       "p",
       { className: "session-dialog-note", "data-models-status": "error", key: "models" },
-      "Couldn't load the reviewer models — the review will use the provider default. ",
+      t("Couldn't load the reviewer models — the review will use the provider default. "),
       h(
         "button",
         {
@@ -575,7 +576,7 @@ function catalogStatusNote({ catalog, onEnsureProviderModels, reviewerProvider }
           onClick: () => onEnsureProviderModels(reviewerProvider),
           type: "button",
         },
-        "Retry"
+        t("Retry")
       )
     );
   }
@@ -583,7 +584,7 @@ function catalogStatusNote({ catalog, onEnsureProviderModels, reviewerProvider }
     return h(
       "p",
       { className: "session-dialog-note", "data-models-status": "loading", key: "models" },
-      "Loading reviewer models…"
+      t("Loading reviewer models…")
     );
   }
   return null;
@@ -609,8 +610,8 @@ export function ReviewLauncher({
   onPinWorkspace = null,
   onTrustWorkspace = null,
   disabled = false,
-  label = "Review",
-  title = "Ask another agent to review the current changes",
+  label = t("Review"),
+  title = t("Ask another agent to review the current changes"),
   onSubmit,
 }) {
   return h(

@@ -7,6 +7,7 @@ import { mergeLogEntries } from "../shared/client-log-merge.js";
 import { filterActivePairings } from "../shared/pairing-helpers.js";
 import { buildProviderStatusModel, hasSignedOutProvider } from "../shared/provider-status.js";
 import { LOCAL_SETTINGS_TABS, LocalSettings } from "./settings-view.js";
+import { t } from "../shared/i18n.js";
 
 /**
  * @param {{
@@ -75,7 +76,7 @@ export function createSettingsController({
       if (mine === codeRequest) {
         // The old code grants a different scope than the one now asked for.
         state.currentPairing = null;
-        state.pairingError = `Could not create a code: ${error.message}`;
+        state.pairingError = t("Could not create a code: {error}", { error: error.message });
       }
     } finally {
       if (mine === codeRequest) {

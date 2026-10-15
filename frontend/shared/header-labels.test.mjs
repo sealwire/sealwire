@@ -191,7 +191,7 @@ test("the all-sessions label has exactly one definition in the tree", async () =
     const source = await readFile(file, "utf8");
     // An ASSIGNMENT of the string is a copy, whatever it is called and whichever
     // quote style it uses. Comparisons against it (tests, assertions) are fine.
-    if (/=\s*(["'`])All sessions\1/.test(source)) {
+    if (/=\s*(?:t\(\s*)?(["'`])All sessions\1/.test(source)) {
       seen.push(file);
     }
   }

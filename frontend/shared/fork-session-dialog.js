@@ -1,5 +1,6 @@
 import React from "react";
 
+import { t } from "./i18n.js";
 import {
   FORK_PROJECT_INHERIT,
   FORK_PROJECT_NONE,
@@ -28,7 +29,7 @@ import {
 
 const h = React.createElement;
 
-const INHERIT_LABEL = "Inherit from source";
+const INHERIT_LABEL = t("Inherit from source");
 
 // What an inherited pill reads: the source's own value when the relay recorded
 // one, else the bare label. Either way the field still submits null.
@@ -43,8 +44,8 @@ function inheritedLabel(sourceSettings, field, options) {
 // A preview can be a whole handoff blob — tens of thousands of characters.
 const MAX_SOURCE_LABEL_CHARS = 80;
 function forkSourceLabel(sourceThread) {
-  const raw = sourceThread?.name || sourceThread?.preview || sourceThread?.id || "session";
-  const firstLine = String(raw).split("\n", 1)[0].trim() || "session";
+  const raw = sourceThread?.name || sourceThread?.preview || sourceThread?.id || t("session");
+  const firstLine = String(raw).split("\n", 1)[0].trim() || t("session");
   return firstLine.length > MAX_SOURCE_LABEL_CHARS
     ? `${firstLine.slice(0, MAX_SOURCE_LABEL_CHARS - 1)}…`
     : firstLine;
@@ -76,7 +77,7 @@ function inheritedPill({ inheritable, value }) {
   const isInherited = inheritable && value === INHERIT;
   return {
     inherited: isInherited,
-    tag: isInherited ? "inherited" : null,
+    tag: isInherited ? t("inherited") : null,
   };
 }
 
@@ -152,7 +153,7 @@ export function ForkSessionDialog({
   const inheritedModel = forkInheritedDisplay(sourceSettings, "model");
   const modelChip = modelInherits
     ? {
-        tag: "inherited",
+        tag: t("inherited"),
         value: inheritedModel
           ? selectedModelChip({
               providerModels,
@@ -187,7 +188,7 @@ export function ForkSessionDialog({
         h(
           "button",
           { className: "session-dialog-cancel", key: "cancel", onClick: closeDialog, type: "button" },
-          "Cancel"
+          t("Cancel")
         ),
         h(
           "button",
@@ -199,7 +200,7 @@ export function ForkSessionDialog({
             onClick: submit,
             type: "button",
           },
-          pending ? "Forking…" : "Fork session",
+          pending ? t("Forking…") : t("Fork session"),
           h(SubmitShortcutHint)
         ),
       ],
@@ -211,14 +212,14 @@ export function ForkSessionDialog({
           className: "session-dialog-badge" + (lossy ? " is-lossy" : ""),
           "data-fork-mode": lossy ? "replay" : "native",
         },
-        lossy ? "transcript replay" : "full context preserved"
+        lossy ? t("transcript replay") : t("full context preserved")
       ),
       footerHint: cwd
-        ? `Branches in ${abbreviateHomePath(cwd)} · the source keeps running`
-        : "Choose a directory for the branch",
+        ? t("Branches in {path} · the source keeps running", { path: abbreviateHomePath(cwd) })
+        : t("Choose a directory for the branch"),
       id,
       onRequestClose,
-      title: "Fork session",
+      title: t("Fork session"),
     },
     h(
       "div",
@@ -227,17 +228,17 @@ export function ForkSessionDialog({
       h(
         "div",
         { className: "fork-source-text" },
-        h("span", { className: "fork-source-eyebrow" }, "Forking from"),
+        h("span", { className: "fork-source-eyebrow" }, t("Forking from")),
         h("span", { className: "fork-source-title", title: sourceTitle }, sourceTitle),
         h(
           "span",
           { className: "fork-source-meta" },
           [
-            fields.upToItemId ? "from a message mid-session" : null,
+            fields.upToItemId ? t("from a message mid-session") : null,
             // No message count: the relay sees only loaded history, so any number
             // would be a floor presented as a total.
             sourceThread?.updated_at
-              ? `last active ${formatRelativeTime(sourceThread.updated_at)}`
+              ? t("last active {time}", { time: formatRelativeTime(sourceThread.updated_at) })
               : null,
           ]
             .filter(Boolean)
@@ -250,8 +251,11 @@ export function ForkSessionDialog({
           "p",
           { className: "session-dialog-note", "data-fork-mode": "replay", key: "lossy" },
           sourceProvider && targetProvider && sourceProvider !== targetProvider
-            ? `Handing off ${providerLabel(sourceProvider)} → ${providerLabel(targetProvider)} by replaying the transcript. Provider-native state (tool results, cached context) will not carry over.`
-            : "Branching mid-session replays the transcript. Provider-native state will not carry over."
+            ? t(
+                "Handing off {from} → {to} by replaying the transcript. Provider-native state (tool results, cached context) will not carry over.",
+                { from: providerLabel(sourceProvider), to: providerLabel(targetProvider) }
+              )
+            : t("Branching mid-session replays the transcript. Provider-native state will not carry over.")
         )
       : null,
     h(SessionContextBar, {
@@ -272,7 +276,7 @@ export function ForkSessionDialog({
           hint: sourceProjectName || null,
           label: INHERIT_LABEL,
         },
-        label: "Project",
+        label: t("Project"),
         onCreateProject,
         onSelectProject: (projectId) =>
           onFieldChange?.(
@@ -305,14 +309,14 @@ export function ForkSessionDialog({
         : null,
       // A native fork can idle; a replay fork always sends a turn (the transcript
       // IS the prompt), hence the different hint.
-      hint: lossy ? "Leave empty to replay and summarize" : "Leave empty to branch and wait",
+      hint: lossy ? t("Leave empty to replay and summarize") : t("Leave empty to branch and wait"),
       id: `${id}-start-prompt`,
       key: "prompt",
       onChange: (next) => onFieldChange?.("initialPrompt", next),
       onSubmit: submit,
       placeholder: initialPromptAttachmentsId
-        ? "What should the fork try instead? Paste an image to attach it."
-        : "What should the fork try instead?",
+        ? t("What should the fork try instead? Paste an image to attach it.")
+        : t("What should the fork try instead?"),
       value: shownFields.initialPrompt ?? "",
     }),
     h(
@@ -366,7 +370,7 @@ export function ForkSessionDialog({
         id: `${id}-effort`,
         inherited: effortState.inherited,
         key: "effort",
-        label: "Effort",
+        label: t("Effort"),
         onSelect: (value) => onFieldChange?.("effort", value),
         options: withInheritOption(effortOptions, inheritable.has("effort")).map((option) => ({
           ...option,
@@ -375,13 +379,13 @@ export function ForkSessionDialog({
         tag: effortState.tag,
         value: effortState.inherited
           ? inheritedLabel(sourceSettings, "effort", effortOptions)
-          : selectedEffort?.label || shownFields.effort || "default",
+          : selectedEffort?.label || shownFields.effort || t("default"),
       }),
       h(SettingPill, {
         id: `${id}-approval`,
         inherited: approvalState.inherited,
         key: "approval",
-        label: "Permissions",
+        label: t("Permissions"),
         onSelect: (value) => onFieldChange?.("approvalPolicy", value),
         options: withInheritOption(
           approvalOptions,
@@ -390,7 +394,7 @@ export function ForkSessionDialog({
         tag: approvalState.tag || selectedApproval?.tag || null,
         value: approvalState.inherited
           ? inheritedLabel(sourceSettings, "approvalPolicy", approvalOptions)
-          : selectedApproval?.label || shownFields.approvalPolicy || "default",
+          : selectedApproval?.label || shownFields.approvalPolicy || t("default"),
       })
     ),
     error
@@ -414,7 +418,7 @@ export function ForkSessionDialog({
             id: `${id}-models-hint`,
             key: "models-hint",
           },
-          modelsStatus === "loading" ? "Loading models…" : "Couldn’t load the model list."
+          modelsStatus === "loading" ? t("Loading models…") : t("Couldn’t load the model list.")
         )
       : null
   );

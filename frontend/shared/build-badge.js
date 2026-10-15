@@ -1,3 +1,5 @@
+import { t } from "./i18n.js";
+
 const BUILD_BADGE_ID = "build-badge";
 const BUILD_META_URL = `${import.meta.env.BASE_URL}build-meta.json`;
 
@@ -10,8 +12,8 @@ export async function fetchBuildInfo(surface = "broker") {
 
   if (import.meta.env.DEV) {
     cachedBuildInfo = {
-      label: `${surface} · dev live`,
-      title: `Dev server · ${window.location.origin}`,
+      label: t("{surface} · dev live", { surface }),
+      title: t("Dev server · {origin}", { origin: window.location.origin }),
     };
     return cachedBuildInfo;
   }
@@ -25,7 +27,7 @@ export async function fetchBuildInfo(surface = "broker") {
     const buildMeta = await response.json();
     const builtAt = new Date(buildMeta.builtAtIso);
     const builtAtLabel = Number.isNaN(builtAt.getTime())
-      ? buildMeta.builtAtIso || "unknown time"
+      ? buildMeta.builtAtIso || t("unknown time")
       : new Intl.DateTimeFormat(undefined, {
         year: "numeric",
         month: "2-digit",
@@ -37,12 +39,16 @@ export async function fetchBuildInfo(surface = "broker") {
 
     cachedBuildInfo = {
       label: `${surface} · ${builtAtLabel} · ${buildMeta.buildId || "unknown-build"}`,
-      title: `Build ${buildMeta.buildId || "unknown-build"}\nBuilt at ${buildMeta.builtAtIso || builtAtLabel}\nServed from ${window.location.origin}`,
+      title: t("Build {id}\nBuilt at {time}\nServed from {origin}", {
+        id: buildMeta.buildId || "unknown-build",
+        time: buildMeta.builtAtIso || builtAtLabel,
+        origin: window.location.origin,
+      }),
     };
   } catch (error) {
     cachedBuildInfo = {
-      label: `${surface} · build unknown`,
-      title: error instanceof Error ? error.message : "Build metadata unavailable",
+      label: t("{surface} · build unknown", { surface }),
+      title: error instanceof Error ? error.message : t("Build metadata unavailable"),
     };
   }
 
@@ -56,8 +62,8 @@ export async function mountBuildBadge(options = {}) {
   const badge = document.createElement("div");
   badge.id = BUILD_BADGE_ID;
   badge.className = "build-badge";
-  badge.textContent = `${surface} · loading build...`;
-  badge.title = "Loading build metadata";
+  badge.textContent = t("{surface} · loading build...", { surface });
+  badge.title = t("Loading build metadata");
   document.body.appendChild(badge);
 
   const info = await fetchBuildInfo(surface);

@@ -1,3 +1,5 @@
+import { t } from "../shared/i18n.js";
+
 const MAX_ASK_USER_ERRORS = 16;
 
 export function createInitialRemoteTranscriptUiState() {
@@ -35,7 +37,7 @@ export function reduceRemoteTranscriptUiState(state, action) {
       next.delete(action.requestId);
       const errors = new Map(state.askUserErrors || []);
       errors.delete(action.requestId);
-      errors.set(action.requestId, action.message || "Could not send your answer.");
+      errors.set(action.requestId, action.message || t("Could not send your answer."));
       // A failure that lands AFTER its question left the pending list has
       // nothing left to prune it; the cap is a leak stop, not a policy.
       while (errors.size > MAX_ASK_USER_ERRORS) {

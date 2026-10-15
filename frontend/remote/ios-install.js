@@ -10,6 +10,8 @@
  * testable under Node; `mountIosInstallHint` is the imperative DOM entry point.
  */
 
+import { t } from "../shared/i18n.js";
+
 const DISMISS_KEY = "sealwire-ios-install-dismissed";
 const BANNER_ID = "ios-install-hint";
 
@@ -91,12 +93,12 @@ export function mountIosInstallHint() {
   const text = document.createElement("span");
   text.className = "ios-install-hint__text";
   // ↑ is the box-arrow that labels the iOS Share button.
-  text.textContent = "Install Sealwire: tap Share ↑, then “Add to Home Screen”.";
+  text.textContent = t("Install Sealwire: tap Share ↑, then “Add to Home Screen”.");
 
   const close = document.createElement("button");
   close.type = "button";
   close.className = "ios-install-hint__close";
-  close.setAttribute("aria-label", "Dismiss");
+  close.setAttribute("aria-label", t("Dismiss"));
   close.textContent = "✕";
   close.addEventListener("click", () => {
     try {

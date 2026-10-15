@@ -4,6 +4,8 @@
 // actionable "continue where you left off" on return, or a welcome on first use — the
 // main area leads with the task, not with plumbing.
 
+import { t } from "../shared/i18n.js";
+
 const LABEL_MAX = 48;
 
 function shortId(id) {
@@ -61,17 +63,17 @@ function pickLatestThread(threads) {
 const QUICK_START_PROMPTS = [
   {
     key: "start-summarize",
-    label: "Summarize this repo",
+    label: t("Summarize this repo"),
     prompt: "Summarize the structure of this repo and point out the important entry points.",
   },
   {
     key: "start-bug",
-    label: "Find the bug",
+    label: t("Find the bug"),
     prompt: "Find the bug in this project and explain the likely root cause before changing code.",
   },
   {
     key: "start-cleanup",
-    label: "Suggest a cleanup",
+    label: t("Suggest a cleanup"),
     prompt: "Review this codebase for areas that feel too complex and suggest a cleanup plan.",
   },
 ];
@@ -88,7 +90,7 @@ export function buildStandbyEmptyActions(model) {
       attrs: { "data-open-thread-id": model.continueAction.threadId },
       className: "suggestion-button is-primary",
       key: "continue-latest",
-      label: `Continue "${model.continueAction.label}"`,
+      label: t("Continue \"{name}\"", { name: model.continueAction.label }),
     });
   }
   for (const starter of QUICK_START_PROMPTS) {
@@ -106,16 +108,16 @@ export function selectStandbyEmptyModel({ threads = [], selectedCwd = "" } = {})
   if (latest) {
     return {
       mode: "returning",
-      title: "Welcome back",
-      copy: "Continue where you left off, or start something new below.",
+      title: t("Welcome back"),
+      copy: t("Continue where you left off, or start something new below."),
       continueAction: { threadId: latest.id, label: threadLabel(latest) },
       selectedCwd,
     };
   }
   return {
     mode: "first-use",
-    title: "Providers are ready",
-    copy: "What would you like to work on? Pick a starting point below, or type your own prompt.",
+    title: t("Providers are ready"),
+    copy: t("What would you like to work on? Pick a starting point below, or type your own prompt."),
     continueAction: null,
     selectedCwd,
   };

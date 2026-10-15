@@ -14,6 +14,7 @@
 // second reading of the list sitting on top of the list. Whichever state you want, its
 // bucket is already right there — scroll, don't narrow.
 
+import { t } from "./i18n.js";
 import { THREAD_STATES, THREAD_STATE_LABELS, selectThreadState } from "./thread-dot.js";
 
 /** The bell at rest: off, remembering nothing. */
@@ -178,8 +179,8 @@ export function selectThreadFilterView({ groups = [], filter = null, stateOf = (
   return {
     filtering: true,
     groups: filtered,
-    countLabel: shown === 1 ? "1 session" : `${shown} sessions`,
-    emptyMessage: "Nothing is running or waiting on you.",
+    countLabel: shown === 1 ? t("{count} session", { count: shown }) : t("{count} sessions", { count: shown }),
+    emptyMessage: t("Nothing is running or waiting on you."),
   };
 }
 
@@ -203,7 +204,7 @@ export function composeListChrome(listView, filterView) {
   }
   if (status === "partial") {
     return {
-      countLabel: `${filterView.countLabel} · partial`,
+      countLabel: t("{label} · partial", { label: filterView.countLabel }),
       emptyMessage: listView.emptyMessage,
     };
   }

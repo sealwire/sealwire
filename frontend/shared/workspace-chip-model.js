@@ -1,6 +1,8 @@
 // Presentational only: the SUBMITTED path is always the raw value, because
 // `normalize_cwd` works on real paths and owes a `~` nothing.
 
+import { t } from "./i18n.js";
+
 // The frontend is never told the home directory, so this matches by shape — a
 // display guess, which is why it may not touch the submitted value.
 const HOME_PATTERN = /^\/(?:Users|home)\/[^/]+(?=\/|$)/;
@@ -36,7 +38,7 @@ export function gitContextLabel(context) {
   if (context.dirty_known === false) {
     return where;
   }
-  const state = context.dirty ? "changes" : "clean";
+  const state = context.dirty ? t("changes") : t("clean");
   return where ? `${where} · ${state}` : state;
 }
 
@@ -86,7 +88,7 @@ export function workspaceOriginNote(workspace, fallbackFrom = null, options = nu
     const cwd = workspace?.cwd || "";
     return {
       tone: "info",
-      text: "Viewing this tree's changes — does not move the session.",
+      text: t("Viewing this tree's changes — does not move the session."),
       title: cwd,
     };
   }
@@ -97,8 +99,11 @@ export function workspaceOriginNote(workspace, fallbackFrom = null, options = nu
     return {
       tone: "warn",
       text: cwd
-        ? `Worktree ${pathBasename(gone)} no longer exists — showing ${pathBasename(cwd)} instead.`
-        : `Worktree ${pathBasename(gone)} no longer exists.`,
+        ? t("Worktree {gone} no longer exists — showing {current} instead.", {
+            gone: pathBasename(gone),
+            current: pathBasename(cwd),
+          })
+        : t("Worktree {gone} no longer exists.", { gone: pathBasename(gone) }),
       title: cwd ? `${gone} → ${cwd}` : gone,
     };
   }
@@ -107,7 +112,7 @@ export function workspaceOriginNote(workspace, fallbackFrom = null, options = nu
     const birth = workspace.birth_cwd || "";
     return {
       tone: "warn",
-      text: `The directory this session started in (${abbreviateHomePath(birth)}) no longer exists.`,
+      text: t("The directory this session started in ({path}) no longer exists.", { path: abbreviateHomePath(birth) }),
       title: birth,
     };
   }
@@ -115,13 +120,13 @@ export function workspaceOriginNote(workspace, fallbackFrom = null, options = nu
     case "pinned":
       return {
         tone: "info",
-        text: "Pinned by you — diffs and reviews use this tree until you unpin it.",
+        text: t("Pinned by you — diffs and reviews use this tree until you unpin it."),
         title: cwd,
       };
     case "proven":
       return {
         tone: "info",
-        text: "Detected from where this session has been writing.",
+        text: t("Detected from where this session has been writing."),
         title: cwd,
       };
     default:

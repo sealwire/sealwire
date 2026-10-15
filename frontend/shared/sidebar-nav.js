@@ -36,6 +36,7 @@
 
 import React from "react";
 
+import { t } from "./i18n.js";
 import { SESSIONS_SVG, TASKS_SVG, USAGE_SVG } from "../svg.js";
 
 const h = React.createElement;
@@ -49,14 +50,14 @@ const h = React.createElement;
 export const SIDEBAR_NAV_DESTINATIONS = Object.freeze([
   Object.freeze({
     key: "sessions",
-    label: "Sessions",
-    title: "Sessions — conversations with one agent",
+    label: t("Sessions"),
+    title: t("Sessions — conversations with one agent"),
     svg: SESSIONS_SVG,
   }),
   Object.freeze({
     key: "tasks",
-    label: "Tasks",
-    title: "Tasks — long-running work a team does on its own branch",
+    label: t("Tasks"),
+    title: t("Tasks — long-running work a team does on its own branch"),
     svg: TASKS_SVG,
   }),
   // Third destination, and the proof that the two forms now read one list: this
@@ -65,8 +66,8 @@ export const SIDEBAR_NAV_DESTINATIONS = Object.freeze([
   // shape of bug that costs.
   Object.freeze({
     key: "usage",
-    label: "Usage",
-    title: "Usage — tokens spent, by provider and model",
+    label: t("Usage"),
+    title: t("Usage — tokens spent, by provider and model"),
     svg: USAGE_SVG,
   }),
 ]);
@@ -178,7 +179,7 @@ export function SidebarNav(props = {}) {
 
   return h(
     "nav",
-    { className: "sidebar-nav", "aria-label": "Views" },
+    { className: "sidebar-nav", "aria-label": t("Views") },
     destinations.map((destination) => {
       const { isCurrent, ...buttonProps } = destinationProps(
         destination,

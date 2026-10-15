@@ -4,6 +4,7 @@
  */
 import { splitOrchestratorProposalDraft } from "./orchestrator-proposal-draft.js";
 import { isStopPending } from "./stop-pending.js";
+import { t } from "./i18n.js";
 
 export function createOrchestratorChatActions({
   state,
@@ -67,7 +68,7 @@ export function createOrchestratorChatActions({
         } catch {
           reason = "";
         }
-        state.orchestratorSendError = reason || "Message was not accepted";
+        state.orchestratorSendError = reason || t("Message was not accepted");
       }
     } catch (error) {
       state.orchestratorSendError = error?.message || String(error);
@@ -107,7 +108,7 @@ export function createOrchestratorChatActions({
         } catch {
           reason = "";
         }
-        state.orchestratorSendError = reason || "Stop failed";
+        state.orchestratorSendError = reason || t("Stop failed");
       }
       // On success the shared map stays pending until reconcile sees the orch
       // thread idle (even if Tasks is not open when that happens).
@@ -131,7 +132,7 @@ export function createOrchestratorChatActions({
     }
     const parts = splitOrchestratorProposalDraft(text);
     if (!parts?.title) {
-      state.orchestratorSendError = "Write a title (first line) before proposing a task";
+      state.orchestratorSendError = t("Write a title (first line) before proposing a task");
       if (state.session) {
         renderTaskTeam(state.session);
       }

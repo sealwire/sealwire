@@ -4,6 +4,7 @@ import { FileChangeDiff } from "../shared/transcript-react.js";
 import { RightPanelTabs } from "../shared/right-panel-tabs.js";
 import { isWorkspaceRestricted, skippedAgentConfig } from "../shared/workspace-chip-model.js";
 import { ThreadWorkspaceField } from "../shared/workspace-picker.js";
+import { t } from "../shared/i18n.js";
 
 const h = React.createElement;
 
@@ -22,7 +23,7 @@ function useStoreState(store) {
 export function WorkspaceDiffModalTitle({ store }) {
   const state = useStoreState(store);
   const onReviewer = state.activeTab === "reviewer";
-  return h("h2", null, onReviewer ? "Agents" : "Workspace diff");
+  return h("h2", null, onReviewer ? t("Agents") : t("Workspace diff"));
 }
 
 export function createWorkspaceDiffStore({
@@ -682,7 +683,7 @@ export function WorkspaceTreeBar({ store, state }) {
     busy: false,
     error: state.workspaceError || null,
     fallbackFrom: state.data?.fallback_from || null,
-    label: previewing ? "Viewing" : null,
+    label: previewing ? t("Viewing") : null,
     onPin: null,
     // Measured lazily: the counts only exist inside the open panel.
     onClose: (owner) => store.stopMeasuringRoots?.(owner),
@@ -722,7 +723,7 @@ function RefreshIcon() {
 function WorkspaceChangesEntry({ store, state, stats, expanded }) {
   const isLoading = state.status === "loading";
   const isError = state.status === "error";
-  const expandLabel = expanded ? "Collapse workspace diff" : "Expand workspace diff";
+  const expandLabel = expanded ? t("Collapse workspace diff") : t("Expand workspace diff");
   function handleRowKey(event) {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
@@ -759,7 +760,7 @@ function WorkspaceChangesEntry({ store, state, stats, expanded }) {
         // Always the workspace git working tree (path-scoped, never session-scoped) — name
         // that subject so it doesn't read as "the current agent's output" when idle. Matches
         // the modal's "Workspace diff" title.
-        h("span", { className: "workspace-changes-row-label" }, "Workspace changes"),
+        h("span", { className: "workspace-changes-row-label" }, t("Workspace changes")),
         renderStatsBadge(state, stats)
       ),
       h(
@@ -772,8 +773,8 @@ function WorkspaceChangesEntry({ store, state, stats, expanded }) {
             void store.refresh();
           },
           disabled: isLoading,
-          title: isLoading ? "Refreshing…" : "Refresh",
-          "aria-label": isLoading ? "Refreshing workspace diff" : "Refresh workspace diff",
+          title: isLoading ? t("Refreshing…") : t("Refresh"),
+          "aria-label": isLoading ? t("Refreshing workspace diff") : t("Refresh workspace diff"),
           "data-workspace-changes-skip": "true",
         },
         h(RefreshIcon)
@@ -793,7 +794,7 @@ function WorkspaceChangesEntry({ store, state, stats, expanded }) {
       ? h(
           "p",
           { className: "workspace-changes-error-inline" },
-          `Failed to load: ${state.error}`
+          t("Failed to load: {error}", { error: state.error })
         )
       : null
   );
@@ -810,10 +811,10 @@ function renderStatsBadge(state, stats) {
     return h("span", { className: "workspace-changes-row-empty" }, "—");
   }
   if (state.data?.not_a_git_repo) {
-    return h("span", { className: "workspace-changes-row-empty" }, "no git");
+    return h("span", { className: "workspace-changes-row-empty" }, t("no git"));
   }
   if (stats.fileCount === 0) {
-    return h("span", { className: "workspace-changes-row-empty" }, "clean");
+    return h("span", { className: "workspace-changes-row-empty" }, t("clean"));
   }
   return h(
     "span",
@@ -831,18 +832,18 @@ function renderStatsBadge(state, stats) {
 // share the compact rail row — the transcript no longer defaults to a wide card.
 function renderDiffContent(state, variant = "rail") {
   if (state.status === "loading" && !state.data) {
-    return h("p", { className: "diff-file-empty" }, "Loading…");
+    return h("p", { className: "diff-file-empty" }, t("Loading…"));
   }
   if (state.status === "error" && !state.data) {
     return h(
       "p",
       { className: "diff-file-empty" },
-      `Failed to load diff: ${state.error}`
+      t("Failed to load diff: {error}", { error: state.error })
     );
   }
   const data = state.data;
   if (!data) {
-    return h("p", { className: "diff-file-empty" }, "No data yet.");
+    return h("p", { className: "diff-file-empty" }, t("No data yet."));
   }
   if (data.unavailable) {
     // Restricted is explained by the Trust row above; don't repeat it here.
@@ -852,14 +853,14 @@ function renderDiffContent(state, variant = "rail") {
     return h(
       "p",
       { className: "diff-file-empty" },
-      "Workspace unavailable — this session isn’t loaded yet or has no workspace."
+      t("Workspace unavailable — this session isn’t loaded yet or has no workspace.")
     );
   }
   if (data.not_a_git_repo) {
     return h(
       "p",
       { className: "diff-file-empty" },
-      "This workspace is not a git repository."
+      t("This workspace is not a git repository.")
     );
   }
   const fileChanges = data.file_changes || [];
@@ -867,7 +868,7 @@ function renderDiffContent(state, variant = "rail") {
     return h(
       "p",
       { className: "diff-file-empty" },
-      "Working tree is clean — no uncommitted changes."
+      t("Working tree is clean — no uncommitted changes.")
     );
   }
   return h(FileChangeDiff, {
@@ -905,20 +906,20 @@ export function WorkspaceDiffChip({ store, onTap }) {
       type: "button",
       className: "workspace-diff-chip",
       onClick: () => onTap?.(),
-      title: restricted ? "Tap to view workspace access" : "Tap to view file diffs",
+      title: restricted ? t("Tap to view workspace access") : t("Tap to view file diffs"),
     },
     h(
       "span",
       { className: "workspace-diff-chip-label" },
       restricted
         ? skipped.length
-          ? "Repo config not loaded"
-          : "Trust needed"
+          ? t("Repo config not loaded")
+          : t("Trust needed")
         : isClean
-          ? "Worktrees"
+          ? t("Worktrees")
           : stats.fileCount === 1
-            ? "1 file"
-            : `${stats.fileCount} files`
+            ? t("{count} file", { count: 1 })
+            : t("{count} files", { count: stats.fileCount })
     ),
     restricted || isClean ? null : h("span", { className: "workspace-diff-chip-sep" }, "·"),
     !restricted && stats.added > 0
@@ -938,13 +939,13 @@ const GOAL_WANTS_THE_USER = new Set([
 ]);
 
 const GOAL_CHIP_TITLE = {
-  active: "Working toward your goal — tap to watch or stop it",
-  awaiting_user: "The goal needs you — tap to answer",
-  blocked: "The goal is stuck — tap to see why",
-  out_of_turns: "The goal ran out of turns — tap to keep it going",
-  interrupted: "The goal is stopped — tap to pick it back up",
-  complete_claimed: "The agent says the goal is done — tap to check",
-  cancelled: "The goal was stopped — tap to pick it up",
+  active: t("Working toward your goal — tap to watch or stop it"),
+  awaiting_user: t("The goal needs you — tap to answer"),
+  blocked: t("The goal is stuck — tap to see why"),
+  out_of_turns: t("The goal ran out of turns — tap to keep it going"),
+  interrupted: t("The goal is stopped — tap to pick it back up"),
+  complete_claimed: t("The agent says the goal is done — tap to check"),
+  cancelled: t("The goal was stopped — tap to pick it up"),
 };
 
 // A dedicated, self-describing "Reviewer" pill for mobile (the desktop rail has
@@ -986,14 +987,14 @@ export function ReviewerChip({ store, onTap }) {
   // The pill is one door to several things, so the tooltip names whichever is loudest —
   // a goal outranks a review the same way it does in the panel.
   const title = goal
-    ? GOAL_CHIP_TITLE[goal.status] || "Tap to see this session's goal"
+    ? GOAL_CHIP_TITLE[goal.status] || t("Tap to see this session's goal")
     : !hasReviews
-    ? "Tap to see the reviewed session"
+    ? t("Tap to see the reviewed session")
     : blocked
-    ? "Review blocked — tap to resolve"
+    ? t("Review blocked — tap to resolve")
     : active || activeWorkflow
-    ? "Review workflow in progress — tap to view"
-    : "Review complete — tap to view findings";
+    ? t("Review workflow in progress — tap to view")
+    : t("Review complete — tap to view findings");
   return h(
     "button",
     {
@@ -1005,7 +1006,7 @@ export function ReviewerChip({ store, onTap }) {
     h("span", { className: "reviewer-chip-icon", "aria-hidden": "true" }, "🔍"),
     // "Agents", matching the desktop tab: the panel behind this pill stopped being about
     // reviews alone once it grew the goal and the asks. Class names stay as styling hooks.
-    h("span", { className: "workspace-diff-chip-label" }, "Agents"),
+    h("span", { className: "workspace-diff-chip-label" }, t("Agents")),
     // Running borrows the sidebar's working-session dot; a "•" glyph was too small to see.
     running
       ? h("span", { className: "conversation-activity-dot", "aria-hidden": "true" })
@@ -1050,14 +1051,14 @@ export function WorkspaceDiffSheetBody({ store }) {
           className: `workspace-diff-sheet-refresh${isLoading ? " is-loading" : ""}`,
           onClick: () => void store.refresh(),
           disabled: isLoading,
-          title: isLoading ? "Refreshing…" : "Refresh diff",
-          "aria-label": isLoading ? "Refreshing workspace diff" : "Refresh workspace diff",
+          title: isLoading ? t("Refreshing…") : t("Refresh diff"),
+          "aria-label": isLoading ? t("Refreshing workspace diff") : t("Refresh workspace diff"),
         },
         h(RefreshIcon),
         h(
           "span",
           { className: "workspace-diff-sheet-refresh-label" },
-          isLoading ? "Refreshing…" : "Refresh diff"
+          isLoading ? t("Refreshing…") : t("Refresh diff")
         )
       )
     ),
@@ -1066,7 +1067,7 @@ export function WorkspaceDiffSheetBody({ store }) {
       ? h(
           "div",
           { className: "workspace-diff-status" },
-          h("span", { className: "workspace-diff-warning" }, "Output truncated (large diff).")
+          h("span", { className: "workspace-diff-warning" }, t("Output truncated (large diff)."))
         )
       : null,
     // Same compact row as the rail, so the panel reads identically on desktop

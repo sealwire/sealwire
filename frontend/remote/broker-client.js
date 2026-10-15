@@ -21,6 +21,7 @@ import {
   createBrokerConnectionPatch,
   createPairingStatePatch,
 } from "./surface-state.js";
+import { t } from "../shared/i18n.js";
 
 const BROKER_PROTOCOL_VERSION = 2;
 // Old clients leave the deduplication key outside the authenticated ciphertext. Keep
@@ -30,7 +31,7 @@ const DEVICE_SESSION_ROOM_MAX_BYTES = 512;
 const SOCKET_RECONNECT_BASE_DELAY_MS = 1500;
 const SOCKET_RECONNECT_MAX_DELAY_MS = 60_000;
 const SOCKET_RECONNECT_STABLE_SESSION_MS = 60_000;
-const CONNECTION_LIMIT_MESSAGE = "Connection limit reached. Close another Sealwire tab or app to reconnect.";
+const CONNECTION_LIMIT_MESSAGE = t("Connection limit reached. Close another Sealwire tab or app to reconnect.");
 
 let onBrokerReady = () => {};
 let onBrokerPayload = async () => {};
@@ -354,8 +355,8 @@ export async function connectBroker(reason) {
     noteClosedSocketDuration(socketOpenedAtMs, selectionKey);
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
       relayConnected: false,
-      relayConnectionMessage: "Relay server disconnected. Waiting for it to reconnect.",
-      serverConnectionMessage: state.serverConnectionMessage || "Server disconnected. Retrying connection.",
+      relayConnectionMessage: t("Relay server disconnected. Waiting for it to reconnect."),
+      serverConnectionMessage: state.serverConnectionMessage || t("Server disconnected. Retrying connection."),
       serverConnectionState: "disconnected",
       socket: null,
       socketConnected: false,
@@ -375,7 +376,7 @@ export async function connectBroker(reason) {
     }
 
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
-      serverConnectionMessage: state.serverConnectionMessage || "Server disconnected. Retrying connection.",
+      serverConnectionMessage: state.serverConnectionMessage || t("Server disconnected. Retrying connection."),
       serverConnectionState: "disconnected",
     }));
     renderLog("Broker websocket hit an error.");
@@ -430,12 +431,12 @@ export function sendBrokerFrame(payload, expectedSocket = state.socket) {
     || expectedSocket !== state.socket
     || expectedSocket.readyState !== WebSocket.OPEN
   ) {
-    throw new Error("broker socket is not connected");
+    throw new Error(t("broker socket is not connected"));
   }
 
   const relayPeerId = expectedSocket.relayPeerId;
   if (typeof relayPeerId !== "string" || !relayPeerId.trim()) {
-    throw new Error("relay peer id is missing; pair this relay again");
+    throw new Error(t("relay peer id is missing; pair this relay again"));
   }
 
   expectedSocket.send(
@@ -775,7 +776,7 @@ async function handleSocketMessage(rawData, connectReason, connection = currentC
       serverConnectionMessage: null,
       relayConnectionMessage: relayPresent
         ? null
-        : "Relay server disconnected. Waiting for it to reconnect.",
+        : t("Relay server disconnected. Waiting for it to reconnect."),
     }));
     if (connection?.relayVerifyKey && relayPresent) {
       sendRelayHello(connection);
@@ -791,7 +792,7 @@ async function handleSocketMessage(rawData, connectReason, connection = currentC
         relayConnected: frame.kind === "joined",
         relayConnectionMessage: frame.kind === "joined"
           ? null
-          : "Relay server disconnected. Waiting for it to reconnect.",
+          : t("Relay server disconnected. Waiting for it to reconnect."),
       }));
       if (frame.kind === "left") {
         connection.relayContentSession = null;

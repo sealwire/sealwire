@@ -5,8 +5,23 @@
 // than as success: a helper that regresses to the old bare boolean would otherwise make
 // every refusal silent again, which is the entire defect this channel exists to close.
 
-const contractError = (subject) => `The relay did not say whether ${subject} went through.`;
-const NO_REASON = "The relay refused, without saying why.";
+import { t } from "./i18n.js";
+
+// A sentence per subject the callers pass, since the subject sits mid-sentence.
+function contractError(subject) {
+  switch (subject) {
+    case "the command":
+      return t("The relay did not say whether the command went through.");
+    case "the goal":
+      return t("The relay did not say whether the goal went through.");
+    case "the handover":
+      return t("The relay did not say whether the handover went through.");
+    case "the message":
+      return t("The relay did not say whether the message went through.");
+    default:
+      return t("The relay did not say whether {subject} went through.", { subject });
+  }
+}
 
 /** @returns {{ isError: boolean, text: string }} */
 export function commandOutcomeOrContractError(answer, subject = "the command") {
@@ -14,5 +29,5 @@ export function commandOutcomeOrContractError(answer, subject = "the command") {
     return { isError: true, text: contractError(subject) };
   }
   if (!answer.isError) return { isError: false, text: "" };
-  return { isError: true, text: String(answer.text || "").trim() || NO_REASON };
+  return { isError: true, text: String(answer.text || "").trim() || t("The relay refused, without saying why.") };
 }

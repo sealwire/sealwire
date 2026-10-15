@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { providerOptions } from "./provider-settings.js";
 import { isReviewInProgress, isThreadBusy } from "./review-state.js";
 import { pendingApprovalForThread } from "./session-view-model.js";
@@ -24,21 +25,21 @@ const TERMINAL_WORKFLOW_STATUSES = new Set([
 ]);
 
 const WORKFLOW_STATUS_LABELS = {
-  queued: "Queued",
-  running: "Running",
-  blocked: "Blocked",
-  resolving: "Resolving",
-  done: "Approved",
-  escalated: "Needs attention",
-  failed: "Failed",
-  interrupted: "Interrupted",
-  cancelled: "Cancelled",
+  queued: t("Queued"),
+  running: t("Running"),
+  blocked: t("Blocked"),
+  resolving: t("Resolving"),
+  done: t("Approved"),
+  escalated: t("Needs attention"),
+  failed: t("Failed"),
+  interrupted: t("Interrupted"),
+  cancelled: t("Cancelled"),
 };
 
 const WORKFLOW_STEP_LABELS = {
-  execute: "Authoring",
-  review: "Reviewing",
-  revise: "Revising",
+  execute: t("Authoring"),
+  review: t("Reviewing"),
+  revise: t("Revising"),
 };
 
 const CODE_FLOW_REVIEWER_PROVIDERS = new Set(["codex", "fake"]);
@@ -48,7 +49,7 @@ export function isTerminalWorkflowStatus(status) {
 }
 
 export function workflowStatusLabel(status) {
-  return WORKFLOW_STATUS_LABELS[status] || status || "Running";
+  return WORKFLOW_STATUS_LABELS[status] || status || t("Running");
 }
 
 export function workflowStepLabel(step) {

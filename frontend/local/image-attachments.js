@@ -1,3 +1,5 @@
+import { t } from "../shared/i18n.js";
+
 export const ALLOWED_IMAGE_TYPES = new Set([
   "image/gif",
   "image/jpeg",
@@ -24,19 +26,19 @@ export function validateImageAttachments(existing, incoming) {
 
   for (const file of incoming) {
     if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
-      errors.push(`${file.name || "Image"} is not a supported image type.`);
+      errors.push(t("{name} is not a supported image type.", { name: file.name || t("Image") }));
       continue;
     }
     if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
-      errors.push(`${file.name || "Image"} is larger than 8 MB.`);
+      errors.push(t("{name} is larger than 8 MB.", { name: file.name || t("Image") }));
       continue;
     }
     if (count >= MAX_IMAGE_ATTACHMENTS) {
-      errors.push("You can attach at most 4 images.");
+      errors.push(t("You can attach at most 4 images."));
       break;
     }
     if (totalBytes + file.size > MAX_IMAGE_ATTACHMENTS_TOTAL_BYTES) {
-      errors.push("Image attachments are larger than 16 MB in total.");
+      errors.push(t("Image attachments are larger than 16 MB in total."));
       break;
     }
     accepted.push(file);
@@ -51,7 +53,7 @@ export function imageFileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.addEventListener("load", () => resolve(String(reader.result || "")), { once: true });
-    reader.addEventListener("error", () => reject(reader.error || new Error("Failed to read image")), {
+    reader.addEventListener("error", () => reject(reader.error || new Error(t("Failed to read image"))), {
       once: true,
     });
     reader.readAsDataURL(file);

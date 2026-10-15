@@ -15,6 +15,7 @@ import {
   useFold,
   useNow,
 } from "./card-parts.js";
+import { t } from "./i18n.js";
 import { providerLabel } from "./provider-labels.js";
 import { transcriptRowKey } from "./transcript-row-key.js";
 
@@ -24,7 +25,8 @@ const h = React.createElement;
 const HIDDEN_KINDS = new Set(["review_recap", "review_commit"]);
 const RESULT_KINDS = new Set(["review_result", "review_approved", "review_escalated"]);
 const TERMINAL = new Set(["complete", "failed", "escalated", "cancelled"]);
-const SEVERITY_TAGS = { high: "HIGH", medium: "MED", low: "LOW" };
+const SEVERITY_TAGS = { high: t("HIGH"), medium: t("MED"), low: t("LOW") };
+const FINDING_STATES = { fixed: t("fixed") };
 // Like a handover card's three sections: the rest is one press away.
 const FINDINGS_SHOWN = 3;
 
@@ -32,10 +34,6 @@ export const REVIEW_RESULT_LINE_KIND = "review_result_line";
 
 function agentName(provider, fallback) {
   return providerLabel(provider) || fallback;
-}
-
-function plural(count, word) {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
 function shortSha(sha) {
@@ -48,16 +46,16 @@ export function reviewDuration(seconds) {
   }
   const whole = Math.round(seconds);
   if (whole < 60) {
-    return `${whole}s`;
+    return t("{seconds}s", { seconds: whole });
   }
   const minutes = Math.floor(whole / 60);
   if (minutes < 10) {
-    return `${minutes}m ${String(whole % 60).padStart(2, "0")}s`;
+    return t("{minutes}m {seconds}s", { minutes, seconds: String(whole % 60).padStart(2, "0") });
   }
   if (minutes < 60) {
-    return `${minutes}m`;
+    return t("{minutes}m", { minutes });
   }
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  return t("{hours}h {minutes}m", { hours: Math.floor(minutes / 60), minutes: minutes % 60 });
 }
 
 function roundOf(review, number) {
@@ -83,13 +81,21 @@ function severityCounts(findings) {
 export function findingsSummary(round) {
   const counts = severityCounts(round?.findings);
   const parts = [];
-  if (counts.high) parts.push(plural(counts.high, "blocker"));
-  if (counts.medium) parts.push(`${counts.medium} medium`);
-  if (counts.low) parts.push(`${counts.low} minor`);
+  if (counts.high) parts.push(blockerCount(counts.high));
+  if (counts.medium) parts.push(t("{count} medium", { count: counts.medium }));
+  if (counts.low) parts.push(t("{count} minor", { count: counts.low }));
   const listed = counts.high + counts.medium + counts.low;
   const unlisted = Math.max(0, (round?.findings_total || 0) - listed);
-  if (unlisted) parts.push(`${unlisted} more`);
-  return parts.join(", ");
+  if (unlisted) parts.push(t("{count} more", { count: unlisted }));
+  return parts.join(t(", "));
+}
+
+function blockerCount(count) {
+  return count === 1 ? t("{count} blocker", { count }) : t("{count} blockers", { count });
+}
+
+function fileCount(count) {
+  return count === 1 ? t("{count} file", { count }) : t("{count} files", { count });
 }
 
 /** The card's colour: red a blocker, green approved, amber waiting on the person. */
@@ -102,39 +108,48 @@ export function reviewTone(kind, round) {
 }
 
 export function reviewCardTitle(kind, review, round) {
-  const reviewer = agentName(review.reviewer_provider, "The reviewer");
-  const total = round?.findings_total || 0;
+  const agent = agentName(review.reviewer_provider, t("The reviewer"));
+  const count = round?.findings_total || 0;
   if (kind === "review_escalated") {
-    return total
-      ? `${reviewer} still disagrees on ${plural(total, "point")}`
-      : `${reviewer} still has concerns`;
+    if (!count) return t("{agent} still has concerns", { agent });
+    return count === 1
+      ? t("{agent} still disagrees on {count} point", { agent, count })
+      : t("{agent} still disagrees on {count} points", { agent, count });
   }
   if (kind === "review_approved" || round?.verdict === "approve") {
     if (kind === "review_approved" && review.round > 1) {
-      return `Approved after ${review.round} rounds`;
+      return t("Approved after {count} rounds", { count: review.round });
     }
-    return total ? `Approved · ${plural(total, "note")}` : "Approved · no findings";
+    if (!count) return t("Approved · no findings");
+    return count === 1 ? t("Approved · {count} note", { count }) : t("Approved · {count} notes", { count });
   }
   if (round?.verdict === "needs_changes") {
     const blockers = severityCounts(round.findings).high;
-    if (blockers) return `${plural(blockers, "blocker")} · won't merge as is`;
-    return total ? `${plural(total, "finding")} · won't merge as is` : "Needs changes";
+    if (blockers === 1) return t("{count} blocker · won't merge as is", { count: blockers });
+    if (blockers) return t("{count} blockers · won't merge as is", { count: blockers });
+    if (!count) return t("Needs changes");
+    return count === 1
+      ? t("{count} finding · won't merge as is", { count })
+      : t("{count} findings · won't merge as is", { count });
   }
   if (round?.verdict === "unsure") {
-    return `${reviewer} is unsure`;
+    return t("{agent} is unsure", { agent });
   }
-  return "Review finished";
+  return t("Review finished");
 }
 
 function reviewKicker(kind, review) {
-  const reviewer = agentName(review.reviewer_provider, "the reviewer");
+  const agent = agentName(review.reviewer_provider, t("the reviewer"));
   const max = review.max_rounds || 1;
+  const round = review.round;
   if (kind === "review_escalated") {
-    return review.round >= max && max > 1
-      ? `Review needs you · ${review.round} of ${max} rounds used`
-      : "Review needs you";
+    return round >= max && max > 1
+      ? t("Review needs you · {round} of {max} rounds used", { round, max })
+      : t("Review needs you");
   }
-  return max > 1 ? `Reviewed by ${reviewer} · round ${review.round} of ${max}` : `Reviewed by ${reviewer}`;
+  return max > 1
+    ? t("Reviewed by {agent} · round {round} of {max}", { agent, round, max })
+    : t("Reviewed by {agent}", { agent });
 }
 
 const TONE_ICONS = {
@@ -178,7 +193,7 @@ function FindingRow({ finding, state, body = null }) {
       ? h(
           "span",
           { className: "review-finding-meta" },
-          state ? h("span", { className: `review-finding-state is-${state}` }, state) : null,
+          state ? h("span", { className: `review-finding-state is-${state}` }, FINDING_STATES[state] || state) : null,
           finding.location ? h(FindingWhere, { location: finding.location }) : null
         )
       : null
@@ -219,7 +234,7 @@ export function FindingList({ rows, more, body = null }) {
       ? h(
           "span",
           { key: "held-back", className: "review-finding-more" },
-          `${more} more in the reviewer's thread`
+          t("{count} more in the reviewer's thread", { count: more })
         )
       : null,
     h(CardBodyStatus, { key: "status", body }),
@@ -228,7 +243,7 @@ export function FindingList({ rows, more, body = null }) {
           key: "show-all",
           open: expanded,
           onToggle: toggle,
-          label: "Show all findings",
+          label: t("Show all findings"),
         })
       : null
   );
@@ -272,31 +287,33 @@ function roundSpan(kind, review, round) {
 function CardFooterStart({ kind, review, round, parent }) {
   const latest = lastRound(review)?.round === round?.round;
   if (kind === "review_result" && latest && review.status === "addressing_findings") {
-    return h("span", { className: "review-card-next" }, h(Spinner), `${parent} is fixing`);
+    return h("span", { className: "review-card-next" }, h(Spinner), t("{agent} is fixing", { agent: parent }));
   }
   if (latest && (review.status === "failed" || review.status === "cancelled")) {
     return h(
       "span",
       { className: "review-card-next", title: review.error || "" },
-      review.status === "cancelled" ? "Review stopped" : "Review did not finish"
+      review.status === "cancelled" ? t("Review stopped") : t("Review did not finish")
     );
   }
   if (kind === "review_escalated") {
     const fixed = fixedEarlier(review);
-    return fixed ? h("span", { className: "review-card-next" }, `${fixed} fixed earlier`) : null;
+    return fixed ? h("span", { className: "review-card-next" }, t("{count} fixed earlier", { count: fixed })) : null;
   }
   const sha = round?.checkpoint ? "" : shortSha(round?.candidate_sha || round?.base_sha);
-  return sha
-    ? h("span", { className: "review-card-next" }, "at ", h("code", null, sha))
-    : null;
+  if (!sha) {
+    return null;
+  }
+  const [before, after] = t("at {sha}").split("{sha}");
+  return h("span", { className: "review-card-next" }, before, h("code", null, sha), after);
 }
 
 function EscalatedActions({ review, round }) {
   if (review.decision === "accepted") {
-    return h("p", { className: "review-card-decided" }, "You accepted it as it stands.");
+    return h("p", { className: "review-card-decided" }, t("You accepted it as it stands."));
   }
   if (review.decision === "continued") {
-    return h("p", { className: "review-card-decided" }, "Reviewed again below.");
+    return h("p", { className: "review-card-decided" }, t("Reviewed again below."));
   }
   if (review.status !== "escalated" || !review.parent_thread_id) {
     return null;
@@ -315,12 +332,12 @@ function EscalatedActions({ review, round }) {
         "data-reviewer-thread-id": round?.reviewer_thread_id || review.reviewer_thread_id || "",
         "data-reviewer-provider": review.reviewer_provider || "",
       },
-      "One more round"
+      t("One more round")
     ),
     h(
       "button",
       { ...common, className: "review-card-secondary", "data-review-action": "accept" },
-      "Accept as is"
+      t("Accept as is")
     )
   );
 }
@@ -345,7 +362,7 @@ function ResultCard({ kind, review, parent, rowId, onFold = null }) {
     onFold
       ? h(
           "button",
-          { type: "button", className: "review-card-fold", "aria-label": "Fold this round", onClick: onFold },
+          { type: "button", className: "review-card-fold", "aria-label": t("Fold this round"), onClick: onFold },
           h(Caret, { open: true })
         )
       : null
@@ -364,7 +381,7 @@ function ResultCard({ kind, review, parent, rowId, onFold = null }) {
       h("span", { className: "handover-card-spacer" }),
       h(OpenThreadLink, {
         threadId: round?.reviewer_thread_id || review.reviewer_thread_id,
-        label: "Reviewer thread",
+        label: t("Reviewer thread"),
       })
     )
   );
@@ -380,7 +397,7 @@ function RoundStrip({ kind, review, onOpen }) {
     kind === "review_brief"
       ? ""
       : next?.fixed_total
-        ? `${next.fixed_total} fixed`
+        ? t("{count} fixed", { count: next.fixed_total })
         : "";
   return h(
     "button",
@@ -389,7 +406,7 @@ function RoundStrip({ kind, review, onOpen }) {
     h(
       "span",
       { className: "review-strip-text" },
-      h("b", null, `Round ${review.round}`),
+      h("b", null, t("Round {round}", { round: review.round })),
       found ? ` · ${found}` : ""
     ),
     trailing ? h("span", { className: "review-strip-trailing" }, trailing) : null,
@@ -402,17 +419,17 @@ function diffLabel(round) {
     return "";
   }
   const base = shortSha(round.base_sha);
-  const candidate = round.checkpoint ? "uncommitted" : shortSha(round.candidate_sha);
+  const candidate = round.checkpoint ? t("uncommitted") : shortSha(round.candidate_sha);
   if (!candidate) {
-    return base ? `no new changes at ${base}` : "";
+    return base ? t("no new changes at {sha}", { sha: base }) : "";
   }
   const parts = [`${base || "…"}…${candidate}`];
-  if (Number.isFinite(round.files)) parts.push(plural(round.files, "file"));
+  if (Number.isFinite(round.files)) parts.push(fileCount(round.files));
   if (Number.isFinite(round.insertions)) parts.push(`+${round.insertions} −${round.deletions || 0}`);
   return parts.join(" · ");
 }
 
-function BriefFact({ label, value }) {
+function BriefFact({ label, value, code = false }) {
   const fold = useFold(value);
   return h(
     "div",
@@ -422,7 +439,7 @@ function BriefFact({ label, value }) {
       "span",
       {
         ref: fold.ref,
-        className: `handover-section-value${label === "Diff" ? " review-fact-code" : ""} ${fold.className}`,
+        className: `handover-section-value${code ? " review-fact-code" : ""} ${fold.className}`,
         onClick: fold.onClick,
         ...fold.keyboard,
       },
@@ -433,12 +450,12 @@ function BriefFact({ label, value }) {
 
 function BriefCard({ review, onFold = null }) {
   const round = roundOf(review, review.round) || lastRound(review);
-  const parent = agentName(review.parent_provider, "Another agent");
+  const parent = agentName(review.parent_provider, t("Another agent"));
   const max = review.max_rounds || 1;
   const facts = [
-    ["Change", round?.change],
-    ["Diff", diffLabel(round)],
-  ].filter(([, value]) => value);
+    { key: "change", label: t("Change"), value: round?.change },
+    { key: "diff", label: t("Diff"), value: diffLabel(round), code: true },
+  ].filter((fact) => fact.value);
   return h(
     "div",
     { className: "handover-card review-card is-info", "data-review-id": review.id },
@@ -453,16 +470,16 @@ function BriefCard({ review, onFold = null }) {
           "span",
           { className: "handover-card-kicker" },
           max > 1
-            ? `Review requested by ${parent} · round ${review.round} of ${max}`
-            : `Review requested by ${parent}`
+            ? t("Review requested by {agent} · round {round} of {max}", { agent: parent, round: review.round, max })
+            : t("Review requested by {agent}", { agent: parent })
         ),
-        h("span", { className: "handover-card-title" }, review.parent_title || "Another session")
+        h("span", { className: "handover-card-title" }, review.parent_title || t("Another session"))
       ),
       h("span", { className: "handover-card-time" }, clockTime(round?.started_at)),
       onFold
         ? h(
             "button",
-            { type: "button", className: "review-card-fold", "aria-label": "Fold this round", onClick: onFold },
+            { type: "button", className: "review-card-fold", "aria-label": t("Fold this round"), onClick: onFold },
             h(Caret, { open: true })
           )
         : null
@@ -471,30 +488,30 @@ function BriefCard({ review, onFold = null }) {
       ? h(
           "div",
           { className: "handover-card-body" },
-          ...facts.map(([label, value]) => h(BriefFact, { key: label, label, value }))
+          ...facts.map(({ key, ...fact }) => h(BriefFact, { key, ...fact }))
         )
       : null,
     h(
       "div",
       { className: "handover-card-foot" },
       h("span", { className: "handover-card-spacer" }),
-      h(OpenThreadLink, { threadId: review.parent_thread_id, label: "Reviewed thread" })
+      h(OpenThreadLink, { threadId: review.parent_thread_id, label: t("Reviewed thread") })
     )
   );
 }
 
 export function ReviewCallEntry({ attrs, entry, provider = "", providerIcon = "", showAvatar = true }) {
   const review = entry.injection.review;
-  const reviewer = agentName(review.reviewer_provider, "another agent");
+  const reviewer = agentName(review.reviewer_provider, t("another agent"));
   const latest = lastRound(review);
   const status = {
-    pending_parent_recap: "Review queued",
-    complete: "Review complete",
-    failed: "Review failed",
-    cancelled: "Review cancelled",
-    blocked: "Review blocked",
-    escalated: "Review needs you",
-  }[review.status] || "Review in progress";
+    pending_parent_recap: t("Review queued"),
+    complete: t("Review complete"),
+    failed: t("Review failed"),
+    cancelled: t("Review cancelled"),
+    blocked: t("Review blocked"),
+    escalated: t("Review needs you"),
+  }[review.status] || t("Review in progress");
   return h(
     "article", { ...attrs, className: `${attrs.className} handover-message review-message` },
     showAvatar ? avatar(providerIcon, provider) : null,
@@ -502,15 +519,15 @@ export function ReviewCallEntry({ attrs, entry, provider = "", providerIcon = ""
       h("div", { className: "handover-card-head" },
         h("span", { className: "handover-card-icon" }, h(CardIcon, { paths: TONE_ICONS.info })),
         h("div", { className: "handover-card-heading" },
-          h("span", { className: "handover-card-kicker" }, `Review requested · ${reviewer}`),
-          h("span", { className: "handover-card-title" }, review.parent_title || "Review changes")
+          h("span", { className: "handover-card-kicker" }, t("Review requested · {agent}", { agent: reviewer })),
+          h("span", { className: "handover-card-title" }, review.parent_title || t("Review changes"))
         )
       ),
       review.error ? h("div", { className: "handover-card-body" }, review.error) : null,
       h("div", { className: "handover-card-foot" },
         h("span", null, status),
         h("span", { className: "handover-card-spacer" }),
-        h(OpenThreadLink, { threadId: latest?.reviewer_thread_id || review.reviewer_thread_id, label: "Reviewer thread" })
+        h(OpenThreadLink, { threadId: latest?.reviewer_thread_id || review.reviewer_thread_id, label: t("Reviewer thread") })
       )
     )
   );
@@ -536,7 +553,7 @@ export function ReviewEntry({ attrs, entry, folded = false, provider = "" }) {
       : h(ResultCard, {
           kind,
           review,
-          parent: agentName(review.parent_provider || provider, "The agent"),
+          parent: agentName(review.parent_provider || provider, t("The agent")),
           rowId: transcriptRowKey(entry),
           onFold,
         });
@@ -568,15 +585,15 @@ function resultLineEntry(reply) {
 /** The reviewer thread's close of a round: its result went back (24c). */
 export function ReviewResultLine({ entry }) {
   const { review, round } = entry;
-  const parent = agentName(review.parent_provider, "the agent");
+  const parent = agentName(review.parent_provider, t("the agent"));
   const tone = reviewTone("review_result", round);
   const outcome =
     round.verdict === "approve"
-      ? "approved"
+      ? t("approved")
       : round.verdict === "needs_changes"
-        ? findingsSummary(round) || "needs changes"
+        ? findingsSummary(round) || t("needs changes")
         : round.verdict === "unsure"
-          ? "unsure"
+          ? t("unsure")
           : "";
   return h(
     "div",
@@ -585,10 +602,10 @@ export function ReviewResultLine({ entry }) {
       "span",
       { className: "review-result-status", role: "status" },
       h(CardIcon, { paths: ["M2 8h9M8 4.5 11.5 8 8 11.5"], size: 11 }),
-      h("span", null, `Result sent to ${parent}`),
+      h("span", null, t("Result sent to {agent}", { agent: parent })),
       outcome ? h("span", { className: `review-result-outcome is-${tone}` }, `· ${outcome}`) : null
     ),
-    h(OpenThreadLink, { threadId: review.parent_thread_id, label: "Reviewed thread" })
+    h(OpenThreadLink, { threadId: review.parent_thread_id, label: t("Reviewed thread") })
   );
 }
 
@@ -662,14 +679,14 @@ export function opensReviewedTurn(entry) {
 }
 
 const PROGRESS = {
-  pending_parent_recap: ({ parent }) => `${parent} is summarizing its change`,
-  waiting_for_parent_recap: ({ parent }) => `${parent} is summarizing its change`,
-  starting_reviewer: ({ reviewer }) => `Starting ${reviewer}`,
-  waiting_for_reviewer: ({ reviewer }) => `${reviewer} is reading your last change`,
-  waiting_to_post_back: ({ reviewer, parent }) => `Handing ${reviewer}'s result to ${parent}`,
-  posting_back: ({ reviewer, parent }) => `Handing ${reviewer}'s result to ${parent}`,
-  interrupting: () => "Stopping the review",
-  blocked: () => "The reviewer could not be stopped",
+  pending_parent_recap: ({ parent }) => t("{agent} is summarizing its change", { agent: parent }),
+  waiting_for_parent_recap: ({ parent }) => t("{agent} is summarizing its change", { agent: parent }),
+  starting_reviewer: ({ reviewer }) => t("Starting {agent}", { agent: reviewer }),
+  waiting_for_reviewer: ({ reviewer }) => t("{agent} is reading your last change", { agent: reviewer }),
+  waiting_to_post_back: ({ reviewer, parent }) => t("Handing {reviewer}'s result to {agent}", { reviewer, agent: parent }),
+  posting_back: ({ reviewer, parent }) => t("Handing {reviewer}'s result to {agent}", { reviewer, agent: parent }),
+  interrupting: () => t("Stopping the review"),
+  blocked: () => t("The reviewer could not be stopped"),
 };
 
 /** The reviewed thread's live line while a review runs (24a); gone once a card says more. */
@@ -681,31 +698,31 @@ export function ReviewProgressLine({ activity, provider = "" }) {
     return null;
   }
   const names = {
-    parent: agentName(provider, "The agent"),
-    reviewer: agentName(activity.reviewer_provider, "The reviewer"),
+    parent: agentName(provider, t("The agent")),
+    reviewer: agentName(activity.reviewer_provider, t("The reviewer")),
   };
   const detail = [describe(names)];
   if (activity.status === "waiting_for_reviewer" && Number.isFinite(activity.files)) {
-    detail.push(plural(activity.files, "file"));
+    detail.push(fileCount(activity.files));
   }
   if (since) {
     detail.push(reviewDuration(Math.max(0, now / 1000 - since)));
   }
   if (activity.max_rounds > 1 && activity.round > 0) {
-    detail.push(`round ${activity.round} of ${activity.max_rounds}`);
+    detail.push(t("round {round} of {max}", { round: activity.round, max: activity.max_rounds }));
   }
   const blocked = activity.status === "blocked";
   return h(
     "div",
     { className: `handover-line review-progress${blocked ? " handover-failed" : ""}`, role: "status" },
     blocked ? null : h(Spinner),
-    h("span", { className: "handover-line-label" }, blocked ? "Review stuck" : "Reviewing"),
+    h("span", { className: "handover-line-label" }, blocked ? t("Review stuck") : t("Reviewing")),
     h("span", { className: "handover-line-detail review-progress-detail" }, detail.join(" · ")),
     activity.reviewer_thread_id
       ? h(
           "button",
           { type: "button", className: "handover-card-link", "data-open-thread-id": activity.reviewer_thread_id },
-          "Watch"
+          t("Watch")
         )
       : null,
     h(
@@ -716,7 +733,7 @@ export function ReviewProgressLine({ activity, provider = "" }) {
         "data-review-action": "stop",
         "data-review-id": activity.id,
       },
-      blocked ? "Stop & unlock" : "Stop"
+      blocked ? t("Stop & unlock") : t("Stop")
     )
   );
 }

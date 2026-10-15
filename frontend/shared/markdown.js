@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { isTauri } from "@tauri-apps/api/core";
 import { copyTextToClipboard } from "./clipboard.js";
+import { t } from "./i18n.js";
 
 const h = React.createElement;
 export const MarkdownEditorLinksContext = React.createContext(false);
@@ -128,8 +129,8 @@ function SafeLink({ href, children, node, ...rest }) {
           ...rest,
           href: editorHref,
           className: "markdown-file-link",
-          title: `Open in VS Code: ${path}`,
-          "aria-label": `Open in VS Code: ${path}`,
+          title: t("Open in VS Code: {path}", { path }),
+          "aria-label": t("Open in VS Code: {path}", { path }),
           target: "_blank",
           rel: "noopener noreferrer nofollow",
           onClick: (event) => event.stopPropagation(),
@@ -144,8 +145,8 @@ function SafeLink({ href, children, node, ...rest }) {
         role: "button",
         tabIndex: 0,
         className: "markdown-file-link",
-        title: `Copy path: ${path}`,
-        "aria-label": `Copy path: ${path}`,
+        title: t("Copy path: {path}", { path }),
+        "aria-label": t("Copy path: {path}", { path }),
         onClick: (event) => {
           event.stopPropagation();
           void copyTextToClipboard(path, event.currentTarget);

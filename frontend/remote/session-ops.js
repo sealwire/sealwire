@@ -60,6 +60,7 @@ import {
 import { createCachingTranscriptPageFetcher } from "../shared/caching-transcript-fetcher.js";
 import { TRANSCRIPT_RESYNC_EVENT } from "../shared/transcript-protocol.js";
 import { providerLabel } from "../shared/provider-labels.js";
+import { t } from "../shared/i18n.js";
 import {
   createThreadListQueryOptions,
   createThreadTranscriptPageQueryOptions,
@@ -354,7 +355,7 @@ export async function repairRemoteWorkspace(threadId) {
     setWorkspaceRepairError(
       state,
       targetThreadId,
-      error.message || "Failed to re-create the workspace"
+      error.message || t("Failed to re-create the workspace")
     );
     publishWorkspaceRepair();
     renderLog(`Workspace repair failed: ${error.message}`);
@@ -1447,9 +1448,8 @@ export async function startRemoteSession(sessionDraftOverride = null) {
   }
   const cwd = sessionDraft.cwd.trim();
   if (!cwd) {
-    const error = "Choose a workspace before starting a remote session.";
-    renderLog(error);
-    return { ok: false, error };
+    renderLog("Choose a workspace before starting a remote session.");
+    return { ok: false, error: t("Choose a workspace before starting a remote session.") };
   }
 
   renderLog(`Starting remote session in ${cwd}.`);
@@ -1482,11 +1482,11 @@ export async function startRemoteSession(sessionDraftOverride = null) {
 export async function forkRemoteSession(forkDraft = null) {
   invalidateViewOnlyNavigation();
   if (!forkDraft?.sourceThreadId) {
-    return { ok: false, error: "Choose a session to fork." };
+    return { ok: false, error: t("Choose a session to fork.") };
   }
   const cwd = String(forkDraft.cwd || "").trim();
   if (!cwd) {
-    return { ok: false, error: "Choose a workspace before forking a remote session." };
+    return { ok: false, error: t("Choose a workspace before forking a remote session.") };
   }
 
   renderLog(`Forking remote session ${forkDraft.sourceThreadId}.`);
@@ -1790,7 +1790,7 @@ export async function searchRemoteThreads(rawQuery) {
         query,
         groups: [],
         loading: false,
-        error: error.message || "Search failed",
+        error: error.message || t("Search failed"),
         unavailableProviders: [],
       })
     );
@@ -2202,10 +2202,9 @@ export async function stopActiveTurn() {
     // The surface stopped this press itself and sent nothing, so it is "not sent",
     // not a failure. Still said out loud: this client's log is `display: none`, so
     // without a line on screen Stop is a silent no-op.
-    const message = `There is no running ${agentName} turn to stop.`;
-    renderLog(message);
+    renderLog(`There is no running ${agentName} turn to stop.`);
     if (threadId) {
-      setComposerHeld(threadId, message);
+      setComposerHeld(threadId, t("There is no running {agent} turn to stop.", { agent: agentName }));
       // This press is now the current word; the last attempt's failure is not.
       setComposerError(threadId, "");
     }
@@ -2531,9 +2530,8 @@ export async function resolveRemoteWorkflow(workflowRunId) {
 // card lives inside a native <dialog> the composer is behind.
 async function dispatchGoal(threadId, action, payload, note) {
   if (!threadId) {
-    const text = "No session to set a goal on.";
-    renderLog(text);
-    return { isError: true, text };
+    renderLog("No session to set a goal on.");
+    return { isError: true, text: t("No session to set a goal on.") };
   }
   renderLog(note);
   try {

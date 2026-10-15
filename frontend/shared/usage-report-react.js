@@ -13,6 +13,7 @@
 
 import React from "react";
 
+import { t } from "./i18n.js";
 import {
   cachedShare,
   costLabel,
@@ -47,8 +48,8 @@ const MONTH_LABELS = [
 
 // The two exhaustion policies, in the order they escalate.
 const POLICIES = [
-  ["hold_new_work", "Hold new work"],
-  ["stop_everything", "Stop everything"],
+  ["hold_new_work", t("Hold new work")],
+  ["stop_everything", t("Stop everything")],
 ];
 
 const PROVIDER_TONE = {
@@ -58,16 +59,16 @@ const PROVIDER_TONE = {
 };
 
 const ROLE_LABEL = {
-  tl: "Planner",
-  planner: "Planner",
-  dev: "Implementer",
-  implementer: "Implementer",
-  reviewer: "Reviewer",
-  tester: "Tester",
+  tl: t("Planner"),
+  planner: t("Planner"),
+  dev: t("Implementer"),
+  implementer: t("Implementer"),
+  reviewer: t("Reviewer"),
+  tester: t("Tester"),
 };
 
 function roleLabel(role) {
-  if (!role) return "Unattributed";
+  if (!role) return t("Unattributed");
   return ROLE_LABEL[role] || ROLE_LABEL[String(role).toLowerCase()] || role;
 }
 
@@ -87,7 +88,7 @@ function providerMeta(report, key) {
 /** Subtitle under a week/month table row — the model id, not marketing copy. */
 function groupModelLabel(group) {
   const model = typeof group?.model === "string" ? group.model.trim() : "";
-  return model || "unknown model";
+  return model || t("unknown model");
 }
 
 function groupRowKey(group) {
@@ -103,7 +104,7 @@ function groupRowKey(group) {
  * the only partial one, and a reader comparing it against yesterday needs to
  * know that before they read its height.
  */
-function shortBucketLabel(key, { end = false, endLabel = "Today" } = {}) {
+function shortBucketLabel(key, { end = false, endLabel = t("Today") } = {}) {
   if (end) return endLabel;
   const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
   if (day) return String(Number(day[3]));
@@ -150,11 +151,11 @@ function StatusDot({ status }) {
     status === "running" ? "running" : status === "paused" ? "paused" : "idle";
   const label =
     status === "running"
-      ? "Running"
+      ? t("Running")
       : status === "paused"
-        ? "Paused"
+        ? t("Paused")
         : status === "pending_merge"
-          ? "Awaiting merge"
+          ? t("Awaiting merge")
           : status;
   return h("span", { className: `usage-status is-${tone}` }, label);
 }
@@ -224,7 +225,7 @@ function chartScaleMax(series, cap, projectToday) {
   return Math.max(base, Math.min(projected, base * 1.2));
 }
 
-function bucketDetailLabel(key, { end = false, endLabel = "Today" } = {}) {
+function bucketDetailLabel(key, { end = false, endLabel = t("Today") } = {}) {
   if (end) return endLabel;
   const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
   if (day) return `${Number(day[2])}/${Number(day[3])}`;
@@ -287,8 +288,8 @@ export function dayFocus(report, series, selectedKey) {
     : totalsFromGroups(compareGroups);
   const end = Boolean(bucket && bucket.key === lastKey);
   const label = bucket
-    ? bucketDetailLabel(bucket.key, { end, endLabel: "Today" })
-    : "Today";
+    ? bucketDetailLabel(bucket.key, { end, endLabel: t("Today") })
+    : t("Today");
   return {
     key: bucket?.key || key,
     label,
@@ -306,9 +307,9 @@ function UsageBack({ onOpenSessions }) {
   if (!onOpenSessions) return null;
   return h(
     "button",
-    { type: "button", className: "usage-back", "aria-label": "Back to sessions", onClick: () => onOpenSessions() },
+    { type: "button", className: "usage-back", "aria-label": t("Back to sessions"), onClick: () => onOpenSessions() },
     h(BackArrowIcon),
-    "Sessions"
+    t("Sessions")
   );
 }
 
@@ -318,14 +319,14 @@ function sessionShortId(threadId) {
 
 function joinNames(names) {
   if (names.length <= 1) return names[0] || "";
-  return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  return t("{names} and {last}", { names: names.slice(0, -1).join(t(", ")), last: names.at(-1) });
 }
 
 /**
- * Per-session spend for one chart bucket. `scope` is the tail of the empty-state
- * sentence ("today", "on 8/13"), so the heading and the empty line name the same bar.
+ * Per-session spend for one chart bucket. The caller builds both `heading` and the
+ * `empty` sentence, so they name the same bar.
  */
-function SessionsSection({ report, bucketKey, heading, scope, onOpenSession }) {
+function SessionsSection({ report, bucketKey, heading, empty, onOpenSession }) {
   const [expanded, setExpanded] = useState(false);
   const listId = useId();
   const headingId = useId();
@@ -348,7 +349,9 @@ function SessionsSection({ report, bucketKey, heading, scope, onOpenSession }) {
         ? h(
             "span",
             { className: "usage-sessions-summary" },
-            `${sessions.length} session${sessions.length === 1 ? "" : "s"} · ${formatTokens(sum)}`
+            sessions.length === 1
+              ? t("{count} session · {tokens}", { count: sessions.length, tokens: formatTokens(sum) })
+              : t("{count} sessions · {tokens}", { count: sessions.length, tokens: formatTokens(sum) })
           )
         : null
     ),
@@ -359,7 +362,7 @@ function SessionsSection({ report, bucketKey, heading, scope, onOpenSession }) {
           ...shown.map((session) => {
             const meta = providerMeta(report, session.provider);
             const title = typeof session.title === "string" ? session.title.trim() : "";
-            const name = title || `Session ${sessionShortId(session.thread_id)}`;
+            const name = title || t("Session {id}", { id: sessionShortId(session.thread_id) });
             const tokens = formatTokens(session.total);
             const openable = Boolean(onOpenSession && session.thread_id);
             const body = [
@@ -381,7 +384,7 @@ function SessionsSection({ report, bucketKey, heading, scope, onOpenSession }) {
                   meta.label,
                   title
                     ? null
-                    : h("span", { className: "usage-session-note" }, " · title unavailable")
+                    : h("span", { className: "usage-session-note" }, ` · ${t("title unavailable")}`)
                 )
               ),
               h(
@@ -401,7 +404,9 @@ function SessionsSection({ report, bucketKey, heading, scope, onOpenSession }) {
                 ? h("span", { key: "go", className: "usage-session-go", "aria-hidden": "true" }, "›")
                 : null,
             ];
-            const label = `${name}${title ? "" : " (title unavailable)"}, ${meta.label}, ${tokens} tokens`;
+            const label = title
+              ? t("{name}, {provider}, {tokens} tokens", { name, provider: meta.label, tokens })
+              : t("{name} (title unavailable), {provider}, {tokens} tokens", { name, provider: meta.label, tokens });
             return h(
               "li",
               { key: `${session.provider}::${session.thread_id}` },
@@ -411,7 +416,7 @@ function SessionsSection({ report, bucketKey, heading, scope, onOpenSession }) {
                     {
                       type: "button",
                       className: "usage-session-row",
-                      "aria-label": `${label}. Open session`,
+                      "aria-label": t("{label}. Open session", { label }),
                       onClick: () => onOpenSession(session.thread_id),
                     },
                     ...body
@@ -420,7 +425,7 @@ function SessionsSection({ report, bucketKey, heading, scope, onOpenSession }) {
             );
           })
         )
-      : h("p", { className: "usage-sessions-empty" }, `No session reported usage ${scope}.`),
+      : h("p", { className: "usage-sessions-empty" }, empty),
     sessions.length > SESSION_PREVIEW_COUNT
       ? h(
           "button",
@@ -431,7 +436,7 @@ function SessionsSection({ report, bucketKey, heading, scope, onOpenSession }) {
             "aria-controls": listId,
             onClick: () => setExpanded((v) => !v),
           },
-          expanded ? "Show fewer" : `Show all ${sessions.length} sessions`
+          expanded ? t("Show fewer") : t("Show all {count} sessions", { count: sessions.length })
         )
       : null,
     silent.length
@@ -439,8 +444,8 @@ function SessionsSection({ report, bucketKey, heading, scope, onOpenSession }) {
           "p",
           { className: "usage-sessions-footnote" },
           silent.length === 1
-            ? `${silent[0]} doesn't report token usage, so its sessions aren't listed.`
-            : `${joinNames(silent)} don't report token usage, so their sessions aren't listed.`
+            ? t("{provider} doesn't report token usage, so its sessions aren't listed.", { provider: silent[0] })
+            : t("{providers} don't report token usage, so their sessions aren't listed.", { providers: joinNames(silent) })
         )
       : null
   );
@@ -451,8 +456,8 @@ function StackedChart({
   cap,
   projectToday,
   providers,
-  endLabel = "Today",
-  label = "Spend by day",
+  endLabel = t("Today"),
+  label = t("Spend by day"),
   selectedKey = null,
   onSelect = null,
 }) {
@@ -507,7 +512,7 @@ function StackedChart({
           ? h("div", {
               className: "usage-chart-cap",
               style: { bottom: `${capPct}%` },
-              title: `Daily quota ${formatTokens(cap)}`,
+              title: t("Daily quota {tokens}", { tokens: formatTokens(cap) }),
             })
           : null,
         h(
@@ -666,7 +671,7 @@ function StackedChart({
       ? h(
           "p",
           { className: "usage-chart-day-hint" },
-          "Click a day — left and right panels follow."
+          t("Click a day — left and right panels follow.")
         )
       : null
   );
@@ -688,8 +693,7 @@ function LeftRail({ report, focus, projection, onSetBudget, budgetPending }) {
     prevByProvider.set(g.provider, (prevByProvider.get(g.provider) || 0) + headlineTotal(g));
   }
   const isToday = focus?.isToday !== false;
-  const spentLabel = isToday ? "Spent today" : `Spent ${focus?.label || ""}`.trim();
-  const deltaSuffix = isToday ? "vs the same time yesterday" : "vs previous day";
+  const spentLabel = isToday ? t("Spent today") : t("Spent {day}", { day: focus?.label || "" }).trim();
 
   return h(
     "aside",
@@ -700,28 +704,32 @@ function LeftRail({ report, focus, projection, onSetBudget, budgetPending }) {
       { className: "usage-headline" },
       h("span", { className: "usage-headline-num" }, formatTokens(total)),
       cap
-        ? h("span", { className: "usage-headline-cap" }, ` / ${formatTokens(cap)} daily quota`)
+        ? h("span", { className: "usage-headline-cap" }, ` / ${t("{tokens} daily quota", { tokens: formatTokens(cap) })}`)
         : null
     ),
     h(QuotaBar, {
       spent: total,
       cap: cap || total,
-      delta: deltaText ? `${deltaText} ${deltaSuffix}` : null,
+      delta: !deltaText
+        ? null
+        : isToday
+          ? t("{delta} vs the same time yesterday", { delta: deltaText })
+          : t("{delta} vs previous day", { delta: deltaText }),
     }),
     isToday && projection?.confident && projection.exhaustsAt
       ? h(
           "p",
           { className: "usage-projection-note is-warn" },
-          `On track to run out at ${formatExhaust(projection.exhaustsAt)}`
+          t("On track to run out at {time}", { time: formatExhaust(projection.exhaustsAt) })
         )
       : isToday && projection?.confident
         ? h(
             "p",
             { className: "usage-projection-note" },
-            `At the current rate, ${formatTokens(projection.projected)} today`
+            t("At the current rate, {tokens} today", { tokens: formatTokens(projection.projected) })
           )
         : null,
-    h("div", { className: "usage-section-label" }, "By provider"),
+    h("div", { className: "usage-section-label" }, t("By provider")),
     h(
       "ul",
       { className: "usage-provider-list" },
@@ -736,7 +744,7 @@ function LeftRail({ report, focus, projection, onSetBudget, budgetPending }) {
               "div",
               { className: "usage-provider-body" },
               h("div", { className: "usage-provider-name" }, meta.label || row.key),
-              h("div", { className: "usage-provider-blurb" }, "Usage not reported")
+              h("div", { className: "usage-provider-blurb" }, t("Usage not reported"))
             ),
             h("div", { className: "usage-provider-stats" }, h("span", null, "—"))
           );
@@ -787,13 +795,13 @@ function LeftRail({ report, focus, projection, onSetBudget, budgetPending }) {
       ? h(
           "p",
           { className: "usage-partial-note" },
-          "Shares count only providers that report. Cursor is not in the denominator."
+          t("Shares count only providers that report. Cursor is not in the denominator.")
         )
       : null,
     h(
       "div",
       { className: "usage-policy" },
-      h("div", { className: "usage-section-label" }, "When the quota runs out"),
+      h("div", { className: "usage-section-label" }, t("When the quota runs out")),
       h(
         "div",
         { className: "usage-policy-toggle" },
@@ -805,7 +813,7 @@ function LeftRail({ report, focus, projection, onSetBudget, budgetPending }) {
               type: "button",
               className: policy === value ? "is-active" : "",
               disabled: !cap || budgetPending || !onSetBudget,
-              title: cap ? undefined : "Set a daily quota first",
+              title: cap ? undefined : t("Set a daily quota first"),
               onClick: () => onSetBudget?.({ policy: value }),
             },
             label
@@ -816,8 +824,8 @@ function LeftRail({ report, focus, projection, onSetBudget, budgetPending }) {
         "p",
         { className: "usage-policy-note" },
         policy === "stop_everything"
-          ? "Nothing new starts, yours included. Turns already running finish."
-          : "New autonomous work waits for tomorrow. You can still send messages yourself."
+          ? t("Nothing new starts, yours included. Turns already running finish.")
+          : t("New autonomous work waits for tomorrow. You can still send messages yourself.")
       )
     )
   );
@@ -853,11 +861,15 @@ function CenterDay({
     h(
       "div",
       { className: "usage-center-head" },
-      h("h2", { className: "usage-center-title" }, "Daily spend"),
+      h("h2", { className: "usage-center-title" }, t("Daily spend")),
       h(
         "p",
         { className: "usage-center-sub" },
-        `${formatTokens(windowTotal)} over ${dayCount} days · ${formatTokens(avg)}/day`
+        t("{total} over {days} days · {avg}/day", {
+          total: formatTokens(windowTotal),
+          days: dayCount,
+          avg: formatTokens(avg),
+        })
       )
     ),
     h(StackedChart, {
@@ -873,8 +885,10 @@ function CenterDay({
       key: focus.key,
       report,
       bucketKey: focus.key,
-      heading: focus.isToday ? "Today's sessions" : `Sessions on ${focus.label}`,
-      scope: focus.isToday ? "today" : `on ${focus.label}`,
+      heading: focus.isToday ? t("Today's sessions") : t("Sessions on {day}", { day: focus.label }),
+      empty: focus.isToday
+        ? t("No session reported usage today.")
+        : t("No session reported usage on {day}.", { day: focus.label }),
       onOpenSession,
     }),
     showTopTasks && (report.top_tasks || []).length
@@ -884,7 +898,7 @@ function CenterDay({
           h(
             "div",
             { className: "usage-tasks-head" },
-            h("h3", null, "Today's most expensive tasks")
+            h("h3", null, t("Today's most expensive tasks"))
           ),
           h(
             "ul",
@@ -937,14 +951,14 @@ function RightRail({ report, focus }) {
           : null)
       : null;
   const teams = isToday ? report.by_team || [] : [];
-  const scopeLabel = isToday ? "Today" : focus?.label || "";
+  const scopeLabel = isToday ? t("Today") : focus?.label || "";
   return h(
     "aside",
     { className: "usage-rail usage-rail-right" },
     h(
       "div",
       { className: "usage-kicker" },
-      "Attribution",
+      t("Attribution"),
       scopeLabel ? h("span", { className: "usage-kicker-scope" }, scopeLabel) : null
     ),
     isToday
@@ -956,13 +970,13 @@ function RightRail({ report, focus }) {
             return h(
               "p",
               { className: "usage-partial-note" },
-              "No turns carry a role yet — only team runs do."
+              t("No turns carry a role yet — only team runs do.")
             );
           }
           return h(
             "div",
             null,
-            h("div", { className: "usage-section-label" }, "By role"),
+            h("div", { className: "usage-section-label" }, t("By role")),
             h(
               "ul",
               { className: "usage-role-list" },
@@ -990,13 +1004,13 @@ function RightRail({ report, focus }) {
       : h(
           "p",
           { className: "usage-partial-note" },
-          "Role, team, and retry insights are only available for today. Provider and cache below follow the day you selected."
+          t("Role, team, and retry insights are only available for today. Provider and cache below follow the day you selected.")
         ),
     teams.length
       ? h(
           "div",
           null,
-          h("div", { className: "usage-section-label" }, "By team"),
+          h("div", { className: "usage-section-label" }, t("By team")),
           h(
             "ul",
             { className: "usage-team-list" },
@@ -1035,20 +1049,27 @@ function RightRail({ report, focus }) {
       ? h(
           "div",
           { className: "usage-insight" },
-          h("div", { className: "usage-insight-title" }, "Worth a look"),
+          h("div", { className: "usage-insight-title" }, t("Worth a look")),
           h(
             "p",
             null,
-            `Retries and failed reruns burned ${formatTokens(waste.failed_total)} (${waste.share}%).`,
             waste.hotspot_total
-              ? ` ${formatTokens(waste.hotspot_total)} of that came from one step (${waste.hotspot_label}).`
-              : ""
+              ? t("Retries and failed reruns burned {tokens} ({share}%). {hotspot} of that came from one step ({step}).", {
+                  tokens: formatTokens(waste.failed_total),
+                  share: waste.share,
+                  hotspot: formatTokens(waste.hotspot_total),
+                  step: waste.hotspot_label,
+                })
+              : t("Retries and failed reruns burned {tokens} ({share}%).", {
+                  tokens: formatTokens(waste.failed_total),
+                  share: waste.share,
+                })
           ),
           h(
             "div",
             { className: "usage-insight-actions" },
-            h("button", { type: "button", disabled: true }, "Open that task"),
-            h("button", { type: "button", disabled: true }, "Lower its per-task limit")
+            h("button", { type: "button", disabled: true }, t("Open that task")),
+            h("button", { type: "button", disabled: true }, t("Lower its per-task limit"))
           )
         )
       : null,
@@ -1056,12 +1077,14 @@ function RightRail({ report, focus }) {
       ? h(
           "div",
           { className: "usage-cache" },
-          h("div", { className: "usage-section-label" }, "Cache hits"),
+          h("div", { className: "usage-section-label" }, t("Cache hits")),
           h("div", { className: "usage-cache-num" }, formatTokens(cache.cached)),
           h(
             "p",
             { className: "usage-cache-note" },
-            `${Math.round(cache.share)}% of it came from cache — repeated reads of the same repo, reused.`
+            t("{share}% of it came from cache — repeated reads of the same repo, reused.", {
+              share: Math.round(cache.share),
+            })
           )
         )
       : null
@@ -1094,15 +1117,17 @@ function WeekView({ report, mode = "week", onOpenSession }) {
         "h2",
         { className: "usage-center-title" },
         mode === "month"
-          ? `${formatTokens(thisTotal)} so far this month`
-          : `${formatTokens(thisTotal)} so far this week`
+          ? t("{tokens} so far this month", { tokens: formatTokens(thisTotal) })
+          : t("{tokens} so far this week", { tokens: formatTokens(thisTotal) })
       ),
       h(
         "p",
         { className: "usage-center-sub" },
-        `${formatTokens(prevTotal)} at the same point ${mode === "month" ? "last month" : "last week"}${
-          delta != null ? ` · ${formatDelta(delta)}` : ""
-        }`
+        `${
+          mode === "month"
+            ? t("{tokens} at the same point last month", { tokens: formatTokens(prevTotal) })
+            : t("{tokens} at the same point last week", { tokens: formatTokens(prevTotal) })
+        }${delta != null ? ` · ${formatDelta(delta)}` : ""}`
       )
     ),
     h(StackedChart, {
@@ -1113,15 +1138,18 @@ function WeekView({ report, mode = "week", onOpenSession }) {
         confident: true,
       },
       providers: report.providers,
-      endLabel: mode === "month" ? "This month" : "This week",
-      label: mode === "month" ? "Spend by month" : "Spend by week",
+      endLabel: mode === "month" ? t("This month") : t("This week"),
+      label: mode === "month" ? t("Spend by month") : t("Spend by week"),
     }),
     h(SessionsSection, {
       key: `${mode}:${buckets.at(-1)?.key || ""}`,
       report,
       bucketKey: buckets.at(-1)?.key,
-      heading: mode === "month" ? "This month's sessions" : "This week's sessions",
-      scope: mode === "month" ? "this month" : "this week",
+      heading: mode === "month" ? t("This month's sessions") : t("This week's sessions"),
+      empty:
+        mode === "month"
+          ? t("No session reported usage this month.")
+          : t("No session reported usage this week."),
       onOpenSession,
     }),
     h(
@@ -1130,17 +1158,17 @@ function WeekView({ report, mode = "week", onOpenSession }) {
       h(
         "div",
         { className: "usage-tasks-head" },
-        h("h3", null, mode === "month" ? "This month by provider" : "This week by provider"),
+        h("h3", null, mode === "month" ? t("This month by provider") : t("This week by provider")),
         h(
           "span",
           { className: "usage-cost-footnote" },
           report.prices_as_of
-            ? `Cost estimated from list prices as of ${report.prices_as_of}${
+            ? `${t("Cost estimated from list prices as of {date}", { date: report.prices_as_of })}${
                 priceAgeNote(report.prices_as_of)
                   ? ` — ${priceAgeNote(report.prices_as_of)}`
                   : ""
               }`
-            : "Cost estimated from list prices"
+            : t("Cost estimated from list prices")
         )
       ),
       h(
@@ -1152,10 +1180,10 @@ function WeekView({ report, mode = "week", onOpenSession }) {
           h(
             "tr",
             null,
-            h("th", null, "PROVIDER"),
-            h("th", null, "TOKEN"),
-            h("th", null, "Change"),
-            h("th", null, "Cost")
+            h("th", null, t("PROVIDER")),
+            h("th", null, t("TOKEN")),
+            h("th", null, t("Change")),
+            h("th", null, t("Cost"))
           )
         ),
         h(
@@ -1168,7 +1196,7 @@ function WeekView({ report, mode = "week", onOpenSession }) {
             const prev = prevByGroup.get(groupRowKey(g));
             const d = silent || total == null ? null : deltaPercent(total, prev);
             const cost = silent
-              ? { text: "—", estimated: false, title: "Usage not reported" }
+              ? { text: "—", estimated: false, title: t("Usage not reported") }
               : costLabel(g);
             const modelLabel = groupModelLabel(g);
             return h(
@@ -1201,7 +1229,7 @@ function WeekView({ report, mode = "week", onOpenSession }) {
           h(
             "tr",
             { className: "is-total" },
-            h("td", null, "Total"),
+            h("td", null, t("Total")),
             h("td", null, formatTokens(thisTotal)),
             h("td", null, formatDelta(delta) || "—"),
             h(
@@ -1219,11 +1247,11 @@ function WeekView({ report, mode = "week", onOpenSession }) {
         ? h(
             "div",
             { className: "usage-week-insight" },
-            h("strong", null, "Cheaper this week, because Tester's limit was lowered"),
+            h("strong", null, t("Cheaper this week, because Tester's limit was lowered")),
             h(
               "p",
               null,
-              "Same nine tasks finished, and Claude burned 1.9M less. Cursor's 0.9M was all on three small frontend edits — cheap per token, worth keeping."
+              t("Same nine tasks finished, and Claude burned 1.9M less. Cursor's 0.9M was all on three small frontend edits — cheap per token, worth keeping.")
             )
           )
         : null
@@ -1266,11 +1294,11 @@ function LockedUsage({ onOpenSessions }) {
     h(
       "div",
       { className: "usage-locked-notice", role: "status" },
-      h("h2", { className: "usage-locked-title" }, "Usage is in development"),
+      h("h2", { className: "usage-locked-title" }, t("Usage is in development")),
       h(
         "p",
         { className: "usage-locked-lede" },
-        "Usage shows where tokens went — by provider, by role, by task — and the daily quota can stop new work when it runs out. It is behind the beta gate until the report has been lived with a bit longer."
+        t("Usage shows where tokens went — by provider, by role, by task — and the daily quota can stop new work when it runs out. It is behind the beta gate until the report has been lived with a bit longer.")
       )
     )
   );
@@ -1300,7 +1328,7 @@ export function UsageReportScreen({
   }
   const back = h(UsageBack, { onOpenSessions });
   if (loading && !report) {
-    return h("div", { className: "usage-screen" }, back, h("p", { className: "usage-empty" }, "Loading…"));
+    return h("div", { className: "usage-screen" }, back, h("p", { className: "usage-empty" }, t("Loading…")));
   }
   if (error && !report) {
     return h(
@@ -1310,13 +1338,13 @@ export function UsageReportScreen({
       h(
         "div",
         { className: "usage-empty" },
-        h("h2", null, "Could not load usage"),
+        h("h2", null, t("Could not load usage")),
         h("p", null, error),
         onRetry
           ? h(
               "button",
               { type: "button", className: "usage-retry", onClick: () => onRetry() },
-              "Retry"
+              t("Retry")
             )
           : null
       )
@@ -1324,7 +1352,7 @@ export function UsageReportScreen({
   }
   const state = reportState(report);
   if (state === "loading") {
-    return h("div", { className: "usage-screen" }, back, h("p", { className: "usage-empty" }, "Loading…"));
+    return h("div", { className: "usage-screen" }, back, h("p", { className: "usage-empty" }, t("Loading…")));
   }
   if (state === "disabled") {
     return h(
@@ -1334,8 +1362,8 @@ export function UsageReportScreen({
       h(
         "div",
         { className: "usage-empty" },
-        h("h2", null, "Usage unavailable"),
-        h("p", null, "Token ledger failed to open. The relay is fine; the report is not.")
+        h("h2", null, t("Usage unavailable")),
+        h("p", null, t("Token ledger failed to open. The relay is fine; the report is not."))
       )
     );
   }
@@ -1363,7 +1391,7 @@ export function UsageReportScreen({
       ? h(
           "div",
           { className: "usage-fixture-banner", role: "status" },
-          "Sample data — /api/usage is not wired up here. Figures match mockups 14a / 14b."
+          t("Sample data — /api/usage is not wired up here. Figures match mockups 14a / 14b.")
         )
       : null,
     h(
@@ -1374,9 +1402,9 @@ export function UsageReportScreen({
         "div",
         { className: "usage-tabs", role: "tablist" },
         ...[
-          ["day", "Day"],
-          ["week", "Week"],
-          ["month", "Month"],
+          ["day", t("Day")],
+          ["week", t("Week")],
+          ["month", t("Month")],
         ].map(([key, label]) =>
           h(
             "button",
@@ -1399,11 +1427,11 @@ export function UsageReportScreen({
           "span",
           { className: "usage-range" },
           bucket === "week"
-            ? "Last 6 weeks"
+            ? t("Last 6 weeks")
             : bucket === "month"
-              ? "Last 6 months"
+              ? t("Last 6 months")
               : shortRangeLabel(daySeries[0]?.key, daySeries.at(-1)?.key) ||
-                "Last 14 days"
+                t("Last 14 days")
         ),
         h(
           "button",
@@ -1413,7 +1441,7 @@ export function UsageReportScreen({
             disabled: !report || reportState(report) === "empty",
             onClick: () => downloadUsageCsv(report, `usage-${bucket}.csv`),
           },
-          "Export CSV"
+          t("Export CSV")
         )
       )
     ),
@@ -1421,8 +1449,8 @@ export function UsageReportScreen({
       ? h(
           "div",
           { className: "usage-empty" },
-          h("h2", null, "No usage yet"),
-          h("p", null, "Numbers appear here after a turn that reports tokens.")
+          h("h2", null, t("No usage yet")),
+          h("p", null, t("Numbers appear here after a turn that reports tokens."))
         )
       : bucket === "week" || bucket === "month"
         ? h(WeekView, { report, mode: bucket, onOpenSession })

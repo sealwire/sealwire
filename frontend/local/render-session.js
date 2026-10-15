@@ -233,6 +233,7 @@ import { publishLocalTranscriptSlotContent } from "./transcript-slot.js";
 import { syncComposerHeld } from "./composer-held.js";
 import { goalErrorFor } from "./goal-error.js";
 import { reviewProgressFor } from "../shared/review-card.js";
+import { t } from "../shared/i18n.js";
 
 const h = React.createElement;
 const reactRoots = new WeakMap();
@@ -422,7 +423,7 @@ export function createSessionRenderer({
     const activeThreadId = session?.active_thread_id || null;
     return (reviewsCache?.current()?.review_jobs || [])
       .filter((job) => job.parent_thread_id === activeThreadId)
-      .map((job) => metaChip("Review", reviewStatusLabel(job.status)));
+      .map((job) => metaChip(t("Review"), reviewStatusLabel(job.status)));
   }
 
   function reviewLaunchModel(session) {
@@ -671,7 +672,9 @@ export function createSessionRenderer({
         () => fetchOrchestratorProposals(),
         () => renderSession(state.session || session),
         (error) => {
-          const next = error ? `Couldn't load proposals: ${error.message || String(error)}` : null;
+          const next = error
+            ? t("Couldn't load proposals: {error}", { error: error.message || String(error) })
+            : null;
           if (state.proposalsError !== next) {
             state.proposalsError = next;
             renderSession(state.session || session);
@@ -795,7 +798,7 @@ export function createSessionRenderer({
     if (stopButton) {
       stopButton.hidden = buttons.stopHidden;
       stopButton.disabled = buttons.stopDisabled;
-      stopButton.textContent = buttons.stopPending ? "Stopping..." : "Stop";
+      stopButton.textContent = buttons.stopPending ? t("Stopping...") : t("Stop");
       stopButton.classList.toggle("is-stopping", buttons.stopPending);
       if (buttons.stopPending) {
         stopButton.setAttribute("aria-busy", "true");
@@ -814,19 +817,19 @@ export function createSessionRenderer({
       activeThreadFrozen ||
       submitInFlight;
     messageInput.placeholder = taskReviewer
-      ? "This is a task reviewer — read only."
+      ? t("This is a task reviewer — read only.")
       : activeThreadFrozen
       ? activeThreadUnderWorkflow
-        ? "This session is locked by Code Flow…"
-        : "This session is being reviewed…"
+        ? t("This session is locked by Code Flow…")
+        : t("This session is being reviewed…")
       : !hasActiveSession
-      ? "Start or open a session first."
+      ? t("Start or open a session first.")
       : !viewingConversation
-        ? "Open the session page to send a message."
+        ? t("Open the session page to send a message.")
         // Name the active thread's own provider — never a hardcoded "Codex".
         : providerLabel(session?.provider)
-          ? `Message ${providerLabel(session.provider)}...`
-          : "Message...";
+          ? t("Message {provider}...", { provider: providerLabel(session.provider) })
+          : t("Message...");
   }
 
   function renderSessionUnavailable(message) {
@@ -841,10 +844,10 @@ export function createSessionRenderer({
     renderHeaderModelBadge(null);
     renderSettings();
     renderHostStatus();
-    statusBadge.textContent = "Offline";
+    statusBadge.textContent = t("Offline");
     statusBadge.className = "status-badge status-badge-offline";
     if (sessionDetailsPath) {
-      sessionDetailsPath.textContent = "No workspace path yet.";
+      sessionDetailsPath.textContent = t("No workspace path yet.");
     }
     renderReactContent(
       sessionMeta,
@@ -853,7 +856,7 @@ export function createSessionRenderer({
     renderConversationContent(
       h(ConversationEmptyState, {
         copy: message,
-        title: "Relay unavailable",
+        title: t("Relay unavailable"),
       })
     );
   }
@@ -889,8 +892,10 @@ export function createSessionRenderer({
     const earliest = earliestPairingExpiry(requests);
     const remaining = earliest !== null ? Math.max(0, earliest - pairingNowSeconds()) : null;
     pairingApprovalHint.textContent = remaining !== null
-      ? `A remote device is requesting access. ${remaining}s remaining before this request expires.`
-      : "A remote device is requesting access.";
+      ? t("A remote device is requesting access. {seconds}s remaining before this request expires.", {
+          seconds: remaining,
+        })
+      : t("A remote device is requesting access.");
   }
 
   function syncPairingApprovalDialog(requests) {
@@ -973,25 +978,25 @@ export function createSessionRenderer({
     const live = Boolean(state.streamConnected);
     sidebarHostStatus.classList.toggle("is-degraded", !live);
     if (sidebarHostLabel) {
-      sidebarHostLabel.textContent = live ? "Local relay · Live" : "Local relay · Polling";
+      sidebarHostLabel.textContent = live ? t("Local relay · Live") : t("Local relay · Polling");
     }
   }
 
   function renderSessionMeta(session) {
     if (sessionDetailsPath) {
-      sessionDetailsPath.textContent = session.current_cwd || "No workspace path yet.";
+      sessionDetailsPath.textContent = session.current_cwd || t("No workspace path yet.");
     }
 
     const securityChips = [
-      metaChip("Access", securityModeLabel(session)),
-      metaChip("Sharing", contentVisibilityLabel(session)),
-      metaChip("Remote", brokerStatusLabel(session)),
-      metaChip("Devices", pairedDeviceCountLabel(session)),
+      metaChip(t("Access"), securityModeLabel(session)),
+      metaChip(t("Sharing"), contentVisibilityLabel(session)),
+      metaChip(t("Remote"), brokerStatusLabel(session)),
+      metaChip(t("Devices"), pairedDeviceCountLabel(session)),
       metaChip(
-        "Workspace access",
+        t("Workspace access"),
         session.allowed_roots?.length
-          ? `${session.allowed_roots.length} configured`
-          : "Unrestricted"
+          ? t("{count} configured", { count: session.allowed_roots.length })
+          : t("Unrestricted")
       ),
     ];
 
@@ -1000,7 +1005,7 @@ export function createSessionRenderer({
         sessionMeta,
         h(SessionMetaPanel, {
           chips: securityChips,
-          emptyMessage: "Session details will appear here.",
+          emptyMessage: t("Session details will appear here."),
         })
       );
       return;
@@ -1011,11 +1016,11 @@ export function createSessionRenderer({
       h(SessionMetaPanel, {
         chips: [
           ...securityChips,
-          metaChip("Provider", providerLabel(session.provider) || "Unknown"),
-          metaChip("Model", session.model),
-          metaChip("Permissions", session.approval_policy),
-          metaChip("Effort", session.reasoning_effort),
-          metaChip("Session", shortId(session.active_thread_id)),
+          metaChip(t("Provider"), providerLabel(session.provider) || t("Unknown")),
+          metaChip(t("Model"), session.model),
+          metaChip(t("Permissions"), session.approval_policy),
+          metaChip(t("Effort"), session.reasoning_effort),
+          metaChip(t("Session"), shortId(session.active_thread_id)),
           ...reviewChips(session),
         ],
       })
@@ -1028,7 +1033,7 @@ export function createSessionRenderer({
     if (errorMessage) {
       renderReactContent(
         overviewSecurityBadges,
-        h(OverviewBadges, { badges: [overviewBadge("Status", "Offline")] })
+        h(OverviewBadges, { badges: [overviewBadge(t("Status"), t("Offline"))] })
       );
       return;
     }
@@ -1039,10 +1044,10 @@ export function createSessionRenderer({
     // hero; Model/Control are session-scoped (surfaced in the chat header or transcript).
     const securityBadges = [
       ...describeStatusChips(session),
-      ...(pendingPairings > 0 ? [overviewBadge("Pending", String(pendingPairings))] : []),
-      overviewBadge("Access", securityModeLabel(session)),
-      overviewBadge("Sharing", contentVisibilityLabel(session)),
-      overviewBadge("Remote", brokerStatusLabel(session)),
+      ...(pendingPairings > 0 ? [overviewBadge(t("Pending"), String(pendingPairings))] : []),
+      overviewBadge(t("Access"), securityModeLabel(session)),
+      overviewBadge(t("Sharing"), contentVisibilityLabel(session)),
+      overviewBadge(t("Remote"), brokerStatusLabel(session)),
     ];
 
     renderReactContent(overviewSecurityBadges, h(OverviewBadges, { badges: securityBadges }));
@@ -1170,10 +1175,10 @@ export function createSessionRenderer({
       h(
         "div",
         { className: "review-idle-nudge-inner" },
-        h("span", { className: "review-idle-nudge-copy" }, "Want a second opinion on these changes?"),
+        h("span", { className: "review-idle-nudge-copy" }, t("Want a second opinion on these changes?")),
         h(ReviewLauncher, {
           panelId: "review-panel-nudge",
-          label: "Request reviewer",
+          label: t("Request reviewer"),
           providerOptions: reviewModel.providerOptions,
           models: reviewModel.models,
           defaultProvider: reviewModel.defaultProvider,
@@ -1265,7 +1270,7 @@ export function createSessionRenderer({
               "data-open-pairing-approval": "true",
               type: "button",
             },
-            "Review"
+            t("Review")
           )
         )
       );
@@ -1289,7 +1294,7 @@ export function createSessionRenderer({
     return h(ConversationEmptyState, {
       actions: buildStandbyEmptyActions(model),
       copy: model.copy,
-      details: model.selectedCwd ? [`Selected workspace: ${model.selectedCwd}`] : [],
+      details: model.selectedCwd ? [t("Selected workspace: {path}", { path: model.selectedCwd })] : [],
       title: model.title,
     });
   }
@@ -1420,7 +1425,11 @@ export function createSessionRenderer({
         getStandbyEmptyContent: buildStandbyEmptyContent,
         hydrationLoading: shouldShowTranscriptLoading(session, state),
         onLoadOlderTranscript: loadOlderTranscript,
-        readyCopy: `${providerLabel(session?.provider) || "The agent"} is connected. Send the first prompt below when you're ready.`,
+        readyCopy: providerLabel(session?.provider)
+          ? t("{provider} is connected. Send the first prompt below when you're ready.", {
+              provider: providerLabel(session.provider),
+            })
+          : t("The agent is connected. Send the first prompt below when you're ready."),
         requestedSessionLabel,
         resetEpoch: state.localTranscriptScrollResetEpoch,
         scrollElement: transcript,
@@ -1828,7 +1837,7 @@ export function createSessionRenderer({
         teamsSummary: (() => {
           const teams = teamsFromCatalog(state.teamCatalog);
           const n = teams.length;
-          return `${n} team${n === 1 ? "" : "s"}`;
+          return n === 1 ? t("{count} team", { count: n }) : t("{count} teams", { count: n });
         })(),
       })
     );
@@ -1907,7 +1916,7 @@ export function createSessionRenderer({
       await loadUsageReport(state.usageBucket || "day");
     } catch (error) {
       state.usageBudgetPending = false;
-      state.usageError = error?.message || "Failed to save the budget";
+      state.usageError = error?.message || t("Failed to save the budget");
       renderUsageReport();
     }
   }
@@ -1925,7 +1934,7 @@ export function createSessionRenderer({
       return;
     }
     if (typeof fetchUsage !== "function") {
-      state.usageError = "Usage API is not wired on this surface.";
+      state.usageError = t("Usage API is not wired on this surface.");
       state.usageLoading = false;
       renderUsageReport();
       return;
@@ -2519,7 +2528,7 @@ export function createSessionRenderer({
         ...existing,
         ...accepted.map((file) => ({
           id: `orch-img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          name: file.name || "Pasted image",
+          name: file.name || t("Pasted image"),
           size: file.size,
           file,
         })),
@@ -2797,7 +2806,9 @@ export function createSessionRenderer({
       } catch (error) {
         // Reading failed, so nothing was sent: keep the attachments where they
         // are rather than dropping work the user can still retry.
-        state.orchestratorSendError = `Image attachment failed: ${error?.message || error}`;
+        state.orchestratorSendError = t("Image attachment failed: {error}", {
+          error: error?.message || error,
+        });
         if (state.session) {
           renderTaskTeam(state.session);
         }
@@ -2960,7 +2971,7 @@ export function createSessionRenderer({
         h(
           "div",
           { className: "project-overview-empty" },
-          h("h3", null, state.projectsError ? "Projects unavailable" : "Loading projects…"),
+          h("h3", null, state.projectsError ? t("Projects unavailable") : t("Loading projects…")),
           state.projectsError ? h("p", null, String(state.projectsError)) : null
         )
       );

@@ -1,3 +1,5 @@
+import { t } from "../shared/i18n.js";
+
 export function isExpiredPairingError(message) {
   const normalized = String(message || "").toLowerCase();
   return (
@@ -8,14 +10,14 @@ export function isExpiredPairingError(message) {
 }
 
 export function expiredPairingMessage() {
-  return "This QR code or pairing link has expired. Generate a new QR code from the local relay and scan it again.";
+  return t("This QR code or pairing link has expired. Generate a new QR code from the local relay and scan it again.");
 }
 
 export function normalizePairingError(message) {
   if (isExpiredPairingError(message)) {
     return expiredPairingMessage();
   }
-  return message || "unknown pairing error";
+  return message || t("unknown pairing error");
 }
 
 /// Error code the broker sends to the peer that just lost its seat because a later
@@ -23,7 +25,7 @@ export function normalizePairingError(message) {
 export const PAIRING_TICKET_SUPERSEDED_CODE = "pairing_ticket_superseded";
 
 export function supersededPairingMessage() {
-  return "Another device took over this pairing code. Generate a new QR code from the local relay and scan it again on this device only.";
+  return t("Another device took over this pairing code. Generate a new QR code from the local relay and scan it again on this device only.");
 }
 
 /// Decide what a broker `error` frame means for an in-flight pairing.

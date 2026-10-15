@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { ALL_SESSIONS_LABEL } from "./project-labels.js";
 
 // The session header's title + subtitle text as ONE pure decision — mirroring
@@ -88,16 +89,16 @@ export function selectHeaderLabels({
     // A read-only saved session says so through the transcript itself (and the composer
     // being disabled), so the header does not repeat it. A review IS worth calling out:
     // it explains WHY the session is frozen, which nothing else in the header does.
-    subtitle = reviewInProgress ? "read-only · review in progress" : "";
+    subtitle = reviewInProgress ? t("read-only · review in progress") : "";
   } else if (inConversation) {
     subtitle = "";
   } else if (activeThreadId) {
     // Console home while a session runs elsewhere — name it without the "live" noise.
-    subtitle = label ? `session · ${label}` : "session";
+    subtitle = label ? t("session · {name}", { name: label }) : t("session");
   } else if (hasWorkspace) {
-    subtitle = "standby";
+    subtitle = t("standby");
   } else {
-    subtitle = "no workspace selected";
+    subtitle = t("no workspace selected");
   }
 
   return { title, titleTooltip, subtitle };

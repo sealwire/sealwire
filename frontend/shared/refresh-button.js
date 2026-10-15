@@ -1,10 +1,11 @@
 import React from "react";
 
 import { REFRESH_SVG } from "../svg.js";
+import { t } from "./i18n.js";
 
 const h = React.createElement;
 
-export function RefreshButton({ id, onClick, disabled = false, label = "Refresh" } = {}) {
+export function RefreshButton({ id, onClick, disabled = false, label = t("Refresh") } = {}) {
   const ref = React.useRef(null);
 
   const handle = (event) => {

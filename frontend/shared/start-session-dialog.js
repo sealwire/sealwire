@@ -1,5 +1,6 @@
 import React from "react";
 
+import { t } from "./i18n.js";
 import { ModelPicker } from "./model-picker.js";
 import { ProjectPicker } from "./project-picker.js";
 import { SettingPill } from "./setting-pill.js";
@@ -101,7 +102,7 @@ export function StartSessionDialog({
       document.getElementById(id)?.close?.();
       return;
     }
-    setStartError(result?.error || "Couldn't start the session.");
+    setStartError(result?.error || t("Couldn't start the session."));
   };
 
   const selectedApproval = approvalOptions.find((option) => option.value === fields.approvalPolicy);
@@ -122,7 +123,7 @@ export function StartSessionDialog({
             },
             type: "button",
           },
-          "Cancel"
+          t("Cancel")
         ),
         h(
           "button",
@@ -134,17 +135,17 @@ export function StartSessionDialog({
             onClick: submit,
             type: "button",
           },
-          locked ? "Starting…" : "Start session",
+          locked ? t("Starting…") : t("Start session"),
           h(SubmitShortcutHint)
         ),
       ],
       alert: startError || null,
       // Sessions do NOT get a worktree — only Task-team runs provision one — so
       // this must not promise isolation the session does not have.
-      footerHint: cwd ? `Runs in ${abbreviateHomePath(cwd)}` : "Choose a directory to run in",
+      footerHint: cwd ? t("Runs in {path}", { path: abbreviateHomePath(cwd) }) : t("Choose a directory to run in"),
       id,
       onRequestClose: requestClose,
-      title: "New session",
+      title: t("New session"),
     },
     h(SessionContextBar, {
       key: "context",
@@ -178,15 +179,15 @@ export function StartSessionDialog({
         : null,
       attachControl,
       hint: requiresInitialPrompt
-        ? "Claude Code starts when you send the first prompt"
-        : "Leave empty to start idle",
+        ? t("Claude Code starts when you send the first prompt")
+        : t("Leave empty to start idle"),
       id: `${id}-start-prompt`,
       key: "prompt",
       onChange: (next) => changeField("initialPrompt", next),
       onSubmit: submit,
       placeholder: initialPromptAttachmentsId
-        ? "What should it work on? Paste an image to attach it."
-        : "What should it work on?",
+        ? t("What should it work on? Paste an image to attach it.")
+        : t("What should it work on?"),
       readOnly: locked,
       value: fields.initialPrompt ?? "",
     }),
@@ -217,26 +218,26 @@ export function StartSessionDialog({
         disabled: locked,
         id: `${id}-effort`,
         key: "effort",
-        label: "Effort",
+        label: t("Effort"),
         onSelect: (value) => changeField("effort", value),
         options: effortOptions.map((option) => ({
           ...option,
           selected: option.value === fields.effort,
         })),
-        value: selectedEffort?.label || fields.effort || "default",
+        value: selectedEffort?.label || fields.effort || t("default"),
       }),
       h(SettingPill, {
         disabled: locked,
         id: `${id}-approval`,
         key: "approval",
-        label: "Permissions",
+        label: t("Permissions"),
         onSelect: (value) => changeField("approvalPolicy", value),
         options: approvalOptions.map((option) => ({
           ...option,
           selected: option.value === fields.approvalPolicy,
         })),
         tag: selectedApproval?.tag || null,
-        value: selectedApproval?.label || fields.approvalPolicy || "default",
+        value: selectedApproval?.label || fields.approvalPolicy || t("default"),
       })
     ),
     modelsStatus === "loading" || modelsStatus === "error"
@@ -249,8 +250,8 @@ export function StartSessionDialog({
             key: "models-hint",
           },
           modelsStatus === "loading"
-            ? "Loading models…"
-            : "Couldn’t load the model list — switch provider or reconnect to retry."
+            ? t("Loading models…")
+            : t("Couldn’t load the model list — switch provider or reconnect to retry.")
         )
       : null
   );

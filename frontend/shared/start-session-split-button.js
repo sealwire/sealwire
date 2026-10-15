@@ -16,6 +16,7 @@
 
 import React from "react";
 
+import { t } from "./i18n.js";
 import { providerMarkSlot } from "./provider-mark.js";
 import { MenuPortal, useAnchoredMenu } from "./use-anchored-menu.js";
 import { useDismissableMenu } from "./use-dismissable-menu.js";
@@ -45,7 +46,7 @@ function PlusIcon() {
 export function StartSessionSplitButton({
   buttonId,
   menuId,
-  label = "New session",
+  label = t("New session"),
   providerOptions = [],
   activeProvider = "",
   disabled = false,
@@ -103,12 +104,12 @@ export function StartSessionSplitButton({
             "aria-controls": open ? menuId : undefined,
             "aria-expanded": open ? "true" : "false",
             "aria-haspopup": "menu",
-            "aria-label": "Choose an agent",
+            "aria-label": t("Choose an agent"),
             className: "start-session-split-toggle",
             disabled: disabled || undefined,
             onClick: () => setOpen((wasOpen) => !wasOpen),
             ref: triggerRef,
-            title: "Start a session with a specific agent",
+            title: t("Start a session with a specific agent"),
             type: "button",
           },
           h("span", { "aria-hidden": "true", className: "start-session-split-caret" })

@@ -1,4 +1,5 @@
 import { commandOutcomeOrContractError } from "./command-outcome.js";
+import { t } from "./i18n.js";
 
 // Stopping and resuming are separate capabilities rather than one write with an empty
 // objective meaning "stop": the intent then survives all the way down instead of being
@@ -38,7 +39,7 @@ export function createGoalActions({
         if (outcome.isError) setGoalError(threadId, outcome.text, generation);
       })
       .catch((error) => {
-        const message = `Could not reach the relay: ${error?.message || error}`;
+        const message = t("Could not reach the relay: {error}", { error: error?.message || error });
         log(message);
         setGoalError(threadId, message, generation);
       });

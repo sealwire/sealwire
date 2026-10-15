@@ -1,9 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { startupView } from "./startup-view.mjs";
+import { applyDocumentLanguage, t } from "../shared/i18n.js";
 import "./desktop.css";
 
 const root = document.querySelector("#desktop-root");
+
+applyDocumentLanguage();
 
 listen("desktop://status", (event) => render(event?.payload));
 refresh();
@@ -24,11 +27,11 @@ function render(status) {
       el("p", { className: "startup-title", role: "status" }, [view.title]),
       view.detail ? el("p", { className: "startup-detail" }, [view.detail]) : null,
       view.canStart
-        ? el("button", { className: "startup-start", type: "button", onclick: start }, ["Start Sealwire"])
+        ? el("button", { className: "startup-start", type: "button", onclick: start }, [t("Start Sealwire")])
         : null,
       view.logs.length
         ? el("details", { className: "startup-logs" }, [
-            el("summary", {}, ["Details"]),
+            el("summary", {}, [t("Details")]),
             el("pre", {}, [view.logs.join("\n")]),
           ])
         : null,

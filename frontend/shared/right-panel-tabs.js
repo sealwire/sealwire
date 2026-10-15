@@ -1,5 +1,6 @@
 import React from "react";
 
+import { t } from "./i18n.js";
 import { SegmentedControl } from "./session-settings-panel.js";
 import { GOAL_STATES_NEEDING_USER, ReviewerPanel } from "./reviewer-panel.js";
 import { isTerminalReviewStatus } from "./review-state.js";
@@ -66,15 +67,15 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
   // can bring in, and the panel now lists the others beside it.
   // Running uses the sidebar's working-session dot, so "busy" looks the same everywhere.
   const reviewerLabel = blocked || goalNeedsUser || modelRequestNeedsUser
-    ? "Agents ⚠"
+    ? t("Agents ⚠")
     : inProgress > 0 || workflowInProgress > 0 || asksInProgress > 0 || goalWorking > 0
     ? h(
         "span",
         { className: "right-panel-tab-label" },
-        "Agents",
-        h("span", { className: "conversation-activity-dot", "aria-label": "Working" })
+        t("Agents"),
+        h("span", { className: "conversation-activity-dot", "aria-label": t("Working") })
       )
-    : "Agents";
+    : t("Agents");
 
   return h(
     "div",
@@ -87,7 +88,7 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
         value: activeTab,
         onChange: (value) => store.setActiveTab?.(value),
         options: [
-          { value: "changes", label: "Changes" },
+          { value: "changes", label: t("Changes") },
           { value: "reviewer", label: reviewerLabel },
         ],
       })

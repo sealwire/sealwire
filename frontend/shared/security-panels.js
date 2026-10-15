@@ -1,8 +1,9 @@
 import React from "react";
 
+import { t } from "./i18n.js";
 const h = React.createElement;
 
-export function PairingQrImage({ alt = "Pairing QR code", src = "" }) {
+export function PairingQrImage({ alt = t("Pairing QR code"), src = "" }) {
   if (!src) {
     return null;
   }
@@ -29,7 +30,7 @@ export function PendingPairingRequestsList({
   pendingDecisions = {},
 }) {
   if (!requests.length) {
-    return h(EmptyPanelMessage, null, "No devices are waiting for local approval.");
+    return h(EmptyPanelMessage, null, t("No devices are waiting for local approval."));
   }
 
   return h(
@@ -55,16 +56,25 @@ export function PendingPairingRequestsList({
           h(
             "p",
             { className: "paired-device-meta" },
-            `${shortId(request.device_id)} · requested ${formatTimestamp(request.requested_at)}`
+            t("{id} · requested {time}", {
+              id: shortId(request.device_id),
+              time: formatTimestamp(request.requested_at),
+            })
           ),
-          h("p", { className: "paired-device-meta" }, `Broker peer ${shortId(request.broker_peer_id)}`),
-          h("p", { className: "paired-device-meta" }, `Fingerprint ${request.fingerprint || "Unavailable"}`),
+          h("p", { className: "paired-device-meta" }, t("Broker peer {id}", { id: shortId(request.broker_peer_id) })),
+          h(
+            "p",
+            { className: "paired-device-meta" },
+            request.fingerprint
+              ? t("Fingerprint {fingerprint}", { fingerprint: request.fingerprint })
+              : t("Fingerprint Unavailable")
+          ),
           h(
             "p",
             { className: "paired-device-meta" },
             Array.isArray(request.path_scope) && request.path_scope.length
-              ? `Path scope: ${request.path_scope.join(", ")}`
-              : "Path scope: unrestricted (relay roots only)"
+              ? t("Path scope: {paths}", { paths: request.path_scope.join(", ") })
+              : t("Path scope: unrestricted (relay roots only)")
           )
         ),
         h(
@@ -79,7 +89,7 @@ export function PendingPairingRequestsList({
               type: "button",
               disabled: Boolean(pendingDecisions[request.pairing_id]),
             },
-            pendingDecisions[request.pairing_id] === "approve" ? "Approving…" : "Approve"
+            pendingDecisions[request.pairing_id] === "approve" ? t("Approving…") : t("Approve")
           ),
           h(
             "button",
@@ -90,7 +100,7 @@ export function PendingPairingRequestsList({
               type: "button",
               disabled: Boolean(pendingDecisions[request.pairing_id]),
             },
-            pendingDecisions[request.pairing_id] === "reject" ? "Rejecting…" : "Reject"
+            pendingDecisions[request.pairing_id] === "reject" ? t("Rejecting…") : t("Reject")
           )
         )
       )
@@ -101,15 +111,15 @@ export function PendingPairingRequestsList({
 function deviceLifecycleLabel(state) {
   switch (state) {
     case "pending":
-      return "Pending";
+      return t("Pending");
     case "approved":
-      return "Approved";
+      return t("Approved");
     case "rejected":
-      return "Rejected";
+      return t("Rejected");
     case "revoked":
-      return "Revoked";
+      return t("Revoked");
     default:
-      return "Unknown";
+      return t("Unknown");
   }
 }
 

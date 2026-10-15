@@ -53,6 +53,7 @@ import {
 } from "./surface-state.js";
 import { cancelRemoteThreadSearch, clearSessionRuntime } from "./session-ops.js";
 import { shortId } from "./utils.js";
+import { t } from "../shared/i18n.js";
 
 // Session-cookie requests for the CURRENT pairing attempt.
 //
@@ -276,7 +277,7 @@ export async function handleEncryptedPairingResult(payload) {
   if (!device || !result.payload_secret || !result.device_join_ticket) {
     // Also terminal: an incomplete bundle means the approval already happened, so the
     // pending pairing is spent and this ticket cannot be retried either.
-    retirePairing("pairing result is incomplete");
+    retirePairing(t("pairing result is incomplete"));
     renderLog("Pairing failed: relay returned an incomplete device credential bundle.");
     return;
   }
@@ -285,7 +286,7 @@ export async function handleEncryptedPairingResult(payload) {
   if (savedProfile?.relayVerifyKey && savedProfile.relayVerifyKey !== ticket.relay_verify_key) {
     // The id comes from the relay's own reply; a different computer naming a saved one's
     // id would otherwise inherit its entry, drafts and cached transcripts.
-    retirePairing("this computer reported the id of a different computer already saved here; pairing was refused");
+    retirePairing(t("this computer reported the id of a different computer already saved here; pairing was refused"));
     return;
   }
   const remoteAuth = {

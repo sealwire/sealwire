@@ -65,8 +65,9 @@ export function RemoteSettingsModal({
       },
       h(ProvidersPage, {
         active: active === "providers",
-        footnote:
-          "A session's agent is chosen when you start it and cannot change afterwards — fork the session to hand it to another agent.",
+        footnote: t(
+          "A session's agent is chosen when you start it and cannot change afterwards — fork the session to hand it to another agent."
+        ),
         listId: "remote-provider-status-list",
         model: providers,
       }),

@@ -19,6 +19,7 @@
 // present, a resolved session always has something to show, so the sheet can never be
 // tapped into silence and can never open belatedly when a slow payload lands.
 
+import { t } from "./i18n.js";
 import { buildProjectMenuItems, projectsMenuReady } from "./project-menu.js";
 import { resolveForkSourceThread, threadIsBusyForFork } from "./fork-fields.js";
 
@@ -68,13 +69,13 @@ export function buildThreadSheetSections({
   const sections = [
     {
       kind: "session",
-      label: "Session",
+      label: t("Session"),
       items: [
         {
           kind: "fork",
           // Same wording local's menu swaps in, so the two surfaces explain the same
           // refusal the same way.
-          label: forkBlocked ? "Running session cannot be forked" : "Fork session",
+          label: forkBlocked ? t("Running session cannot be forked") : t("Fork session"),
           disabled: forkBlocked,
         },
         {
@@ -83,13 +84,13 @@ export function buildThreadSheetSections({
           // is relay-side metadata that takes no session claim, so it works while the
           // session is mid-turn.
           kind: "rename",
-          label: "Rename session…",
+          label: t("Rename session…"),
         },
         {
           // Same transport rule as rename (`set_thread_flag` has a real broker
           // action) and the same reasoning for never being disabled.
           kind: "flag",
-          label: flagged ? "Unflag" : "Flag for follow-up",
+          label: flagged ? t("Unflag") : t("Flag for follow-up"),
         },
       ],
     },
@@ -100,14 +101,14 @@ export function buildThreadSheetSections({
   if (renamed) {
     sections[0].items.push({
       kind: "rename-reset",
-      label: "Use the agent's name",
+      label: t("Use the agent's name"),
     });
   }
 
   if (projectsMenuReady({ projectsLoaded, projectsError, projectsLoading })) {
     sections.push({
       kind: "projects",
-      label: "Projects",
+      label: t("Projects"),
       items: buildProjectMenuItems({ projects, currentProjectId }),
     });
   } else {
@@ -117,7 +118,7 @@ export function buildThreadSheetSections({
     // where a section will silently appear later.
     sections.push({
       kind: "projects",
-      label: "Projects",
+      label: t("Projects"),
       items: [
         {
           kind: "projects-unavailable",
@@ -125,7 +126,7 @@ export function buildThreadSheetSections({
           // FIRST fetch throws, so testing `!projectsLoaded` first reported a failed
           // first load — the most likely failure there is — as still loading, i.e. a
           // spinner-ish message for something that will never arrive on its own.
-          label: projectsError ? "Projects unavailable" : "Projects are loading…",
+          label: projectsError ? t("Projects unavailable") : t("Projects are loading…"),
           disabled: true,
         },
       ],

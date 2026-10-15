@@ -5,6 +5,7 @@
 //
 // Pure on purpose: the grouping is the part worth testing, and it must not need a DOM.
 
+import { t } from "./i18n.js";
 import { providerLabel } from "./provider-labels.js";
 import { cardFindings, reviewCardTitle, reviewTone } from "./review-card.js";
 import { reviewChipTone, reviewStatusLabel } from "./review-state.js";
@@ -103,8 +104,8 @@ export function reviewLedger(reviewJobs) {
     // requests on the thread. The loop is the more specific answer, so it wins the slot.
     roundLabel:
       latest.max_rounds > 1
-        ? `round ${latest.round || 0}/${latest.max_rounds}`
-        : `round ${jobs.length}`,
+        ? t("round {round}/{max}", { round: latest.round || 0, max: latest.max_rounds })
+        : t("round {round}", { round: jobs.length }),
     provider: providerLabel(latest.reviewer_provider) || null,
     // The approval sha is a real commit by construction; the candidate may be a
     // checkpoint the relay made for itself, which nobody can `git show`.
@@ -182,7 +183,7 @@ export function reviewOutcome(job) {
     return null;
   }
   if (job.status === "blocked") {
-    return { text: "Review blocked — action needed", tone: "alert" };
+    return { text: t("Review blocked — action needed"), tone: "alert" };
   }
   const card = reviewResultCard(job);
   if (card) {
@@ -201,9 +202,9 @@ function askHasProjectedLedger(ask) {
 function cardTitle(ask) {
   if (askHasProjectedLedger(ask)) {
     const title = String(ask.title || "").trim();
-    return title || "Untitled request";
+    return title || t("Untitled request");
   }
-  return intentTitle(ask?.message) || "Untitled request";
+  return intentTitle(ask?.message) || t("Untitled request");
 }
 
 function cardResult(ask) {
@@ -235,10 +236,11 @@ function askState(ask) {
 function askRoundSummary(ask) {
   if (ask.model_request?.started_model) {
     const result = cardResult(ask);
-    return `Started on ${ask.model_request.started_model}${result ? ` · ${result}` : ""}`;
+    const started = t("Started on {model}", { model: ask.model_request.started_model });
+    return `${started}${result ? ` · ${result}` : ""}`;
   }
   if (ask.model_request?.start_error) {
-    return `Did not start · ${ask.model_request.start_error}`;
+    return `${t("Did not start")} · ${ask.model_request.start_error}`;
   }
   return cardResult(ask) || askState(ask);
 }
@@ -361,21 +363,21 @@ export function handoverLedger(links, viewedThreadId) {
       pickedUp.push({
         key: link.id,
         direction: "from",
-        name: link.source_title || providerLabel(link.source_provider) || "Another session",
+        name: link.source_title || providerLabel(link.source_provider) || t("Another session"),
         provider: link.source_provider || null,
         title: null,
         state: null,
         at: link.created_at || 0,
         rows: [
-          handoverRow("Goal", link.goal),
-          handoverRow("State", link.state),
-          handoverRow("Next", link.next),
+          handoverRow(t("Goal"), link.goal),
+          handoverRow(t("State"), link.state),
+          handoverRow(t("Next"), link.next),
         ].filter(Boolean),
         otherThreadId: link.source_thread_id,
-        linkLabel: "Source thread",
+        linkLabel: t("Source thread"),
       });
     } else if (link.source_thread_id === viewedThreadId) {
-      const agent = providerLabel(link.target_provider) || "Another agent";
+      const agent = providerLabel(link.target_provider) || t("Another agent");
       const state =
         link.status === "working"
           ? "handing over"
@@ -394,12 +396,12 @@ export function handoverLedger(links, viewedThreadId) {
         at: link.created_at || 0,
         // Once the target has answered, its words replace what it was handed.
         rows: link.result
-          ? [handoverRow("Result", link.result)]
-          : [handoverRow("Next", link.next), { label: "Since", at: link.created_at || 0 }].filter(
+          ? [handoverRow(t("Result"), link.result)]
+          : [handoverRow(t("Next"), link.next), { label: t("Since"), at: link.created_at || 0 }].filter(
               Boolean
             ),
         otherThreadId: link.target_thread_id,
-        linkLabel: `${agent} thread`,
+        linkLabel: t("{agent} thread", { agent }),
       });
     }
   }

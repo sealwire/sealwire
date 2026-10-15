@@ -18,6 +18,8 @@
 // answering a modal question with a modal outcome — and it cannot be missed the
 // way a collapsed panel can.
 
+import { t } from "./i18n.js";
+
 /**
  * The sentence shown for a refused destructive action.
  *
@@ -27,8 +29,18 @@
  * message.
  */
 export function describeDestructiveActionFailure({ action = "", title = "", message = "" } = {}) {
-  const reason = String(message || "").trim() || "the relay did not say why";
+  const reason = String(message || "").trim() || t("the relay did not say why");
   const subject = String(title || "").trim();
+  if (action === "archive") {
+    return subject
+      ? t("Could not archive \"{title}\": {reason}", { title: subject, reason })
+      : t("Could not archive this session: {reason}", { reason });
+  }
+  if (action === "delete") {
+    return subject
+      ? t("Could not delete \"{title}\": {reason}", { title: subject, reason })
+      : t("Could not delete this session: {reason}", { reason });
+  }
   return subject
     ? `Could not ${action} "${subject}": ${reason}`
     : `Could not ${action} this session: ${reason}`;

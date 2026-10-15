@@ -14,6 +14,7 @@ import {
   observeElementOffset,
   observeElementRect,
 } from "@tanstack/virtual-core";
+import { t } from "./i18n.js";
 import { canonicalizeWorkspace, isUnknownWorkspace } from "./thread-groups.js";
 import { createThreadListRows, visibleThreadIds } from "./thread-list-state.js";
 import { providerLabel } from "./provider-labels.js";
@@ -68,7 +69,7 @@ export function ThreadGroupList({
   collapsedGroupCwds = new Set(),
   collapsible = false,
   contextMenuThreadId = null,
-  emptyMessage = "No saved sessions yet.",
+  emptyMessage = t("No saved sessions yet."),
   expandedGroupCwds = new Set(),
   formatThreadMeta = (thread) => thread.updated_at || "",
   groups = [],
@@ -88,7 +89,7 @@ export function ThreadGroupList({
   onThreadActions = null,
   onToggleExpandedGroup = null,
   onToggleGroup = null,
-  previewFallback = "No preview yet.",
+  previewFallback = t("No preview yet."),
   renamingThreadId = null,
   selectedCwd = "",
   selectedThreadIds = null,
@@ -289,7 +290,7 @@ function ThreadListRow({
       onClick: () => onToggleExpandedGroup?.(row.normalizedCwd),
       type: "button",
     },
-    row.type === "show-more" ? `Show ${row.hiddenCount} more` : "Show less"
+    row.type === "show-more" ? t("Show {count} more", { count: row.hiddenCount }) : t("Show less")
   );
 }
 
@@ -432,10 +433,10 @@ function groupActivity(group) {
     h(
       "span",
       {
-        "aria-label": `${n} ${label}`,
+        "aria-label": label,
         className: `thread-group-count is-${kind}`,
         role: "img",
-        title: `${n} ${label}`,
+        title: label,
       },
       h("span", { "aria-hidden": "true", className: "thread-group-count-dot" }),
       h("span", { "aria-hidden": "true" }, String(n))
@@ -443,8 +444,8 @@ function groupActivity(group) {
   return h(
     "span",
     { className: "thread-group-badges" },
-    needsInput ? count(needsInput, "attention", "needs input") : null,
-    working ? count(working, "working", "working") : null
+    needsInput ? count(needsInput, "attention", t("{count} needs input", { count: needsInput })) : null,
+    working ? count(working, "working", t("{count} working", { count: working })) : null
   );
 }
 
@@ -516,7 +517,7 @@ export function ThreadGroupHeader({
 
   const name = renaming
     ? h(InlineTitleEditor, {
-        ariaLabel: "Project name",
+        ariaLabel: t("Project name"),
         className: "thread-group-name-input",
         defaultValue: group.label,
         onCancel: () => setRenaming(false),
@@ -549,7 +550,9 @@ export function ThreadGroupHeader({
         "button",
         {
           "aria-expanded": isCollapsed ? "false" : "true",
-          "aria-label": `${isCollapsed ? "Expand" : "Collapse"} ${group.label}`,
+          "aria-label": isCollapsed
+            ? t("Expand {name}", { name: group.label })
+            : t("Collapse {name}", { name: group.label }),
           className: "thread-group-toggle",
           onClick: () => onToggleGroup(normalizedCwd),
           onContextMenu,
@@ -601,7 +604,7 @@ export function ThreadGroupHeader({
           {
             "aria-expanded": menu ? "true" : "false",
             "aria-haspopup": "menu",
-            "aria-label": `Actions for project ${group.label}`,
+            "aria-label": t("Actions for project {name}", { name: group.label }),
             className: "thread-group-more",
             onClick: (event) => {
               if (menu) {
@@ -612,7 +615,7 @@ export function ThreadGroupHeader({
               openMenu(box.left, box.bottom + 4);
             },
             ref: moreRef,
-            title: "Project actions",
+            title: t("Project actions"),
             type: "button",
           },
           h(MoreGlyphSmall)
@@ -623,7 +626,7 @@ export function ThreadGroupHeader({
           ContextMenu,
           {
             anchor: menu,
-            ariaLabel: `Project ${group.label}`,
+            ariaLabel: t("Project {name}", { name: group.label }),
             confirming,
             ignoreRef: moreRef,
             onClose: closeMenu,
@@ -638,13 +641,13 @@ export function ThreadGroupHeader({
                 React.Fragment,
                 null,
                 canRename
-                  ? h(MenuItem, { hint: "F2", label: "Rename…", onSelect: beginRename })
+                  ? h(MenuItem, { hint: "F2", label: t("Rename…"), onSelect: beginRename })
                   : null,
                 canRename && canDelete ? h(MenuSeparator) : null,
                 canDelete
                   ? h(MenuItem, {
                       danger: true,
-                      label: "Delete project…",
+                      label: t("Delete project…"),
                       // An empty project has nothing to warn about: it goes at once and
                       // the host offers an Undo.
                       onSelect: () => (deleteCopy ? setConfirming(true) : deleteNow()),
@@ -726,8 +729,8 @@ export function ThreadGroupItem({
             {
               className: "conversation-flag-mark",
               role: "img",
-              "aria-label": "Flagged for follow-up",
-              title: "Flagged for follow-up",
+              "aria-label": t("Flagged for follow-up"),
+              title: t("Flagged for follow-up"),
             },
             flagGlyph()
           )
@@ -743,7 +746,7 @@ export function ThreadGroupItem({
       isRenaming
         ? h(InlineTitleEditor, {
             className: "conversation-title-input",
-            ariaLabel: "Session name",
+            ariaLabel: t("Session name"),
             defaultValue: threadNameDraft(thread, shortId(thread.id)),
             onCommit: (value) => onCommitRename(thread.id, value),
             onCancel: () => onCancelRename?.(thread.id),
@@ -852,8 +855,8 @@ export function ThreadGroupItem({
       {
         type: "button",
         className: "conversation-more",
-        "aria-label": `Actions for ${title}`,
-        title: "Session actions",
+        "aria-label": t("Actions for {title}", { title }),
+        title: t("Session actions"),
         onClick: (event) => {
           // The row underneath opens the session on click; without this the sheet and
           // the session would both fire.

@@ -14,6 +14,8 @@
 // via a monotonic generation token, and happens only when a request is pruned
 // (no longer pending / thread switched) or the loader is disposed.
 
+import { t } from "./i18n.js";
+
 export function createAskUserQuestionDetailLoader({ fetchDetail, onChange } = {}) {
   if (typeof fetchDetail !== "function") {
     throw new Error("createAskUserQuestionDetailLoader requires a fetchDetail function");
@@ -70,7 +72,7 @@ export function createAskUserQuestionDetailLoader({ fetchDetail, onChange } = {}
           return;
         }
         loading.delete(requestId);
-        errors.set(requestId, error?.message || "Failed to load question details.");
+        errors.set(requestId, error?.message || t("Failed to load question details."));
         emit();
       });
   }

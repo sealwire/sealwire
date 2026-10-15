@@ -1,3 +1,5 @@
+import { t } from "./i18n.js";
+
 /**
  * The five states a session row can be in, highest priority first.
  *
@@ -33,11 +35,11 @@ export const THREAD_STATES = Object.freeze([
 ]);
 
 export const THREAD_STATE_LABELS = Object.freeze({
-  needs_input: "Needs input",
-  working: "Working",
-  reviewing: "Reviewing",
-  completed: "Done",
-  follow_up: "Follow up",
+  needs_input: t("Needs input"),
+  working: t("Working"),
+  reviewing: t("Reviewing"),
+  completed: t("Done"),
+  follow_up: t("Follow up"),
 });
 
 /**
@@ -82,10 +84,10 @@ export function selectThreadState({
 }
 
 const DOT_BY_STATE = {
-  needs_input: { className: "conversation-activity-dot is-attention-input", label: "Needs your input" },
-  working: { className: "conversation-activity-dot", label: "Working" },
-  reviewing: { className: "conversation-activity-dot is-reviewing", label: "Reviewing" },
-  completed: { className: "conversation-activity-dot is-attention-done", label: "Completed" },
+  needs_input: { className: "conversation-activity-dot is-attention-input", label: t("Needs your input") },
+  working: { className: "conversation-activity-dot", label: t("Working") },
+  reviewing: { className: "conversation-activity-dot is-reviewing", label: t("Reviewing") },
+  completed: { className: "conversation-activity-dot is-attention-done", label: t("Completed") },
 };
 
 /**
@@ -106,7 +108,7 @@ export function selectThreadDot(input = {}) {
   const dot = DOT_BY_STATE[state];
   // The only state whose label carries extra detail.
   if (state === "working" && input.activity?.tool) {
-    return { ...dot, label: `Working · ${input.activity.tool}` };
+    return { ...dot, label: t("Working · {tool}", { tool: input.activity.tool }) };
   }
   return dot;
 }

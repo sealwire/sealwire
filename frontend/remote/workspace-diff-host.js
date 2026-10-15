@@ -8,6 +8,7 @@ import {
   WorkspaceDiffSheetBody,
 } from "../local/workspace-diff.js";
 import { RightPanelTabs } from "../shared/right-panel-tabs.js";
+import { t } from "../shared/i18n.js";
 import {
   decideWorkspaceRefresh,
   sessionViewedWorkspaceKey,
@@ -104,23 +105,23 @@ export function RemoteWorkspaceChangesRail({ reviewer = {} } = {}) {
     {
       className: "right-rail",
       id: "remote-workspace-changes-rail",
-      "aria-label": "Workspace overview",
+      "aria-label": t("Workspace overview"),
     },
     h("div", {
       className: "right-rail-resize",
       id: "remote-right-rail-resize",
       role: "separator",
       "aria-orientation": "vertical",
-      "aria-label": "Resize workspace panel",
+      "aria-label": t("Resize workspace panel"),
       tabIndex: 0,
     }),
     h(
       "button",
       {
-        "aria-label": "Hide workspace panel",
+        "aria-label": t("Hide workspace panel"),
         className: "header-button header-panel-toggle rail-top-toggle",
         id: "remote-rail-top-toggle",
-        title: "Hide workspace panel (⌥⌘B)",
+        title: t("Hide workspace panel (⌥⌘B)"),
         type: "button",
       },
       h(RemoteRailToggleIcon)

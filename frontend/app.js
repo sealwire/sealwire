@@ -250,6 +250,7 @@ import { fetchBuildInfo } from "./shared/build-badge.js";
 import { providerLabel } from "./shared/provider-labels.js";
 import { describeThreadRemoval } from "./shared/destructive-confirm-copy.js";
 import { CHECK_SVG, PLUS_SVG } from "./svg.js";
+import { t } from "./shared/i18n.js";
 import { UndoToast } from "./shared/undo-toast.js";
 import { offerProjectUndo } from "./shared/project-undo.js";
 import { ComposerModelPicker } from "./shared/composer.js";
@@ -910,11 +911,11 @@ leftPanelControl.subscribe(({ isOpen }) => {
     tasksToggle.classList.toggle("is-active", isOpen);
     tasksToggle.setAttribute(
       "aria-label",
-      isOpen ? "Hide navigation panel" : "Show navigation panel"
+      isOpen ? t("Hide navigation panel") : t("Show navigation panel")
     );
     tasksToggle.title = isOpen
-      ? "Hide navigation panel (\u2318B)"
-      : "Show navigation panel (\u2318B)";
+      ? t("Hide navigation panel (\u2318B)")
+      : t("Show navigation panel (\u2318B)");
   }
 });
 // Click is delegated: the button is mounted/unmounted with the Tasks view, so
@@ -1095,7 +1096,7 @@ function refreshAgentWorkingIndicator() {
   }
   const stalled = isProgressStalled(session);
   const label = stalled
-    ? "Stalled?"
+    ? t("Stalled?")
     : progressPhaseLabel(phase, session.current_tool, currentProgressVerb);
   if (!label) {
     agentWorkingIndicator.hidden = true;
@@ -1774,7 +1775,7 @@ function setActivityFilter(next) {
 // Prompt for a Project name (trimmed; null aborts). Native prompt mirrors the
 // window.confirm flow the archive/delete affordances already use.
 function promptProjectName(current = "") {
-  return normalizeProjectName(window.prompt("Project name", current));
+  return normalizeProjectName(window.prompt(t("Project name"), current));
 }
 
 // Create a Project from the switcher. Membership/list refresh rides the snapshot's
@@ -1847,7 +1848,7 @@ async function trustWorkspace(cwd) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error?.message || "Failed to trust workspace");
+    throw new Error(payload?.error?.message || t("Failed to trust workspace"));
   }
   logLine(`Trusted workspace ${cwd}.`);
 }
@@ -2047,10 +2048,10 @@ function populateThreadProjectActions(threadId) {
       ? currentProjectLabel({ projects: state.projects || [], currentProjectId })
       : null;
     threadProjectCurrentLabel.textContent = ready
-      ? assignedLabel || "None"
+      ? assignedLabel || t("None")
       : state.projectsError
-        ? "Unavailable"
-        : "Loading…";
+        ? t("Unavailable")
+        : t("Loading…");
   }
   if (!ready) {
     if (threadProjectFilter) {
@@ -2058,7 +2059,7 @@ function populateThreadProjectActions(threadId) {
     }
     const note = document.createElement("p");
     note.className = "context-menu-note";
-    note.textContent = state.projectsError ? "Projects unavailable" : "Loading projects…";
+    note.textContent = state.projectsError ? t("Projects unavailable") : t("Loading projects…");
     threadProjectActions.appendChild(note);
     return;
   }
@@ -2130,7 +2131,7 @@ function renderThreadProjectRows() {
   if (query && !projects.length) {
     const note = document.createElement("p");
     note.className = "context-menu-note";
-    note.textContent = "No matching projects";
+    note.textContent = t("No matching projects");
     threadProjectActions.appendChild(note);
   }
   const separator = document.createElement("div");
@@ -2395,7 +2396,7 @@ async function deleteTask(teamRunId) {
   }
   if (
     !window.confirm(
-      "Delete this finished task and its sessions? This cannot be undone."
+      t("Delete this finished task and its sessions? This cannot be undone.")
     )
   ) {
     return false;
@@ -2639,7 +2640,7 @@ window.addEventListener("popstate", (event) => {
 // The dialog shows a refusal from what this resolves, so it must always resolve one.
 async function submitStartSession() {
   if (state.newSessionSubmitInFlight) {
-    return { ok: false, error: "A session is already starting." };
+    return { ok: false, error: t("A session is already starting.") };
   }
   const imageAttachments = state.newSessionImageAttachments.slice();
   const opening = state.launchDialogGeneration;
@@ -2691,7 +2692,7 @@ function renderComposerImageAttachments() {
 
     const name = document.createElement("span");
     name.className = "composer-attachment-name";
-    name.textContent = `${attachment.file.name || "Pasted image"} · ${formatAttachmentBytes(attachment.file.size)}`;
+    name.textContent = `${attachment.file.name || t("Pasted image")} · ${formatAttachmentBytes(attachment.file.size)}`;
     chip.append(name);
 
     const remove = document.createElement("button");
@@ -2699,8 +2700,13 @@ function renderComposerImageAttachments() {
     remove.dataset.removeImageAttachment = attachment.id;
     remove.disabled = state.composerSubmitInFlight;
     remove.type = "button";
-    remove.title = "Remove image";
-    remove.setAttribute("aria-label", `Remove ${attachment.file.name || "pasted image"}`);
+    remove.title = t("Remove image");
+    remove.setAttribute(
+      "aria-label",
+      attachment.file.name
+        ? t("Remove {name}", { name: attachment.file.name })
+        : t("Remove pasted image")
+    );
     remove.textContent = "×";
     chip.append(remove);
 
@@ -2721,7 +2727,7 @@ function renderNewSessionImageAttachments() {
 
     const name = document.createElement("span");
     name.className = "composer-attachment-name";
-    name.textContent = `${attachment.file.name || "Pasted image"} · ${formatAttachmentBytes(attachment.file.size)}`;
+    name.textContent = `${attachment.file.name || t("Pasted image")} · ${formatAttachmentBytes(attachment.file.size)}`;
     chip.append(name);
 
     const remove = document.createElement("button");
@@ -2729,8 +2735,13 @@ function renderNewSessionImageAttachments() {
     remove.dataset.removeNewSessionImageAttachment = attachment.id;
     remove.disabled = state.newSessionSubmitInFlight;
     remove.type = "button";
-    remove.title = "Remove image";
-    remove.setAttribute("aria-label", `Remove ${attachment.file.name || "pasted image"}`);
+    remove.title = t("Remove image");
+    remove.setAttribute(
+      "aria-label",
+      attachment.file.name
+        ? t("Remove {name}", { name: attachment.file.name })
+        : t("Remove pasted image")
+    );
     remove.textContent = "×";
     chip.append(remove);
 
@@ -2766,7 +2777,7 @@ function renderForkImageAttachments() {
 
     const name = document.createElement("span");
     name.className = "composer-attachment-name";
-    name.textContent = `${attachment.file.name || "Pasted image"} · ${formatAttachmentBytes(attachment.file.size)}`;
+    name.textContent = `${attachment.file.name || t("Pasted image")} · ${formatAttachmentBytes(attachment.file.size)}`;
     chip.append(name);
 
     const remove = document.createElement("button");
@@ -2774,8 +2785,13 @@ function renderForkImageAttachments() {
     remove.dataset.removeForkImageAttachment = attachment.id;
     remove.disabled = Boolean(state.forkDialog?.pending);
     remove.type = "button";
-    remove.title = "Remove image";
-    remove.setAttribute("aria-label", `Remove ${attachment.file.name || "pasted image"}`);
+    remove.title = t("Remove image");
+    remove.setAttribute(
+      "aria-label",
+      attachment.file.name
+        ? t("Remove {name}", { name: attachment.file.name })
+        : t("Remove pasted image")
+    );
     remove.textContent = "×";
     chip.append(remove);
 
@@ -3084,11 +3100,11 @@ async function postRelayCommand(path, body) {
     });
     const payload = await response.json();
     return {
-      text: payload?.content?.[0]?.text || "No answer from the relay.",
+      text: payload?.content?.[0]?.text || t("No answer from the relay."),
       isError: Boolean(payload?.isError) || !response.ok,
     };
   } catch (error) {
-    return { text: `Could not reach the relay: ${error.message}`, isError: true };
+    return { text: t("Could not reach the relay: {error}", { error: error.message }), isError: true };
   }
 }
 
@@ -4126,7 +4142,7 @@ async function submitForkDialog(submittedFields = null) {
       state.forkDialog = {
         ...state.forkDialog,
         pending: false,
-        error: `Image attachment failed: ${error.message}`,
+        error: t("Image attachment failed: {error}", { error: error.message }),
       };
       renderForkSessionDialog();
     }
@@ -4162,7 +4178,7 @@ async function submitForkDialog(submittedFields = null) {
   state.forkDialog = {
     ...state.forkDialog,
     pending: false,
-    error: result?.error || "Failed to fork session.",
+    error: result?.error || t("Failed to fork session."),
   };
   renderForkSessionDialog();
 }
@@ -4327,7 +4343,7 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
     forkThreadButton.disabled = forkBlocked;
     setMenuRowLabel(
       forkThreadButton,
-      forkBlocked ? "Running session cannot be forked" : "Fork session"
+      forkBlocked ? t("Running session cannot be forked") : t("Fork session")
     );
   }
   // Hidden, not disabled: a provider without an archive will never grow one at
@@ -4352,13 +4368,13 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
   archiveThreadButton.disabled = isRunningActiveSession;
   setMenuRowLabel(
     archiveThreadButton,
-    isRunningActiveSession ? "Running session cannot be archived" : "Archive session"
+    isRunningActiveSession ? t("Running session cannot be archived") : t("Archive session")
   );
   // Relay-owned metadata, like rename — works mid-turn, so no busy gate. A batch
   // still disables it below (like rename/fork/archive): it needs one session to
   // aim at, not whichever row happened to be right-clicked.
   if (flagThreadButton) {
-    setMenuRowLabel(flagThreadButton, contextThread?.flagged ? "Unflag" : "Flag for follow-up");
+    setMenuRowLabel(flagThreadButton, contextThread?.flagged ? t("Unflag") : t("Flag for follow-up"));
   }
   // Delete is the ONLY action that takes a batch. Archive, fork, rename, and flag
   // each need one session to aim at, so a batch disables them rather than silently
@@ -4367,12 +4383,12 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
   if (isBatch) {
     if (forkThreadButton) {
       forkThreadButton.disabled = true;
-      setMenuRowLabel(forkThreadButton, "Fork session");
+      setMenuRowLabel(forkThreadButton, t("Fork session"));
     }
     archiveThreadButton.disabled = true;
-    setMenuRowLabel(archiveThreadButton, "Archive session");
+    setMenuRowLabel(archiveThreadButton, t("Archive session"));
     if (flagThreadButton) {
-      setMenuRowLabel(flagThreadButton, "Flag for follow-up");
+      setMenuRowLabel(flagThreadButton, t("Flag for follow-up"));
     }
   }
   // Assigned on EVERY open, not just batch ones: a right-click straight onto another
@@ -4401,11 +4417,11 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
     deleteThreadButton,
     !deleteBlocked
       ? isBatch
-        ? `Delete ${batchSize} sessions…`
-        : "Delete…"
+        ? t("Delete {count} sessions…", { count: batchSize })
+        : t("Delete…")
       : isBatch
-        ? `${busyTargets} of ${batchSize} are running and cannot be deleted`
-        : "Running session cannot be deleted"
+        ? t("{busy} of {count} are running and cannot be deleted", { busy: busyTargets, count: batchSize })
+        : t("Running session cannot be deleted")
   );
   // Per-session Project assignment — rebuilt from the current Projects payload each
   // open so the marked "current" project and the list stay fresh. Populate and place
@@ -4453,18 +4469,18 @@ function closeThreadContextMenu({ rerender = true } = {}) {
   resetThreadMenuConfirm();
   if (forkThreadButton) {
     forkThreadButton.disabled = false;
-    setMenuRowLabel(forkThreadButton, "Fork session");
+    setMenuRowLabel(forkThreadButton, t("Fork session"));
   }
   if (archiveThreadButton) {
     archiveThreadButton.disabled = false;
-    setMenuRowLabel(archiveThreadButton, "Archive session");
+    setMenuRowLabel(archiveThreadButton, t("Archive session"));
   }
   if (flagThreadButton) {
-    setMenuRowLabel(flagThreadButton, "Flag for follow-up");
+    setMenuRowLabel(flagThreadButton, t("Flag for follow-up"));
   }
   if (deleteThreadButton) {
     deleteThreadButton.disabled = false;
-    setMenuRowLabel(deleteThreadButton, "Delete…");
+    setMenuRowLabel(deleteThreadButton, t("Delete…"));
   }
   // All three are only ever disabled for a batch (see openThreadContextMenu), and a
   // menu that closed while disabled would reopen on a single row still greyed out.
@@ -4647,7 +4663,7 @@ async function archiveThread(threadId, deleteReviewers) {
     });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
-      throw new Error(payload?.error?.message || "Failed to archive session");
+      throw new Error(payload?.error?.message || t("Failed to archive session"));
     }
 
     state.threads = state.threads.filter((entry) => entry.id !== threadId);
@@ -4717,7 +4733,7 @@ async function deleteThreadBatch(threadIds, deleteReviewers) {
       });
       const payload = await response.json();
       if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to permanently delete session");
+        throw new Error(payload?.error?.message || t("Failed to permanently delete session"));
       }
       deleted.push(threadId);
       // The relay can succeed and still have something to say — a reviewer session it
@@ -4798,7 +4814,7 @@ async function deleteThread(threadId, deleteReviewers) {
     });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
-      throw new Error(payload?.error?.message || "Failed to permanently delete session");
+      throw new Error(payload?.error?.message || t("Failed to permanently delete session"));
     }
 
     state.threads = state.threads.filter((entry) => entry.id !== threadId);
@@ -4898,19 +4914,19 @@ function sessionStatusLabel(session, approval) {
 }
 
 function securityModeLabel() {
-  return "Private";
+  return t("Private");
 }
 
 function contentVisibilityLabel() {
-  return "End-to-end encrypted";
+  return t("End-to-end encrypted");
 }
 
 function brokerStatusLabel(session) {
   if (!session?.broker_channel_id) {
-    return "Disabled";
+    return t("Disabled");
   }
 
-  const state = session.broker_connected ? "Connected" : "Offline";
+  const state = session.broker_connected ? t("Connected") : t("Offline");
   const channel = shortId(session.broker_channel_id);
   return session.broker_peer_id
     ? `${state} · ${channel} · ${shortId(session.broker_peer_id)}`
@@ -4919,7 +4935,7 @@ function brokerStatusLabel(session) {
 
 function pairedDeviceCountLabel(session) {
   const count = approvedDeviceCount(session);
-  return count === 0 ? "None" : `${count} paired`;
+  return count === 0 ? t("None") : t("{count} paired", { count });
 }
 
 function approvedDeviceCount(session) {
@@ -4936,7 +4952,7 @@ function approvedDeviceCount(session) {
 
 function formatTimestamp(seconds) {
   if (!seconds) {
-    return "unknown";
+    return t("unknown");
   }
 
   return new Date(seconds * 1000).toLocaleString([], {
@@ -4949,29 +4965,29 @@ function formatTimestamp(seconds) {
 
 function formatRelativeTime(seconds) {
   if (!seconds) {
-    return "now";
+    return t("now");
   }
 
   const diffSeconds = Math.max(0, Math.floor(Date.now() / 1000) - Number(seconds));
   if (diffSeconds < 60) {
-    return "now";
+    return t("now");
   }
   if (diffSeconds < 3600) {
-    return `${Math.floor(diffSeconds / 60)}m`;
+    return t("{count}m", { count: Math.floor(diffSeconds / 60) });
   }
   if (diffSeconds < 86400) {
-    return `${Math.floor(diffSeconds / 3600)}h`;
+    return t("{count}h", { count: Math.floor(diffSeconds / 3600) });
   }
   if (diffSeconds < 604800) {
-    return `${Math.floor(diffSeconds / 86400)}d`;
+    return t("{count}d", { count: Math.floor(diffSeconds / 86400) });
   }
   if (diffSeconds < 2592000) {
-    return `${Math.floor(diffSeconds / 604800)}w`;
+    return t("{count}w", { count: Math.floor(diffSeconds / 604800) });
   }
   if (diffSeconds < 31536000) {
-    return `${Math.floor(diffSeconds / 2592000)}mo`;
+    return t("{count}mo", { count: Math.floor(diffSeconds / 2592000) });
   }
-  return `${Math.floor(diffSeconds / 31536000)}y`;
+  return t("{count}y", { count: Math.floor(diffSeconds / 31536000) });
 }
 
 function readThreadIdFromUrl() {
@@ -5362,7 +5378,7 @@ function renderSessionTabs() {
       onRename(threadId, name) {
         void renameThreadById(threadId, name);
       },
-      emptyMessage: "No open sessions. Pick one from the sidebar.",
+      emptyMessage: t("No open sessions. Pick one from the sidebar."),
     })
   );
 }

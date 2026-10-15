@@ -2,6 +2,8 @@
 // so the selection / status / ordering rules can be unit-tested in isolation and are
 // shared verbatim by whatever surface renders the cards.
 
+import { t } from "./i18n.js";
+
 // The agents (sessions) that belong to a project. Membership lives in
 // `thread_project_id` (a thread id -> project id map); a thread with no entry is
 // Unassigned and never appears in any project overview. Recency-sorted by default so
@@ -21,18 +23,18 @@ export function selectProjectAgents({ projectId, threads = [], threadProjectId =
 // otherwise-quiet thread reads as "Idle").
 export function projectCardStatus({ activity = null, attentionKind = null, reviewing = false } = {}) {
   if (attentionKind === "needs_input") {
-    return { key: "needs_input", label: "Needs input" };
+    return { key: "needs_input", label: t("Needs input") };
   }
   if (activity) {
-    return { key: "working", label: "Working", tool: activity.tool || null };
+    return { key: "working", label: t("Working"), tool: activity.tool || null };
   }
   if (reviewing) {
-    return { key: "reviewing", label: "Reviewing" };
+    return { key: "reviewing", label: t("Reviewing") };
   }
   if (attentionKind === "completed") {
-    return { key: "done", label: "Done" };
+    return { key: "done", label: t("Done") };
   }
-  return { key: "idle", label: "Idle" };
+  return { key: "idle", label: t("Idle") };
 }
 
 // Order cards for display. `pinned` floats to the top; within the pinned and unpinned

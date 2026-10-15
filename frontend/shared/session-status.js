@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { isWorkingThreadStatus } from "./thread-status.js";
 
 /**
@@ -30,11 +31,11 @@ import { isWorkingThreadStatus } from "./thread-status.js";
 export function describeSessionStatus(session, { approval = null } = {}) {
   const providersReady = Boolean(session?.provider_connected);
   const providers = providersReady
-    ? { ready: true, label: "Ready" }
-    : { ready: false, label: "Offline" };
+    ? { ready: true, label: t("Ready") }
+    : { ready: false, label: t("Offline") };
 
   const task = deriveTaskSubject(session);
-  const attention = approval ? { kind: "approval", label: "Approval required" } : null;
+  const attention = approval ? { kind: "approval", label: t("Approval required") } : null;
 
   return {
     providers,
@@ -59,8 +60,8 @@ export function describeSessionStatus(session, { approval = null } = {}) {
 export function describeStatusChips(session, { approval = null } = {}) {
   const { providers, task } = describeSessionStatus(session, { approval });
   return [
-    { label: "Providers", value: providers.label },
-    { label: "Task", value: task.label },
+    { label: t("Providers"), value: providers.label },
+    { label: t("Task"), value: task.label },
   ];
 }
 
@@ -70,11 +71,11 @@ export function describeStatusChips(session, { approval = null } = {}) {
 // "Standby".
 function deriveTaskSubject(session) {
   if (!session?.active_thread_id) {
-    return { state: "none", label: "No active task" };
+    return { state: "none", label: t("No active task") };
   }
   const working =
     Boolean(session.active_turn_id) || isWorkingThreadStatus(session.current_status);
-  return working ? { state: "working", label: "Working" } : { state: "idle", label: "Idle" };
+  return working ? { state: "working", label: t("Working") } : { state: "idle", label: t("Idle") };
 }
 
 // Salience order for a single-pill surface: an approval blocks the user and wins
@@ -84,7 +85,7 @@ function deriveTaskSubject(session) {
 // / "Standby").
 function derivePrimaryLabel({ providers, task, attention }) {
   if (attention) return attention.label;
-  if (!providers.ready) return "Providers offline";
-  if (task.state === "none") return "No active task";
+  if (!providers.ready) return t("Providers offline");
+  if (task.state === "none") return t("No active task");
   return task.label;
 }

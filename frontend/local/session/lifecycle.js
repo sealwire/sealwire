@@ -73,6 +73,7 @@ import { isDocumentForeground, notifyThreadEvents } from "../../shared/thread-no
 import { imageFileToDataUrl } from "../image-attachments.js";
 import { preserveVisibleTranscriptText } from "../../shared/preserve-visible-transcript-text.js";
 import { noteSettingsConfirmed } from "../../shared/settings-read-order.js";
+import { t } from "../../shared/i18n.js";
 
 function requestIdSet(list) {
   return new Set(
@@ -206,7 +207,7 @@ export function createLifecycleController(ctx) {
       const payload = await response.json();
 
       if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to load session");
+        throw new Error(payload?.error?.message || t("Failed to load session"));
       }
 
       seedDefaults(payload.data);
@@ -245,7 +246,7 @@ export function createLifecycleController(ctx) {
         state.threads
       )
     ) {
-      renderThreadListMessage("Loading...", "Loading saved workspace groups...");
+      renderThreadListMessage(t("Loading..."), t("Loading saved workspace groups..."));
     }
     logLine(`Fetching session list across saved workspaces (${reason})`);
 
@@ -292,7 +293,7 @@ export function createLifecycleController(ctx) {
       state.threadListStore.getState().failRefresh(error.message);
       state.threadGroups = [];
       state.threads = [];
-      renderThreadListMessage("Error", error.message);
+      renderThreadListMessage(t("Error"), error.message);
       ctx.onThreadsUpdated?.();
       logLine(`Session list fetch failed: ${error.message}`);
     } finally {
@@ -309,7 +310,7 @@ export function createLifecycleController(ctx) {
     const cwd = String(draft.cwd || "").trim();
 
     if (!cwd) {
-      const error = "Choose a directory before starting a session.";
+      const error = t("Choose a directory before starting a session.");
       logLine(error);
       focusWorkspaceField();
       return { ok: false, error };
@@ -354,7 +355,7 @@ export function createLifecycleController(ctx) {
         payload = await response.json();
 
         if (!response.ok || !payload.ok) {
-          throw new Error(payload?.error?.message || "Failed to start session");
+          throw new Error(payload?.error?.message || t("Failed to start session"));
         }
       } catch (error) {
         logLine(`Session start failed: ${error.message}`);
@@ -427,11 +428,11 @@ export function createLifecycleController(ctx) {
   async function forkSession(forkDraft, images = []) {
     const sourceThreadId = forkDraft?.sourceThreadId || "";
     if (!sourceThreadId) {
-      return { ok: false, error: "Choose a session to fork." };
+      return { ok: false, error: t("Choose a session to fork.") };
     }
     const cwd = String(forkDraft?.cwd || "").trim();
     if (!cwd) {
-      return { ok: false, error: "Choose a directory before forking a session." };
+      return { ok: false, error: t("Choose a directory before forking a session.") };
     }
     const provider = forkDraft?.provider || null;
     const agentName = providerLabel(provider) || "agent";
@@ -461,7 +462,7 @@ export function createLifecycleController(ctx) {
       payload = await response.json();
 
       if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to fork session");
+        throw new Error(payload?.error?.message || t("Failed to fork session"));
       }
     } catch (error) {
       logLine(`Fork failed: ${error.message}`);
@@ -531,7 +532,7 @@ export function createLifecycleController(ctx) {
       });
       const payload = await response.json();
       if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to update session settings");
+        throw new Error(payload?.error?.message || t("Failed to update session settings"));
       }
       noteSettingsConfirmed(body.thread_id, body);
       applySessionSnapshot(payload.data);
@@ -666,7 +667,7 @@ export function createLifecycleController(ctx) {
       const payload = await response.json();
 
       if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to send prompt");
+        throw new Error(payload?.error?.message || t("Failed to send prompt"));
       }
 
       // The draft is NOT cleared here. This is the send path for every composer on the
@@ -876,7 +877,7 @@ export function createLifecycleController(ctx) {
       // The surface stopped this press itself and sent nothing, so it is "not sent",
       // not a failure. Still said out loud: the log is collapsible here and hidden
       // on the phone, which is what made "Stop did nothing" look like a dead button.
-      const message = `There is no running ${agentName} turn to stop.`;
+      const message = t("There is no running {agent} turn to stop.", { agent: agentName });
       logLine(message);
       if (targetThreadId) {
         recordComposerHeld({ threadId: targetThreadId, message });
@@ -933,7 +934,7 @@ export function createLifecycleController(ctx) {
       const payload = await response.json();
 
       if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || `Failed to stop ${agentName}`);
+        throw new Error(payload?.error?.message || t("Failed to stop {agent}", { agent: agentName }));
       }
 
       applySessionSnapshot(payload.data);
@@ -1246,7 +1247,7 @@ export function createLifecycleController(ctx) {
     const payload = await response.json();
 
     if (!response.ok || !payload.ok) {
-      throw new Error(payload?.error?.message || "Failed to load sessions");
+      throw new Error(payload?.error?.message || t("Failed to load sessions"));
     }
 
     return {
@@ -1311,7 +1312,7 @@ export function createLifecycleController(ctx) {
         query,
         groups: [],
         loading: false,
-        error: error.message || "Search failed",
+        error: error.message || t("Search failed"),
         unavailableProviders: [],
       };
       renderThreads();

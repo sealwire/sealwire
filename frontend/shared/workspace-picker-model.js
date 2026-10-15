@@ -1,6 +1,7 @@
 // Grouped by repository even though the relay only ever sends one repo's worktrees, so
 // that constraint can be relaxed later without reshaping the panel.
 
+import { t } from "./i18n.js";
 import { abbreviateHomePath, pathBasename } from "./workspace-chip-model.js";
 
 /// Absent `changed_files` means "not measured" and must render as NOTHING: "clean" is a
@@ -11,19 +12,26 @@ export function workspaceRootStatus(root) {
     return null;
   }
   if (count === 0) {
-    return { tone: "clean", text: "clean" };
+    return { tone: "clean", text: t("clean") };
   }
   // Counting stops at a cap so a tree full of build output cannot stream megabytes
   // of `git status` at us; past it the true number is unknown, so say so.
   const capped = root?.changed_files_capped === true;
-  const noun = count === 1 && !capped ? "file" : "files";
-  return { tone: "changes", text: `${count}${capped ? "+" : ""} ${noun} changed` };
+  let text;
+  if (capped) {
+    text = t("{count}+ files changed", { count });
+  } else if (count === 1) {
+    text = t("{count} file changed", { count });
+  } else {
+    text = t("{count} files changed", { count });
+  }
+  return { tone: "changes", text };
 }
 
 /** "9 worktrees" / "1 worktree" — the group header's subtitle. */
 export function worktreeCountLabel(count) {
   const n = Number.isFinite(count) && count > 0 ? count : 0;
-  return `${n} ${n === 1 ? "worktree" : "worktrees"}`;
+  return n === 1 ? t("{count} worktree", { count: n }) : t("{count} worktrees", { count: n });
 }
 
 /// The relay does not label roots with a repo, so it is derived from the main
@@ -84,7 +92,7 @@ export function buildWorktreeGroups({
         isMain ? "checkout" : null,
         // Replaces the removed "Follow session" button: this row is the way back to
         // following the session, so it has to be findable.
-        isSession ? "session" : null,
+        isSession ? t("session") : null,
       ].filter(Boolean),
     };
   });

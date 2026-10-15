@@ -5,6 +5,7 @@ import { SettingsFooter, SettingsFrame } from "../shared/settings-frame.js";
 import { LogPage } from "../shared/settings-log.js";
 import { ProvidersPage } from "../shared/settings-providers.js";
 import { splitDeviceRecords } from "../shared/settings-model.js";
+import { t } from "../shared/i18n.js";
 import { AccessPage, DevicesPage } from "./settings-devices.js";
 
 const h = React.createElement;
@@ -18,19 +19,26 @@ export function LocalSettings(props) {
   const nav = [
     {
       key: "providers",
-      label: "Providers",
+      label: t("Providers"),
       meta: providers.length ? `${connected}/${providers.length}` : "",
       metaTone: connected < providers.length ? "alert" : "",
     },
     devices.pending.length
-      ? { key: "devices", label: "Devices", meta: `${devices.pending.length} waiting`, metaTone: "alert" }
-      : { key: "devices", label: "Devices", meta: paired ? String(paired) : "" },
+      ? {
+          key: "devices",
+          label: t("Devices"),
+          meta: t("{count} waiting", { count: devices.pending.length }),
+          metaTone: "alert",
+        }
+      : { key: "devices", label: t("Devices"), meta: paired ? String(paired) : "" },
     {
       key: "access",
-      label: "Access",
-      meta: access.roots.length
-        ? `${access.roots.length} root${access.roots.length === 1 ? "" : "s"}`
-        : "Any folder",
+      label: t("Access"),
+      meta: access.roots.length === 1
+        ? t("{count} root", { count: 1 })
+        : access.roots.length
+          ? t("{count} roots", { count: access.roots.length })
+          : t("Any folder"),
     },
   ];
   return h(
@@ -50,7 +58,7 @@ export function LocalSettings(props) {
     },
     h(ProvidersPage, {
       active: tab === "providers",
-      footnote: "Sealwire uses each CLI's own sign-in. Sign in or out from the CLI itself.",
+      footnote: t("Sealwire uses each CLI's own sign-in. Sign in or out from the CLI itself."),
       listId: "provider-status-list",
       model: providers,
     }),
@@ -67,7 +75,7 @@ export function LocalSettings(props) {
     h(LogPage, {
       active: tab === "log",
       entries: log.entries,
-      footnote: "Newest first · the last 400 lines from this browser and the relay.",
+      footnote: t("Newest first · the last 400 lines from this browser and the relay."),
       listId: "client-log",
       rootId: "client-log-root",
     })

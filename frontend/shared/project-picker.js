@@ -3,6 +3,7 @@
 
 import React, { useCallback, useId, useRef, useState } from "react";
 
+import { t } from "./i18n.js";
 import { NO_PROJECT_LABEL } from "./project-labels.js";
 import { ProjectMenu } from "./project-menu-react.js";
 import { buildProjectPickerRows } from "./project-picker-model.js";
@@ -21,13 +22,13 @@ const NO_MATCH = "__none__";
 export function ProjectPicker({
   activeProjectId = null,
   className = "",
-  createLabel = "New project…",
+  createLabel = t("New project…"),
   disabled = false,
   // Fork only: an explicit row for "resolve from the source at submit time",
   // which is a different request from choosing no project.
   inheritRow = null,
   id = null,
-  label = "Project",
+  label = t("Project"),
   onCreateProject = null,
   onSelectProject = null,
   projects = [],
@@ -78,7 +79,7 @@ export function ProjectPicker({
         "aria-controls": open ? menuId : undefined,
         "aria-expanded": open ? "true" : "false",
         "aria-haspopup": "menu",
-        "aria-label": `${label}: ${currentLabel}`,
+        "aria-label": t("{label}: {value}", { label, value: currentLabel }),
         className: "project-picker-trigger" + (inheriting ? " is-inherited" : ""),
         "data-active-project-id": resolvedProjectId || "",
         "data-inheriting": inheriting ? "true" : undefined,
@@ -112,7 +113,7 @@ export function ProjectPicker({
           threadProjectId,
           threads,
         }),
-        filterPlaceholder: "Find a project…",
+        filterPlaceholder: t("Find a project…"),
         id: menuId,
         menuRef: assignMenuRef,
         onClose: close,

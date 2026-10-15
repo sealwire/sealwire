@@ -1,5 +1,7 @@
 // An empty project skips its confirm, so it gets an Undo: creating the name again, as no
 // membership was lost. `isStillCurrent` voids an Undo raised somewhere you have since left.
+import { t } from "./i18n.js";
+
 export function offerProjectUndo({
   name,
   sessionCount = 0,
@@ -11,7 +13,7 @@ export function offerProjectUndo({
     return false;
   }
   showUndo({
-    message: `Deleted project “${name}”.`,
+    message: t("Deleted project “{name}”.", { name }),
     onUndo: () => (isStillCurrent() ? recreate(name) : undefined),
   });
   return true;

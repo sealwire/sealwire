@@ -1,3 +1,5 @@
+import { t } from "../../shared/i18n.js";
+
 export function createPairingController(ctx) {
   const {
     state,
@@ -31,7 +33,7 @@ export function createPairingController(ctx) {
       const payload = await response.json();
 
       if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "Failed to start pairing");
+        throw new Error(payload?.error?.message || t("Failed to start pairing"));
       }
 
       logLine(`Pairing ticket ${payload.data.pairing_id} is ready.`);
@@ -65,7 +67,7 @@ export function createPairingController(ctx) {
       return;
     }
 
-    if (!retry && !window.confirm(`Revoke paired device ${deviceId}?`)) {
+    if (!retry && !window.confirm(t("Revoke paired device {device}?", { device: deviceId }))) {
       return;
     }
 
@@ -105,8 +107,10 @@ export function createPairingController(ctx) {
   }
 
   async function clearDeviceHistory(count) {
-    const noun = count === 1 ? "device" : "devices";
-    if (!window.confirm(`Remove ${count} old ${noun} from the list? None of them can connect without pairing again.`)) {
+    const question = count === 1
+      ? t("Remove {count} old device from the list? None of them can connect without pairing again.", { count })
+      : t("Remove {count} old devices from the list? None of them can connect without pairing again.", { count });
+    if (!window.confirm(question)) {
       return;
     }
 
@@ -130,7 +134,7 @@ export function createPairingController(ctx) {
       return;
     }
 
-    if (!window.confirm(`Keep ${keepDeviceId} and revoke every other paired device?`)) {
+    if (!window.confirm(t("Keep {device} and revoke every other paired device?", { device: keepDeviceId }))) {
       return;
     }
 
@@ -277,7 +281,7 @@ export function createPairingController(ctx) {
       );
       const payload = await response.json();
       if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error?.message || "AskUserQuestion submission failed");
+        throw new Error(payload?.error?.message || t("AskUserQuestion submission failed"));
       }
       state.localUiStore.getState().clearAskUserError(requestId);
       logLine(payload.data.message);

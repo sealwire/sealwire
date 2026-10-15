@@ -23,6 +23,7 @@
 
 import React from "react";
 
+import { t } from "./i18n.js";
 import { BackArrowIcon, ComposeIcon, ToggleLeftPanelIcon } from "./panel-icons.js";
 
 const h = React.createElement;
@@ -55,7 +56,7 @@ export function ConversationHeader({
   leftPanelToggleId,
   // The back button points somewhere different on each surface, so its words come in
   // with it rather than being guessed from the id.
-  backLabel = "Back",
+  backLabel = t("Back"),
   backHidden = true,
   onBack,
   onCompose,
@@ -79,11 +80,11 @@ export function ConversationHeader({
         h(
           "button",
           {
-            "aria-label": "Show navigation panel",
+            "aria-label": t("Show navigation panel"),
             className: "header-button header-panel-toggle header-panel-toggle-left",
             id: leftPanelToggleId,
             onClick: onToggleLeftPanel,
-            title: "Show navigation panel (⌘B)",
+            title: t("Show navigation panel (⌘B)"),
             type: "button",
           },
           h(ToggleLeftPanelIcon)
@@ -91,11 +92,11 @@ export function ConversationHeader({
         h(
           "button",
           {
-            "aria-label": "Start new session",
+            "aria-label": t("Start new session"),
             className: "header-button header-compose-button",
             id: composeButtonId,
             onClick: onCompose,
-            title: "Start new session",
+            title: t("Start new session"),
             type: "button",
           },
           h(ComposeIcon)

@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { providerLabel } from "./provider-labels.js";
 
 const DEFAULT_PROVIDERS = ["codex", "claude_code", "cursor", "opencode", "pi"];
@@ -20,121 +21,121 @@ const DEFAULT_MODELS = {
 // `approvalPolicy=never` + `sandbox=danger-full-access` for Codex.
 const PROVIDER_SETTINGS = {
   pi: {
-    approvalLabel: "Permission mode",
+    approvalLabel: t("Permission mode"),
     approvalOptions: [
-      { label: "Full access (YOLO)", value: "bypass", description: "Pi runs tools without built-in approval prompts or an OS sandbox. Use a trusted workspace.", tone: "danger" },
+      { label: t("Full access (YOLO)"), value: "bypass", description: t("Pi runs tools without built-in approval prompts or an OS sandbox. Use a trusted workspace."), tone: "danger" },
     ],
-    effortLabel: "Thinking",
-    effortLabels: { off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" },
-    modelLabel: "Pi model",
-    sandboxLabel: "File access",
+    effortLabel: t("Thinking"),
+    effortLabels: { off: t("Off"), minimal: t("Minimal"), low: t("Low"), medium: t("Medium"), high: t("High"), xhigh: t("Extra high"), max: t("Max") },
+    modelLabel: t("Pi model"),
+    sandboxLabel: t("File access"),
   },
   claude_code: {
-    approvalLabel: "Permission mode",
+    approvalLabel: t("Permission mode"),
     approvalOptions: [
-      { label: "Ask first", value: "untrusted", description: "Every tool call needs your OK.", tone: "safe" },
-      { label: "Ask when needed", value: "on-request", description: "Claude only asks for risky actions.", tone: "neutral" },
-      { label: "Auto-approve edits", value: "never", description: "Edits go through without asking. Shell commands still prompt.", tone: "elevated" },
-      { label: "Full access (YOLO)", value: "bypass", description: "No prompts for anything. Use only on tasks you can throw away.", tone: "danger" },
+      { label: t("Ask first"), value: "untrusted", description: t("Every tool call needs your OK."), tone: "safe" },
+      { label: t("Ask when needed"), value: "on-request", description: t("Claude only asks for risky actions."), tone: "neutral" },
+      { label: t("Auto-approve edits"), value: "never", description: t("Edits go through without asking. Shell commands still prompt."), tone: "elevated" },
+      { label: t("Full access (YOLO)"), value: "bypass", description: t("No prompts for anything. Use only on tasks you can throw away."), tone: "danger" },
     ],
-    effortLabel: "Thinking",
+    effortLabel: t("Thinking"),
     effortLabels: {
-      high: "High",
-      low: "Low",
-      max: "Max",
-      medium: "Medium",
-      xhigh: "Extra high",
+      high: t("High"),
+      low: t("Low"),
+      max: t("Max"),
+      medium: t("Medium"),
+      xhigh: t("Extra high"),
     },
-    modelLabel: "Claude model",
-    sandboxLabel: "File access",
+    modelLabel: t("Claude model"),
+    sandboxLabel: t("File access"),
   },
   codex: {
-    approvalLabel: "Permission mode",
+    approvalLabel: t("Permission mode"),
     approvalOptions: [
-      { label: "Ask first", value: "untrusted", description: "Every tool call needs your OK.", tone: "safe" },
-      { label: "Ask when needed", value: "on-request", description: "Codex only asks for risky actions.", tone: "neutral" },
-      { label: "Auto-approve", value: "never", description: "Non-destructive actions run without asking.", tone: "elevated" },
-      { label: "Full access (YOLO)", value: "bypass", description: "No prompts for anything. Use only on tasks you can throw away.", tone: "danger" },
+      { label: t("Ask first"), value: "untrusted", description: t("Every tool call needs your OK."), tone: "safe" },
+      { label: t("Ask when needed"), value: "on-request", description: t("Codex only asks for risky actions."), tone: "neutral" },
+      { label: t("Auto-approve"), value: "never", description: t("Non-destructive actions run without asking."), tone: "elevated" },
+      { label: t("Full access (YOLO)"), value: "bypass", description: t("No prompts for anything. Use only on tasks you can throw away."), tone: "danger" },
     ],
-    effortLabel: "Reasoning effort",
+    effortLabel: t("Reasoning effort"),
     effortLabels: {
-      high: "High",
-      low: "Low",
-      medium: "Medium",
-      minimal: "Minimal",
-      xhigh: "Extreme high",
+      high: t("High"),
+      low: t("Low"),
+      medium: t("Medium"),
+      minimal: t("Minimal"),
+      xhigh: t("Extreme high"),
     },
-    modelLabel: "Codex model",
-    sandboxLabel: "File access",
+    modelLabel: t("Codex model"),
+    sandboxLabel: t("File access"),
   },
   // Cursor runs over ACP, which has session *modes* (agent / plan / ask) rather
   // than a filesystem sandbox — so the copy promises containment at the tool
   // level and never implies OS isolation.
   cursor: {
-    approvalLabel: "Permission mode",
+    approvalLabel: t("Permission mode"),
     approvalOptions: [
-      { label: "Ask first", value: "untrusted", description: "Every tool call needs your OK.", tone: "safe" },
-      { label: "Ask when needed", value: "on-request", description: "Cursor only asks for actions outside its allowlist.", tone: "neutral" },
-      { label: "Auto-approve", value: "never", description: "Approvals are answered for you, one call at a time.", tone: "elevated" },
-      { label: "Full access (YOLO)", value: "bypass", description: "No prompts for anything. Use only on tasks you can throw away.", tone: "danger" },
+      { label: t("Ask first"), value: "untrusted", description: t("Every tool call needs your OK."), tone: "safe" },
+      { label: t("Ask when needed"), value: "on-request", description: t("Cursor only asks for actions outside its allowlist."), tone: "neutral" },
+      { label: t("Auto-approve"), value: "never", description: t("Approvals are answered for you, one call at a time."), tone: "elevated" },
+      { label: t("Full access (YOLO)"), value: "bypass", description: t("No prompts for anything. Use only on tasks you can throw away."), tone: "danger" },
     ],
-    effortLabel: "Reasoning effort",
+    effortLabel: t("Reasoning effort"),
     effortLabels: {
-      high: "High",
-      low: "Low",
-      max: "Max",
-      medium: "Medium",
-      minimal: "Minimal",
-      xhigh: "Extra high",
+      high: t("High"),
+      low: t("Low"),
+      max: t("Max"),
+      medium: t("Medium"),
+      minimal: t("Minimal"),
+      xhigh: t("Extra high"),
     },
-    modelLabel: "Cursor model",
-    sandboxLabel: "File access",
+    modelLabel: t("Cursor model"),
+    sandboxLabel: t("File access"),
   },
   opencode: {
-    approvalLabel: "Permission mode",
+    approvalLabel: t("Permission mode"),
     approvalOptions: [
-      { label: "Ask first", value: "untrusted", description: "Tools need approval, except Sealwire session tools. Native subagents are disabled; use /delegate.", tone: "safe" },
-      { label: "Ask before changes", value: "on-request", description: "File reads and searches run automatically; .env files, changes, shell and network tools need approval. Use /delegate for subagents.", tone: "neutral" },
-      { label: "Auto-approve", value: "never", description: "Sealwire allows OpenCode tools without prompts, overriding the session's OpenCode permission rules.", tone: "elevated" },
-      { label: "Full access (YOLO)", value: "bypass", description: "Tools run without prompts. Sealwire also treats this session as unrestricted for delegation and Goal mode. No OS sandbox.", tone: "danger" },
+      { label: t("Ask first"), value: "untrusted", description: t("Tools need approval, except Sealwire session tools. Native subagents are disabled; use /delegate."), tone: "safe" },
+      { label: t("Ask before changes"), value: "on-request", description: t("File reads and searches run automatically; .env files, changes, shell and network tools need approval. Use /delegate for subagents."), tone: "neutral" },
+      { label: t("Auto-approve"), value: "never", description: t("Sealwire allows OpenCode tools without prompts, overriding the session's OpenCode permission rules."), tone: "elevated" },
+      { label: t("Full access (YOLO)"), value: "bypass", description: t("Tools run without prompts. Sealwire also treats this session as unrestricted for delegation and Goal mode. No OS sandbox."), tone: "danger" },
     ],
-    effortLabel: "Reasoning effort",
+    effortLabel: t("Reasoning effort"),
     effortLabels: {
-      default: "Model default",
-      none: "None",
-      minimal: "Minimal",
-      low: "Low",
-      medium: "Medium",
-      high: "High",
-      xhigh: "Extra high",
-      max: "Max",
+      default: t("Model default"),
+      none: t("None"),
+      minimal: t("Minimal"),
+      low: t("Low"),
+      medium: t("Medium"),
+      high: t("High"),
+      xhigh: t("Extra high"),
+      max: t("Max"),
     },
-    modelLabel: "OpenCode model",
-    sandboxLabel: "File access",
+    modelLabel: t("OpenCode model"),
+    sandboxLabel: t("File access"),
   },
 };
 
 const DEFAULT_SETTINGS = {
-  approvalLabel: "Permission mode",
+  approvalLabel: t("Permission mode"),
   approvalOptions: [
-    { label: "Ask first", value: "untrusted", description: "Every tool call needs your OK.", tone: "safe" },
-    { label: "Ask when needed", value: "on-request", description: "Only asks for risky actions.", tone: "neutral" },
-    { label: "Auto-approve", value: "never", description: "Non-destructive actions run without asking.", tone: "elevated" },
-    { label: "Full access (YOLO)", value: "bypass", description: "No prompts for anything. Use only on tasks you can throw away.", tone: "danger" },
+    { label: t("Ask first"), value: "untrusted", description: t("Every tool call needs your OK."), tone: "safe" },
+    { label: t("Ask when needed"), value: "on-request", description: t("Only asks for risky actions."), tone: "neutral" },
+    { label: t("Auto-approve"), value: "never", description: t("Non-destructive actions run without asking."), tone: "elevated" },
+    { label: t("Full access (YOLO)"), value: "bypass", description: t("No prompts for anything. Use only on tasks you can throw away."), tone: "danger" },
   ],
-  effortLabel: "Effort",
+  effortLabel: t("Effort"),
   // Not empty: an unmapped effort renders its raw wire value, so a new provider
   // would show `xhigh` in the UI until someone noticed.
   effortLabels: {
-    high: "High",
-    low: "Low",
-    max: "Max",
-    medium: "Medium",
-    minimal: "Minimal",
-    xhigh: "Extra high",
+    high: t("High"),
+    low: t("Low"),
+    max: t("Max"),
+    medium: t("Medium"),
+    minimal: t("Minimal"),
+    xhigh: t("Extra high"),
   },
-  modelLabel: "Model",
-  sandboxLabel: "File access",
+  modelLabel: t("Model"),
+  sandboxLabel: t("File access"),
 };
 
 export function normalizeProvider(provider) {
@@ -237,15 +238,15 @@ export function providerOptions(providers = []) {
 
 export function formatEffortLabel(effort, provider = "") {
   const value = String(effort || "").trim();
-  if (!value) return "Medium";
+  if (!value) return t("Medium");
   if (!String(provider || "").trim()) return value;
   return providerSettings(provider).effortLabels[value] || value;
 }
 
 export function sandboxOptions() {
   return [
-    { label: "Workspace write", value: "workspace-write" },
-    { label: "Read only", value: "read-only" },
-    { label: "Full access", value: "danger-full-access" },
+    { label: t("Workspace write"), value: "workspace-write" },
+    { label: t("Read only"), value: "read-only" },
+    { label: t("Full access"), value: "danger-full-access" },
   ];
 }

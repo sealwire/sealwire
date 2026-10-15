@@ -6,6 +6,7 @@ import { attachTranscriptHistoryLoader } from "../shared/transcript-history-load
 import { stableTranscriptOptions } from "../shared/transcript-options-identity.js";
 import { useLocalTranscriptScrollBookkeeping } from "./use-local-transcript-scroll-bookkeeping.js";
 import { visibleTranscriptEntries } from "../shared/withdrawn-transcript.js";
+import { t } from "../shared/i18n.js";
 
 const h = React.createElement;
 
@@ -70,55 +71,55 @@ export function LocalTranscriptPanel({
 
   if (!viewingConversation && viewedThreadLocked) {
     content = h(ConversationEmptyState, {
-      badge: viewedThreadWorkflowLocked ? "Code Flow" : "Review",
+      badge: viewedThreadWorkflowLocked ? "Code Flow" : t("Review"),
       className: "thread-empty-ready",
       copy: viewedThreadWorkflowLocked
-        ? "Code Flow owns this conversation. Its progress and result show up in the Reviewer panel."
-        : "Another agent is reviewing this conversation. Its progress and result show up in the Reviewer panel, and the review is posted back here when it finishes.",
-      title: viewedThreadWorkflowLocked ? "Code Flow in progress" : "Review in progress",
+        ? t("Code Flow owns this conversation. Its progress and result show up in the Reviewer panel.")
+        : t("Another agent is reviewing this conversation. Its progress and result show up in the Reviewer panel, and the review is posted back here when it finishes."),
+      title: viewedThreadWorkflowLocked ? t("Code Flow in progress") : t("Review in progress"),
     });
   } else if (!viewingConversation && viewingDifferentThread) {
     content = h(ConversationEmptyState, {
       actions: [
         {
           attrs: { "data-go-console-home": "true" },
-          label: "Back to console",
+          label: t("Back to console"),
         },
       ],
-      copy: "This saved session is loading.",
+      copy: t("This saved session is loading."),
       clampDetails: true,
-      details: [`Requested session: ${requestedSessionLabel}`],
-      title: "Loading session",
+      details: [t("Requested session: {name}", { name: requestedSessionLabel })],
+      title: t("Loading session"),
     });
   } else if (!viewingConversation && activeThreadId) {
     content = h(ConversationEmptyState, {
       actions: [
         {
           attrs: { "data-open-thread-id": activeThreadId },
-          label: "Open live conversation",
+          label: t("Open live conversation"),
         },
       ],
-      badge: "Live",
+      badge: t("Live"),
       className: "thread-empty-ready",
-      copy: "A live session is running, but the conversation stays behind its own session page so the local home does not default into chat.",
+      copy: t("A live session is running, but the conversation stays behind its own session page so the local home does not default into chat."),
       clampDetails: true,
-      details: [`Current session: ${activeThreadLabel}`],
-      title: "Relay console home",
+      details: [t("Current session: {name}", { name: activeThreadLabel })],
+      title: t("Relay console home"),
     });
   } else if (!entries.length && viewOnly && viewOnlyLoadError) {
     content = h(ConversationEmptyState, {
-      badge: viewOnlyReviewView ? "Review" : "Read-only",
+      badge: viewOnlyReviewView ? t("Review") : t("Read-only"),
       className: "thread-empty-ready thread-empty-error",
       copy: viewOnlyLoadError,
-      details: ["Retrying automatically."],
-      title: "Couldn't load this conversation",
+      details: [t("Retrying automatically.")],
+      title: t("Couldn't load this conversation"),
     });
   } else if (!entries.length && viewOnly && viewOnlyLoaded) {
     content = h(ConversationEmptyState, {
-      badge: viewOnlyReviewView ? "Review" : "Read-only",
+      badge: viewOnlyReviewView ? t("Review") : t("Read-only"),
       className: "thread-empty-ready",
-      copy: "This session has no messages yet.",
-      title: "No messages yet",
+      copy: t("This session has no messages yet."),
+      title: t("No messages yet"),
     });
   } else if (!entries.length && viewOnly) {
     // A view-only thread whose transcript hasn't loaded yet — calm placeholder
@@ -126,12 +127,12 @@ export function LocalTranscriptPanel({
     // keeps its reviewer-panel wording; a plain saved thread must not be mislabeled
     // "Review in progress".
     content = h(ConversationEmptyState, {
-      badge: viewOnlyReviewView ? "Review" : "Read-only",
+      badge: viewOnlyReviewView ? t("Review") : t("Read-only"),
       className: "thread-empty-ready",
       copy: viewOnlyReviewView
-        ? "Loading this session's conversation. Another agent is reviewing it — its progress shows in the Reviewer panel."
-        : "Loading this saved session's conversation…",
-      title: viewOnlyReviewView ? "Review in progress" : "Read-only view",
+        ? t("Loading this session's conversation. Another agent is reviewing it — its progress shows in the Reviewer panel.")
+        : t("Loading this saved session's conversation…"),
+      title: viewOnlyReviewView ? t("Review in progress") : t("Read-only view"),
     });
   }
 

@@ -19,6 +19,7 @@
 
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 
+import { t } from "./i18n.js";
 import { ALL_SESSIONS_LABEL } from "./project-labels.js";
 import { ProjectMenu } from "./project-menu-react.js";
 import { MenuPortal, useAnchoredMenu } from "./use-anchored-menu.js";
@@ -31,7 +32,7 @@ const h = React.createElement;
 export function ProjectSwitcher({
   activeProjectId = null,
   className = "",
-  createLabel = "New project…",
+  createLabel = t("New project…"),
   // The trigger's text and tooltip. Supplied by the surface rather than derived
   // here, because on local this control IS the header title and that decision
   // lives in `header-labels.js` — one tested place for "what does the header

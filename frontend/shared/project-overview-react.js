@@ -1,11 +1,12 @@
 import React, { useState } from "react";
+import { t } from "./i18n.js";
 import { providerLabel, providerTone } from "./provider-labels.js";
 import { projectCardStatus, reorderCardIds } from "./project-overview-model.js";
 
 const h = React.createElement;
 
 function shortId(value) {
-  return value ? String(value).slice(0, 8) : "unknown";
+  return value ? String(value).slice(0, 8) : t("unknown");
 }
 
 function workspaceBasename(cwd) {
@@ -53,7 +54,7 @@ function FolderGlyph() {
 
 // The Projects-mode sidebar: one row per project (no sessions inline, no Unassigned).
 // `rows` is a precomputed view model [{ id, name, working, needsInput, total }].
-export function ProjectSidebarList({ rows = [], activeProjectId = null, onSelect = null, onContext = null, emptyMessage = "No projects yet." }) {
+export function ProjectSidebarList({ rows = [], activeProjectId = null, onSelect = null, onContext = null, emptyMessage = t("No projects yet.") }) {
   if (!rows.length) {
     return h("p", { className: "sidebar-empty" }, emptyMessage);
   }
@@ -63,14 +64,14 @@ export function ProjectSidebarList({ rows = [], activeProjectId = null, onSelect
     ...rows.map((row) => {
       const badges = [];
       if (row.working) {
-        badges.push(h("span", { key: "w", className: "project-sidebar-badge is-working" }, `${row.working} working`));
+        badges.push(h("span", { key: "w", className: "project-sidebar-badge is-working" }, t("{count} working", { count: row.working })));
       }
       if (row.needsInput) {
-        badges.push(h("span", { key: "n", className: "project-sidebar-badge is-attention" }, `${row.needsInput} needs input`));
+        badges.push(h("span", { key: "n", className: "project-sidebar-badge is-attention" }, t("{count} needs input", { count: row.needsInput })));
       }
       if (!badges.length) {
         const total = row.total || 0;
-        badges.push(h("span", { key: "t", className: "project-sidebar-badge" }, `${total} ${total === 1 ? "session" : "sessions"}`));
+        badges.push(h("span", { key: "t", className: "project-sidebar-badge" }, total === 1 ? t("{count} session", { count: total }) : t("{count} sessions", { count: total })));
       }
       const rowButton = h(
         "button",
@@ -110,8 +111,8 @@ export function ProjectSidebarList({ rows = [], activeProjectId = null, onSelect
           {
             type: "button",
             className: "project-sidebar-more",
-            "aria-label": `Actions for ${row.name}`,
-            title: "Project actions",
+            "aria-label": t("Actions for {name}", { name: row.name }),
+            title: t("Project actions"),
             onClick: (event) => {
               event.stopPropagation();
               const rect = event.currentTarget.getBoundingClientRect();
@@ -184,7 +185,7 @@ function ProjectCard({
       onDragEnd,
       title: provider ? `${provider} · ${title}` : title,
     },
-    h("span", { className: "project-card-drag", "aria-hidden": "true", title: "Drag to reorder" }, h(DragGlyph)),
+    h("span", { className: "project-card-drag", "aria-hidden": "true", title: t("Drag to reorder") }, h(DragGlyph)),
     h(
       "div",
       { className: "project-card-body" },
@@ -215,8 +216,8 @@ function ProjectCard({
         {
           type: "button",
           className: `project-card-pin${pinned ? " is-pinned" : ""}`,
-          title: pinned ? "Unpin" : "Pin",
-          "aria-label": pinned ? `Unpin ${title}` : `Pin ${title}`,
+          title: pinned ? t("Unpin") : t("Pin"),
+          "aria-label": pinned ? t("Unpin {title}", { title }) : t("Pin {title}", { title }),
           "aria-pressed": pinned ? "true" : "false",
           onClick: (event) => {
             event.stopPropagation();
@@ -252,8 +253,8 @@ export function ProjectOverview({
     return h(
       "div",
       { className: "project-overview-empty" },
-      h("h3", null, "Select a project"),
-      h("p", null, "Pick a project on the left to see its agents."),
+      h("h3", null, t("Select a project")),
+      h("p", null, t("Pick a project on the left to see its agents.")),
     );
   }
 
@@ -268,7 +269,7 @@ export function ProjectOverview({
       h(
         "p",
         { className: "project-overview-sub" },
-        `${count} ${count === 1 ? "agent" : "agents"}`,
+        count === 1 ? t("{count} agent", { count }) : t("{count} agents", { count }),
       ),
     ),
     onNewAgent
@@ -276,7 +277,7 @@ export function ProjectOverview({
           "button",
           { type: "button", className: "project-overview-new", onClick: () => onNewAgent(project.id) },
           h(PlusGlyph),
-          "New agent",
+          t("New agent"),
         )
       : null,
   );
@@ -289,8 +290,8 @@ export function ProjectOverview({
       h(
         "div",
         { className: "project-overview-empty" },
-        h("h3", null, "No agents yet"),
-        h("p", null, "Start an agent in this project — it'll show up here as a card."),
+        h("h3", null, t("No agents yet")),
+        h("p", null, t("Start an agent in this project — it'll show up here as a card.")),
       ),
     );
   }
@@ -369,10 +370,10 @@ export function ProjectOverview({
     "div",
     { className: "project-overview" },
     header,
-    h("p", { className: "project-card-band-label" }, "Pinned"),
+    h("p", { className: "project-card-band-label" }, t("Pinned")),
     h("div", { className: "project-card-list" }, ...pinnedCards),
     restCards.length
-      ? h("p", { className: "project-card-band-label" }, "Recent")
+      ? h("p", { className: "project-card-band-label" }, t("Recent"))
       : null,
     restCards.length ? h("div", { className: "project-card-list" }, ...restCards) : null,
   );
