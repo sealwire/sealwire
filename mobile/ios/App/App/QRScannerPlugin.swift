@@ -15,7 +15,7 @@ public class QRScannerPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func scan(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
             guard AVCaptureDevice.default(for: .video) != nil else {
-                call.reject("This device has no camera.")
+                call.reject("This device has no camera.", "no-camera")
                 return
             }
             switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -24,21 +24,26 @@ public class QRScannerPlugin: CAPPlugin, CAPBridgedPlugin {
             case .notDetermined:
                 AVCaptureDevice.requestAccess(for: .video) { granted in
                     DispatchQueue.main.async {
-                        granted ? self.openScanner(call) : call.reject(Self.cameraOff)
+                        granted ? self.openScanner(call) : call.reject(Self.cameraOff, "camera-denied")
                     }
                 }
             default:
-                call.reject(Self.cameraOff)
+                call.reject(Self.cameraOff, "camera-denied")
             }
         }
     }
 
     private func openScanner(_ call: CAPPluginCall) {
         guard let host = bridge?.viewController else {
-            call.reject("The scanner could not open.")
+            call.reject("The scanner could not open.", "unavailable")
             return
         }
-        let scanner = QRScannerViewController { value in
+        // The page sends its own wording, so the scanner matches the language the page shows.
+        let labels = QRScannerViewController.Labels(
+            cancel: call.getString("cancelLabel") ?? "Cancel",
+            hint: call.getString("hint") ?? "Point at the pairing QR code in your relay's Settings › Devices."
+        )
+        let scanner = QRScannerViewController(labels: labels) { value in
             host.dismiss(animated: true)
             if let value {
                 call.resolve(["value": value])
@@ -52,12 +57,19 @@ public class QRScannerPlugin: CAPPlugin, CAPBridgedPlugin {
 }
 
 final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    struct Labels {
+        let cancel: String
+        let hint: String
+    }
+
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "dev.sealwire.qr-scanner")
+    private let labels: Labels
     private let onFinish: (String?) -> Void
     private var finished = false
 
-    init(onFinish: @escaping (String?) -> Void) {
+    init(labels: Labels, onFinish: @escaping (String?) -> Void) {
+        self.labels = labels
         self.onFinish = onFinish
         super.init(nibName: nil, bundle: nil)
     }
@@ -85,7 +97,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
 
         let hint = UILabel()
         hint.translatesAutoresizingMaskIntoConstraints = false
-        hint.text = "Point at the pairing QR code in your relay's Settings › Devices."
+        hint.text = labels.hint
         hint.textColor = .white
         hint.font = .preferredFont(forTextStyle: .callout)
         hint.numberOfLines = 0
@@ -94,7 +106,7 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
 
         let cancel = UIButton(type: .system)
         cancel.translatesAutoresizingMaskIntoConstraints = false
-        cancel.setTitle("Cancel", for: .normal)
+        cancel.setTitle(labels.cancel, for: .normal)
         cancel.setTitleColor(.white, for: .normal)
         cancel.titleLabel?.font = .preferredFont(forTextStyle: .headline)
         cancel.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)

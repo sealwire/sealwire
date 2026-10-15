@@ -1,3 +1,4 @@
+import { applyDocumentLanguage } from "../shared/i18n.js";
 import { mountRemoteApp } from "./react-app.js";
 
 // iOS Safari ignores user-scalable=no, so its pinch has to be cancelled here. Touch devices
@@ -6,4 +7,5 @@ if (navigator.maxTouchPoints > 0) {
   document.addEventListener("gesturestart", (event) => event.preventDefault());
 }
 
+applyDocumentLanguage();
 mountRemoteApp();

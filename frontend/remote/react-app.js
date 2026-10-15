@@ -283,6 +283,7 @@ import { layoutThreadIds } from "../shared/tab-layout.js";
 import { createThreadSkillsStore, skillForSend } from "../shared/thread-skills.js";
 import { sessionViewContextKey } from "../shared/session-view-state.js";
 import { BOOT_RESTORE_REASON, useRemoteSessionTabs } from "./session-tabs-host.js";
+import { t } from "../shared/i18n.js";
 import { surfaceText } from "./surface-wording.js";
 
 const h = React.createElement;
@@ -2808,11 +2809,11 @@ const loadRemoteBuildInfo = () => fetchBuildInfo("remote");
 
 function remoteDeviceStatus(currentState) {
   if (!currentState.remoteAuth) {
-    return { paired: false, statusLabel: "Not paired", statusTone: "alert" };
+    return { paired: false, statusLabel: t("Not paired"), statusTone: "alert" };
   }
   return selectedRelayNeedsRepair(currentState)
-    ? { paired: true, statusLabel: "Re-pair", statusTone: "alert" }
-    : { paired: true, statusLabel: "Paired", statusTone: "" };
+    ? { paired: true, statusLabel: t("Re-pair"), statusTone: "alert" }
+    : { paired: true, statusLabel: t("Paired"), statusTone: "" };
 }
 
 function findThreadNameInGroups(groups, threadId) {

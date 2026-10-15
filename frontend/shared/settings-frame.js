@@ -2,6 +2,8 @@
 // Pages stay mounted and toggle `hidden`, because e2e helpers read ids inside inactive pages.
 
 import React from "react";
+import { t } from "./i18n.js";
+import { LanguagePicker } from "./language-picker.js";
 import { ThemePicker } from "./theme-picker.js";
 
 const h = React.createElement;
@@ -24,8 +26,8 @@ export function SettingsFrame({ nav, active, onSelect, onClose, closeId, tabIdPr
     { className: "settings-frame" },
     h(
       "nav",
-      { className: "settings-nav", "aria-label": "Settings sections" },
-      h("h2", { className: "settings-nav-title" }, "Settings"),
+      { className: "settings-nav", "aria-label": t("Settings sections") },
+      h("h2", { className: "settings-nav-title" }, t("Settings")),
       h(
         "div",
         { className: "settings-nav-items", role: "tablist", "aria-orientation": "vertical" },
@@ -63,7 +65,7 @@ export function SettingsFrame({ nav, active, onSelect, onClose, closeId, tabIdPr
       h(
         "button",
         {
-          "aria-label": "Close settings",
+          "aria-label": t("Close settings"),
           className: "header-button close-modal-btn settings-close",
           id: closeId,
           onClick: onClose,
@@ -141,7 +143,7 @@ export function SettingsHint({ children, id }) {
   return h("p", { className: "settings-hint", id }, children);
 }
 
-// Theme is one control, so it lives at the foot of the nav instead of owning a page.
+// Theme and language are one control each, so they live at the foot of the nav instead of owning a page.
 // `loadBuildInfo` is injected: build-badge.js reads `import.meta.env` at load, which node tests lack.
 export function SettingsFooter({ loadBuildInfo, onOpenLog, logActive = false, logButtonId }) {
   return h(
@@ -150,8 +152,14 @@ export function SettingsFooter({ loadBuildInfo, onOpenLog, logActive = false, lo
     h(
       "div",
       { className: "settings-theme-row" },
-      h("span", { className: "settings-theme-label" }, "Theme"),
+      h("span", { className: "settings-theme-label" }, t("Theme")),
       h(ThemePicker)
+    ),
+    h(
+      "div",
+      { className: "settings-theme-row" },
+      h("span", { className: "settings-theme-label" }, t("Language")),
+      h(LanguagePicker)
     ),
     h(
       "div",
@@ -166,14 +174,14 @@ export function SettingsFooter({ loadBuildInfo, onOpenLog, logActive = false, lo
               onClick: onOpenLog,
               type: "button",
             },
-            "Log"
+            t("Log")
           )
         : null
     )
   );
 }
 
-function BuildLabel({ loadBuildInfo }) {
+export function BuildLabel({ loadBuildInfo }) {
   const [info, setInfo] = React.useState(null);
   React.useEffect(() => {
     let live = true;

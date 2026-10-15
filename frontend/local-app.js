@@ -2,6 +2,7 @@ import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { LocalShell } from "./local/react-shell.js";
+import { applyDocumentLanguage } from "./shared/i18n.js";
 
 const rootElement = document.querySelector("#local-root");
 
@@ -9,6 +10,7 @@ if (!rootElement) {
   throw new Error("Missing local React root");
 }
 
+applyDocumentLanguage();
 const root = createRoot(rootElement);
 
 export function renderLocalShell(props = {}) {

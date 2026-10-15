@@ -57,12 +57,12 @@ function render(props) {
   };
 }
 
-test("remote Settings has Providers and This device, and nothing relay-side", () => {
+test("remote Settings has Providers, This device and Personalization, and nothing relay-side", () => {
   const { device } = deviceProps();
   const view = render({ tab: "device", device });
   try {
     const tabs = [...view.host.querySelectorAll(".settings-nav-item")].map((el) => el.dataset.settingsTab);
-    assert.deepEqual(tabs, ["providers", "device"]);
+    assert.deepEqual(tabs, ["providers", "device", "personalize"]);
     assert.equal(view.host.querySelector('[data-settings-panel="device"]').hidden, false);
     assert.equal(view.host.querySelector("#settings-tab-log"), null);
   } finally {
@@ -116,20 +116,38 @@ test("opening Settings rechecks a signed-out provider once, and never a signed-i
   }
 });
 
-// e2e scripts read #remote-client-log for diagnostics whether or not anyone opened it.
-test("the log sits behind the footer link and stays readable while closed", () => {
+// On a phone the footer squeezed theme, language, build and log into one unreadable line.
+test("theme and language have their own page, and the version sits under This device", async () => {
   const { device } = deviceProps();
-  const picked = [];
+  const loadBuildInfo = async () => ({ label: "remote · 2026-10-15 · 20261015-120000", title: "" });
+  const view = render({ tab: "personalize", device, loadBuildInfo });
+  try {
+    await act(async () => {});
+    assert.ok(!view.host.querySelector(".settings-nav-footer"), "Settings still has a footer");
+    const page = view.host.querySelector('[data-settings-panel="personalize"]');
+    assert.equal(page.hidden, false);
+    assert.ok(page.querySelector(".theme-picker:not(.language-picker)"), "no theme picker");
+    assert.ok(page.querySelector(".language-picker"), "no language picker");
+    const devicePage = view.host.querySelector('[data-settings-panel="device"]');
+    assert.match(devicePage.textContent, /20261015-120000/);
+  } finally {
+    view.cleanup();
+  }
+});
+
+// No way in from the UI, but e2e scripts still read #remote-client-log when a run fails.
+test("remote Settings offers no log, yet keeps it for diagnostics", () => {
+  const { device } = deviceProps();
   const logEntries = [
     { at: 2_000, text: "Remote claim challenge accepted" },
     { at: 1_000, text: "Booting broker remote surface..." },
   ];
-  const view = render({ open: false, tab: "providers", device, logEntries, onSelectTab: (key) => picked.push(key) });
+  const view = render({ open: false, tab: "log", device, logEntries });
   try {
-    assert.match(view.host.querySelector("#remote-client-log").textContent, /Remote claim challenge accepted/);
+    assert.ok(!view.host.querySelector("#remote-settings-tab-log"), "Settings still offers the log");
     assert.equal(view.host.querySelector('[data-settings-panel="log"]').hidden, true);
-    act(() => view.host.querySelector("#remote-settings-tab-log").click());
-    assert.deepEqual(picked, ["log"]);
+    assert.equal(view.host.querySelector('[data-settings-panel="providers"]').hidden, false);
+    assert.match(view.host.querySelector("#remote-client-log").textContent, /Remote claim challenge accepted/);
   } finally {
     view.cleanup();
   }

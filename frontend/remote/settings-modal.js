@@ -3,8 +3,10 @@
 
 import React from "react";
 import { ManagedDialog } from "../shared/managed-dialog.js";
-import { SettingsFooter, SettingsFrame, SettingsPage, SettingsSection } from "../shared/settings-frame.js";
+import { t } from "../shared/i18n.js";
+import { BuildLabel, SettingsFrame, SettingsPage, SettingsSection } from "../shared/settings-frame.js";
 import { LogPage } from "../shared/settings-log.js";
+import { PersonalizePage } from "../shared/settings-personalize.js";
 import { ProvidersPage } from "../shared/settings-providers.js";
 import { DeviceMetaPanel } from "./react-renderer.js";
 import { ScanPairingButton } from "./scan-pairing-button.js";
@@ -35,13 +37,14 @@ export function RemoteSettingsModal({
   const nav = [
     {
       key: "providers",
-      label: "Providers",
+      label: t("Providers"),
       meta: providers.length ? `${connected}/${providers.length}` : "",
       metaTone: connected < providers.length ? "alert" : "",
     },
-    { key: "device", label: "This device", meta: device.statusLabel, metaTone: device.statusTone },
+    { key: "device", label: t("This device"), meta: device.statusLabel, metaTone: device.statusTone },
+    { key: "personalize", label: t("Personalization") },
   ];
-  const active = tab === "log" || nav.some((item) => item.key === tab) ? tab : "providers";
+  const active = nav.some((item) => item.key === tab) ? tab : "providers";
   return h(
     ManagedDialog,
     {
@@ -55,12 +58,6 @@ export function RemoteSettingsModal({
       {
         active,
         closeId: "close-remote-settings-modal",
-        footer: h(SettingsFooter, {
-          loadBuildInfo,
-          logActive: active === "log",
-          logButtonId: "remote-settings-tab-log",
-          onOpenLog: () => onSelectTab("log"),
-        }),
         nav,
         onClose,
         onSelect: onSelectTab,
@@ -73,9 +70,11 @@ export function RemoteSettingsModal({
         listId: "remote-provider-status-list",
         model: providers,
       }),
-      h(DevicePage, { active: active === "device", device }),
+      h(DevicePage, { active: active === "device", device, loadBuildInfo }),
+      h(PersonalizePage, { active: active === "personalize" }),
+      // Never shown: e2e scripts read #remote-client-log when a run fails.
       h(LogPage, {
-        active: active === "log",
+        active: false,
         entries: logEntries || [],
         footnote: "Newest first · the last 400 lines from this device and the relay.",
         listId: "remote-client-log",
@@ -84,11 +83,11 @@ export function RemoteSettingsModal({
   );
 }
 
-function DevicePage({ active, device }) {
+function DevicePage({ active, device, loadBuildInfo }) {
   const controls = device.chromeModel.pairingControls;
   return h(
     SettingsPage,
-    { pageKey: "device", active, title: "This device" },
+    { pageKey: "device", active, title: t("This device") },
     h(
       SettingsSection,
       null,
@@ -105,14 +104,14 @@ function DevicePage({ active, device }) {
                 onClick: device.onForget,
                 type: "button",
               },
-              "Forget this device"
+              t("Forget this device")
             )
           )
         : null
     ),
     h(
       SettingsSection,
-      { title: "Pair with a relay" },
+      { title: t("Pair with a relay") },
       h(
         "form",
         {
@@ -123,18 +122,18 @@ function DevicePage({ active, device }) {
             device.onBeginPairing(device.pairingInputValue);
           },
         },
-        h("label", { className: "settings-label", htmlFor: "pairing-input" }, "Pairing link or code"),
+        h("label", { className: "settings-label", htmlFor: "pairing-input" }, t("Pairing link or code")),
         h("textarea", {
           className: "settings-input",
           id: "pairing-input",
           onChange: (event) => device.onPairingInputChange(event.target.value),
-          placeholder: "Paste the pairing link from the relay's Settings › Devices.",
+          placeholder: t("Paste the pairing link from the relay's Settings › Devices."),
           readOnly: controls.pairingInputReadOnly,
           rows: 3,
           value: device.pairingInputValue,
         }),
         h(ScanPairingButton, { onScanned: device.onBeginPairing }),
-        h("label", { className: "settings-label", htmlFor: "device-label-input" }, "Name this device"),
+        h("label", { className: "settings-label", htmlFor: "device-label-input" }, t("Name this device")),
         h(
           "div",
           { className: "settings-inline-form" },
@@ -142,7 +141,7 @@ function DevicePage({ active, device }) {
             className: "settings-input",
             id: "device-label-input",
             onChange: (event) => device.onDeviceLabelChange(event.target.value),
-            placeholder: "iPhone, Pixel, Safari on iPad",
+            placeholder: t("iPhone, Pixel, Safari on iPad"),
             type: "text",
             value: device.deviceLabel,
           }),
@@ -158,6 +157,7 @@ function DevicePage({ active, device }) {
           )
         )
       )
-    )
+    ),
+    h(SettingsSection, { title: t("Version") }, h(BuildLabel, { loadBuildInfo }))
   );
 }

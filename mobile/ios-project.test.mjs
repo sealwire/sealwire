@@ -22,3 +22,14 @@ test("the app says why it uses the camera", () => {
   const plist = readFileSync(new URL("./ios/App/App/Info.plist", import.meta.url), "utf8");
   assert.match(plist, /<key>NSCameraUsageDescription<\/key>\s*<string>[^<]+<\/string>/);
 });
+
+// The camera prompt is iOS's own dialog, so its Chinese has to come from the app bundle;
+// the simulator has no camera to show it.
+test("the camera prompt has its Chinese", () => {
+  const project = readFileSync(new URL("./ios/App/App.xcodeproj/project.pbxproj", import.meta.url), "utf8");
+  assert.match(project, /knownRegions = \([^)]*"zh-Hans"/);
+  assert.match(project, /zh-Hans\.lproj\/InfoPlist\.strings[^;]*;[^\n]*\n/);
+  assert.match(project, /InfoPlist\.strings in Resources/);
+  const strings = readFileSync(new URL("./ios/App/App/zh-Hans.lproj/InfoPlist.strings", import.meta.url), "utf8");
+  assert.match(strings, /"NSCameraUsageDescription"\s*=\s*"[^"]+";/);
+});

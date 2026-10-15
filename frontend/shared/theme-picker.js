@@ -1,16 +1,16 @@
 import React from "react";
 
+import { t } from "./i18n.js";
 import { getStoredTheme, setStoredTheme, THEME_CHANGED_EVENT } from "./theme.js";
 
 const h = React.createElement;
-const OPTIONS = [
-  { value: "auto", label: "Auto" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
-];
-
 export function ThemePicker({ onChange } = {}) {
   const [value, setValue] = React.useState(getStoredTheme);
+  const options = [
+    { value: "auto", label: t("Auto") },
+    { value: "light", label: t("Light") },
+    { value: "dark", label: t("Dark") },
+  ];
 
   // The desktop app's menu bar can change the theme while this picker is mounted.
   React.useEffect(() => {
@@ -31,9 +31,9 @@ export function ThemePicker({ onChange } = {}) {
     {
       className: "theme-picker",
       role: "radiogroup",
-      "aria-label": "Color theme",
+      "aria-label": t("Color theme"),
     },
-    ...OPTIONS.map((opt) =>
+    ...options.map((opt) =>
       h(
         "button",
         {

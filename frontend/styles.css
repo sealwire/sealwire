@@ -6037,6 +6037,11 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Under This device the label has a whole line to itself, so show all of it. */
+.settings-section .settings-build-label {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .settings-log-link,
 .settings-link {
   flex: none;
@@ -6716,8 +6721,9 @@ textarea.settings-input {
   }
   .settings-nav-footer {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 12px;
+    gap: 8px 12px;
     padding: 8px 4px 0;
   }
   .settings-theme-row {
@@ -6726,8 +6732,9 @@ textarea.settings-input {
     align-items: center;
     gap: 8px;
   }
+  /* Own line: beside two pickers on a phone, the build label shrank to nothing. */
   .settings-build-row {
-    flex: 1;
+    flex: 1 0 100%;
   }
   .settings-panel {
     padding: 14px 14px 20px;

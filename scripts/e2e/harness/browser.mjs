@@ -12,7 +12,9 @@ const CPU_THROTTLE_RATE = Number(process.env.E2E_CPU_THROTTLE) || 0;
 
 export async function launchBrowser({ contextOptions = {}, browserType = chromium } = {}) {
   const browser = await browserType.launch({ headless: true });
-  const context = await browser.newContext(contextOptions);
+  // The page follows the browser's language and the specs read English, so pin it here
+  // rather than inherit whatever the machine runs.
+  const context = await browser.newContext({ locale: "en-US", ...contextOptions });
   if (CPU_THROTTLE_RATE > 1) {
     context.on("page", (page) => {
       context

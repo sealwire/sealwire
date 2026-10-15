@@ -1,5 +1,6 @@
 import React from "react";
 
+import { t } from "../shared/i18n.js";
 import { isNativeApp } from "./surface-wording.js";
 
 const h = React.createElement;
@@ -15,12 +16,15 @@ export function ScanPairingButton({ onScanned }) {
   async function scan() {
     setError(null);
     try {
-      const result = await window.sealwireNative.scanQrCode();
+      const result = await window.sealwireNative.scanQrCode({
+        cancelLabel: t("Cancel"),
+        hint: t("Point at the pairing QR code in your relay's Settings › Devices."),
+      });
       if (result?.value) {
         onScanned(result.value);
       }
     } catch (scanError) {
-      setError(scanError?.message || String(scanError));
+      setError(scanErrorText(scanError));
     }
   }
 
@@ -30,8 +34,22 @@ export function ScanPairingButton({ onScanned }) {
     h(
       "button",
       { className: "settings-button is-primary", onClick: () => void scan(), type: "button" },
-      "Scan QR code"
+      t("Scan QR code")
     ),
     error ? h("p", { className: "scan-pairing-error", role: "alert" }, error) : null
   );
+}
+
+// The scanner reports a code rather than prose, so the message follows the page's language.
+function scanErrorText(error) {
+  switch (error?.code) {
+    case "no-camera":
+      return t("This device has no camera.");
+    case "camera-denied":
+      return t("Camera access is off for Sealwire. Turn it on in Settings › Sealwire › Camera.");
+    case "unavailable":
+      return t("The scanner could not open.");
+    default:
+      return error?.message || String(error);
+  }
 }

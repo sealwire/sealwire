@@ -4,6 +4,7 @@ import { ConversationHeadingBody } from "../shared/conversation-header.js";
 export { ConversationComposer as Composer } from "../shared/composer.js";
 export { SessionSettingsFields } from "../shared/session-settings-fields.js";
 import { formatTimestamp, shortId } from "./utils.js";
+import { t } from "../shared/i18n.js";
 import { ScanPairingButton } from "./scan-pairing-button.js";
 import { surfaceText } from "./surface-wording.js";
 
@@ -326,14 +327,14 @@ export function RelayHomeState({ clientAuth, nicknames, onRenameRelay, onScanPai
     return h(
       "div",
       { className: "thread-empty relay-home-empty" },
-      h("span", { className: "thread-empty-badge" }, "Pairing"),
-      h("h2", null, clientAuth ? "No relays yet" : "Pair your first relay"),
+      h("span", { className: "thread-empty-badge" }, t("Pairing")),
+      h("h2", null, clientAuth ? t("No relays yet") : t("Pair your first relay")),
       h(
         "p",
         null,
         clientAuth
-          ? surfaceText("This browser has a client identity but no relay grants yet. Open a new QR code from a local relay to add one here.")
-          : surfaceText("Open a pairing QR code from your local relay to add your first remote surface to this browser.")
+          ? t(surfaceText("This browser has a client identity but no relay grants yet. Open a new QR code from a local relay to add one here."))
+          : t(surfaceText("Open a pairing QR code from your local relay to add your first remote surface to this browser."))
       ),
       h(ScanPairingButton, { onScanned: onScanPairingCode })
     );
@@ -345,12 +346,12 @@ export function RelayHomeState({ clientAuth, nicknames, onRenameRelay, onScanPai
     h(
       "section",
       { className: "thread-empty relay-home-empty" },
-      h("span", { className: "thread-empty-badge" }, "My relays"),
-      h("h2", null, "Choose a relay"),
+      h("span", { className: "thread-empty-badge" }, t("My relays")),
+      h("h2", null, t("Choose a relay")),
       h(
         "p",
         null,
-        surfaceText("This browser already has access to one or more relays. Open one below, or pair another from your local machine.")
+        t(surfaceText("This browser already has access to one or more relays. Open one below, or pair another from your local machine."))
       ),
       h(ScanPairingButton, { onScanned: onScanPairingCode })
     ),

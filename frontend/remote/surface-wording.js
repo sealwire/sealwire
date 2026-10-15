@@ -10,9 +10,10 @@ export function isNativeApp() {
   return Boolean(globalThis.document?.documentElement?.dataset?.nativeApp);
 }
 
-export function surfaceText(text) {
-  if (!isNativeApp()) {
-    return text;
-  }
+export function appWording(text) {
   return APP_WORDING.reduce((result, [pattern, replacement]) => result.replace(pattern, replacement), text);
+}
+
+export function surfaceText(text) {
+  return isNativeApp() ? appWording(text) : text;
 }

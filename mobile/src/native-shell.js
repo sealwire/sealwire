@@ -9,4 +9,4 @@ Keyboard.setAccessoryBarVisible({ isVisible: false }).catch((error) => {
 // The remote page cannot import Capacitor (it also ships to browsers), so the scanner
 // reaches it through this global.
 const QRScanner = registerPlugin("QRScanner");
-window.sealwireNative = { scanQrCode: () => QRScanner.scan() };
+window.sealwireNative = { scanQrCode: (labels) => QRScanner.scan(labels) };

@@ -6,6 +6,8 @@ final class NativeFeelUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication()
+        // These read English labels, and the simulator follows the Mac's language.
+        app.launchArguments = ["-AppleLanguages", "(en)"]
         app.launch()
         XCTAssertTrue(menuButton.waitForExistence(timeout: 20), "the remote page should render its header")
     }
