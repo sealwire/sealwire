@@ -3071,7 +3071,7 @@ function RemoteSidebar({
         t("Manage")
       )
     ),
-    h(StartSessionSplitButton, {
+    usesDrawer ? null : h(StartSessionSplitButton, {
       activeProvider: sessionPanelModel?.fields?.provider || "",
       buttonId: "remote-session-toggle",
       disabled: !hasUsableRelay,
@@ -3219,27 +3219,67 @@ function RemoteSidebar({
     // into Settings on the right. The theme picker used to be the footer's only
     // occupant — one preference, permanently on screen, with no home to belong
     // to. It now sits at the foot of the Settings nav.
-    h(
-      "div",
-      { className: "sidebar-bottom-bar" },
-      h(
-        "button",
-        {
-          className: "sidebar-settings-button",
-          id: "remote-sidebar-settings",
-          onClick: onOpenSettings,
-          type: "button",
-          title: t("Settings"),
-          "aria-label": t("Settings"),
-        },
-        h("span", {
-          className: "inline-icon",
-          "aria-hidden": "true",
-          dangerouslySetInnerHTML: { __html: SETTINGS_SVG },
+    usesDrawer
+      ? h(SidebarFabBar, {
+          disabled: !hasUsableRelay,
+          onNewSession: () => onOpenStartSessionDialog(activeProjectId),
+          onOpenSettings,
         })
-      )
-    ),
+      : h(
+          "div",
+          { className: "sidebar-bottom-bar" },
+          h(
+            "button",
+            {
+              className: "sidebar-settings-button",
+              id: "remote-sidebar-settings",
+              onClick: onOpenSettings,
+              type: "button",
+              title: t("Settings"),
+              "aria-label": t("Settings"),
+            },
+            h("span", {
+              className: "inline-icon",
+              "aria-hidden": "true",
+              dangerouslySetInnerHTML: { __html: SETTINGS_SVG },
+            })
+          )
+        ),
     h(SidebarResizeHandle, { id: "remote-sidebar-resize" })
+  );
+}
+
+// The phone drawer scrolls as one column, so New session at its top and Settings at its foot
+// both ended up off screen under a long list; floating at the foot, neither ever does.
+// The agent shortcut is left out: the dialog behind New session picks the agent too.
+function SidebarFabBar({ disabled, onNewSession, onOpenSettings }) {
+  return h(
+    "div",
+    { className: "sidebar-fab-bar" },
+    h(
+      "button",
+      {
+        className: "sidebar-fab sidebar-fab-new",
+        disabled,
+        id: "remote-session-toggle",
+        onClick: onNewSession,
+        type: "button",
+      },
+      h(ComposeIcon),
+      h("span", null, t("New session"))
+    ),
+    h(
+      "button",
+      {
+        "aria-label": t("Settings"),
+        className: "sidebar-fab sidebar-fab-settings",
+        id: "remote-sidebar-settings",
+        onClick: onOpenSettings,
+        title: t("Settings"),
+        type: "button",
+      },
+      h("span", { className: "inline-icon", "aria-hidden": "true", dangerouslySetInnerHTML: { __html: SETTINGS_SVG } })
+    )
   );
 }
 

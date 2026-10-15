@@ -66,6 +66,7 @@
       "public-thread-interleaving",
       "remote-mobile-header",
       "remote-no-pinch-zoom",
+      "remote-mobile-drawer-actions",
       "remote-mobile-session-actions",
       "remote-mobile-stream-switch",
       "remote-new-session-menus",
@@ -89,6 +90,7 @@
       "public-thread-interleaving",
       "remote-mobile-header",
       "remote-no-pinch-zoom",
+      "remote-mobile-drawer-actions",
       "remote-mobile-session-actions",
       "remote-mobile-stream-switch",
       "remote-new-session-menus",
@@ -198,6 +200,15 @@
     },
     "remote-no-pinch-zoom": {
       "script": "browser-remote-no-pinch-zoom-e2e.mjs",
+      "tier": "core",
+      "provider": "stub",
+      "transport": "static-remote",
+      "coverage": [
+        "mobile-layout"
+      ]
+    },
+    "remote-mobile-drawer-actions": {
+      "script": "browser-remote-mobile-drawer-actions-e2e.mjs",
       "tier": "core",
       "provider": "stub",
       "transport": "static-remote",

@@ -5854,6 +5854,56 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
   align-items: center;
 }
 
+/* Sticky inside the scrolling drawer: pinned to its foot when the list is long, and pushed
+   there by `margin-top: auto` when it is short. */
+.sidebar-fab-bar {
+  position: sticky;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: auto;
+  pointer-events: none;
+}
+.sidebar-fab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  border-radius: 999px;
+  box-shadow: var(--shadow-lg);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.sidebar-fab-new {
+  gap: 8px;
+  min-width: 168px;
+  padding: 0 24px;
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: var(--text-body);
+  font-weight: var(--weight-medium);
+}
+.sidebar-fab-new:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.sidebar-fab-settings {
+  width: 44px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+.sidebar-fab-settings .inline-icon,
+.sidebar-fab-settings .inline-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
 /* Sidebar footer: relay host / online status line (replaces the theme picker,
    which moved to the foot of the Settings nav), with Settings anchored at the far end
    — status on the left, the way in on the right. Settings used to be a gear in
