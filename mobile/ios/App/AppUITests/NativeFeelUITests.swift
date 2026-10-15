@@ -34,6 +34,17 @@ final class NativeFeelUITests: XCTestCase {
         XCTAssertEqual(editMenu.count, 0, "long-pressing interface text opened the copy menu")
     }
 
+    func testSettingsClearsTheStatusBar() {
+        menuButton.tap()
+        let settings = app.webViews.buttons["Settings"].firstMatch
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), "the drawer should have a Settings button")
+        settings.tap()
+        let close = app.webViews.buttons["Close settings"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "Settings should open")
+        XCTAssertGreaterThan(statusBarBottom, 0)
+        XCTAssertGreaterThanOrEqual(close.frame.minY, statusBarBottom, "Settings' close button sits under the clock and battery")
+    }
+
     // The simulator has no camera, so the native scanner's refusal is what proves the
     // button reached it rather than doing nothing.
     func testScanButtonReachesTheNativeScanner() throws {

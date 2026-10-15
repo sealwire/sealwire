@@ -21,3 +21,12 @@ html[data-native-app] .app-shell[data-remote-nav-mode="drawer"] .sidebar {
   padding-top: calc(16px + env(safe-area-inset-top));
   padding-bottom: calc(16px + env(safe-area-inset-bottom));
 }
+
+/* Dialogs sit in the top layer, so the header's padding does not move them; on a phone
+   Settings is full height and has to leave room for the island and home indicator itself. */
+@media (max-width: 640px) {
+  html[data-native-app] .settings-modal[open] {
+    top: calc(50% + (env(safe-area-inset-top) - env(safe-area-inset-bottom)) / 2);
+    height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  }
+}
