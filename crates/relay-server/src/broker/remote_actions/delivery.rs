@@ -1312,6 +1312,8 @@ pub(super) fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActio
         | RemoteActionKind::StopGoal
         | RemoteActionKind::GoalCard
         | RemoteActionKind::RegisterPushSubscription
+        | RemoteActionKind::RegisterApnsToken
+        | RemoteActionKind::UnregisterApnsToken
         | RemoteActionKind::UnregisterPushSubscription => RemoteActionResultKind::RemoteActionAck,
     }
 }

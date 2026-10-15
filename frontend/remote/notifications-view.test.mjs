@@ -3,6 +3,12 @@ import assert from "node:assert/strict";
 
 import { remoteNotificationsHint, shouldAutoSubscribe } from "./notifications-view.js";
 
+test("native enrollment needs permission but no VAPID key", () => {
+  assert.equal(shouldAutoSubscribe({ native: true, supported: true, permissionGranted: true }), true);
+  assert.match(remoteNotificationsHint({ native: true, supported: true, permission: "denied" }), /iOS settings/);
+  assert.match(remoteNotificationsHint({ native: true, supported: true, apnsAvailable: true, subscribed: true }), /push alerts/);
+});
+
 // --- remoteNotificationsHint: informational status, never an action ----------
 
 test("subscribed device is told alerts are on", () => {

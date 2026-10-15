@@ -643,6 +643,14 @@ pub(super) async fn execute_remote_action(
                 ..RemoteActionOutcome::default()
             })
             .map_err(ask_user_answer_error_message),
+        RemoteActionRequest::RegisterApnsToken { input } => state
+            .register_apns_token(input)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
+        RemoteActionRequest::UnregisterApnsToken { device_id } => state
+            .unregister_apns_token(device_id.ok_or_else(|| "missing device id".to_string())?)
+            .await
+            .map(|_| RemoteActionOutcome::default()),
         RemoteActionRequest::RegisterPushSubscription { input } => state
             .register_push_subscription(input)
             .await

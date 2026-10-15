@@ -167,6 +167,7 @@ fn make_snapshot() -> SessionSnapshot {
         workflow_activity: vec![],
         workflows_revision: 0,
         push_vapid_public_key: None,
+        push_apns_available: false,
         projects_revision: 0,
         threads_revision: 0,
         thread_workspaces_revision: 0,

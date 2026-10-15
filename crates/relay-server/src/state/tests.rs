@@ -106,6 +106,7 @@ fn test_persisted_state() -> PersistedRelayState {
         thread_forked_from: Default::default(),
         thread_workspace: Default::default(),
         push_subscriptions: std::collections::HashMap::new(),
+        apns_tokens: std::collections::HashMap::new(),
         projects: Default::default(),
         thread_project_id: Default::default(),
         thread_custom_name: Default::default(),
@@ -406,6 +407,7 @@ fn test_cached_remote_action_result(action_kind: &str, ok: bool) -> CachedRemote
             workflow_activity: Vec::new(),
             workflows_revision: 0,
             push_vapid_public_key: None,
+            push_apns_available: false,
             projects_revision: 0,
             threads_revision: 0,
             thread_workspaces_revision: 0,
@@ -3373,6 +3375,49 @@ fn pairing_rejects_invalid_secret_and_mints_a_fresh_payload_secret() {
         token
     );
     assert_ne!(token, "bad-token");
+}
+
+#[test]
+fn apns_registration_persists_rotates_and_is_removed_on_revoke() {
+    let mut relay = test_state();
+    let ticket = issue_test_pairing_ticket(
+        &mut relay,
+        "ws://127.0.0.1:8789",
+        "room-a",
+        "relay-a",
+        Some(60),
+    );
+    let (device, _) = relay
+        .consume_pairing_ticket(
+            &ticket.pairing_id,
+            &ticket.pairing_secret,
+            "phone",
+            None,
+            TEST_VERIFY_KEY_B64.to_string(),
+            None,
+            "surface-phone",
+            100,
+        )
+        .unwrap();
+    let mut input = crate::state::ApnsTokenInput {
+        token: "ab".repeat(32),
+        environment: super::relay::ApnsEnvironment::Development,
+        topic: "dev.sealwire.mobile".into(),
+        relay_id: "relay-b".into(),
+        device_id: Some(device.device_id.clone()),
+    };
+    relay.register_apns_token(input.clone()).unwrap();
+    relay.register_apns_token(input.clone()).unwrap();
+    input.token = "cd".repeat(32);
+    relay.register_apns_token(input).unwrap();
+    assert_eq!(relay.apns_tokens.len(), 1);
+    let persisted = PersistedRelayState::from_relay(&relay);
+    super::core_store::assert_rows_round_trip(&persisted);
+    let mut restored = test_state();
+    restored.apply_persisted(&persisted);
+    assert_eq!(restored.apns_tokens, relay.apns_tokens);
+    assert!(restored.revoke_paired_device(&device.device_id, 101));
+    assert!(restored.apns_tokens.is_empty());
 }
 
 #[test]

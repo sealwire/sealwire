@@ -105,7 +105,7 @@ pub enum PushKind {
 }
 
 impl PushKind {
-    fn tag_slug(self) -> &'static str {
+    pub(super) fn tag_slug(self) -> &'static str {
         match self {
             PushKind::NeedsInput => "needs_input",
             PushKind::Completed => "completed",
@@ -604,7 +604,7 @@ fn encrypt_aes128gcm_with(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SendOutcome {
+pub(super) enum SendOutcome {
     Delivered,
     /// 404/410 — the subscription is dead; prune it.
     Gone,
@@ -618,6 +618,7 @@ pub struct PushDispatcher {
     relay: Arc<RwLock<RelayState>>,
     http: reqwest::Client,
     vapid: VapidKeys,
+    apns: Option<super::apns::ApnsSender>,
 }
 
 impl PushDispatcher {
@@ -625,19 +626,22 @@ impl PushDispatcher {
     pub fn spawn(
         relay: Arc<RwLock<RelayState>>,
         vapid: VapidKeys,
-    ) -> Result<mpsc::UnboundedSender<PushJob>, String> {
+    ) -> Result<(mpsc::UnboundedSender<PushJob>, bool), String> {
         let proxy = configured_proxy();
         if proxy.is_some() {
             info!("web push goes through the proxy in the environment; push addresses are not checked");
         }
         let (tx, rx) = mpsc::unbounded_channel();
+        let apns = super::apns::ApnsSender::from_env();
+        let apns_available = apns.is_some();
         let dispatcher = Self {
             relay,
             http: build_push_client(system_lookup(), proxy.as_deref())?,
             vapid,
+            apns,
         };
         tokio::spawn(dispatcher.run(rx));
-        Ok(tx)
+        Ok((tx, apns_available))
     }
 
     async fn run(self, mut rx: mpsc::UnboundedReceiver<PushJob>) {
@@ -647,6 +651,33 @@ impl PushDispatcher {
     }
 
     async fn handle(&self, job: PushJob) {
+        if let Some(apns) = &self.apns {
+            let tokens: Vec<_> = self
+                .relay
+                .read()
+                .await
+                .apns_tokens
+                .values()
+                .cloned()
+                .collect();
+            for token in tokens {
+                {
+                    let relay = self.relay.read().await;
+                    if !relay.paired_devices.contains_key(&token.device_id)
+                        || relay.apns_tokens.get(&token.device_id) != Some(&token)
+                        || !relay.device_reaches_thread(&job.thread_id, &token.device_id)
+                    {
+                        continue;
+                    }
+                }
+                if matches!(apns.send(&self.http, &token, &job).await, SendOutcome::Gone) {
+                    let mut relay = self.relay.write().await;
+                    if relay.apns_tokens.get(&token.device_id) == Some(&token) {
+                        relay.unregister_apns_token(&token.device_id);
+                    }
+                }
+            }
+        }
         let subscriptions = {
             let relay = self.relay.read().await;
             relay.push_subscriptions_vec()
@@ -1009,6 +1040,7 @@ mod tests {
             relay: relay.clone(),
             http: push_client(lookup),
             vapid: test_vapid(),
+            apns: None,
         }
         .handle(PushJob::new(PushKind::NeedsInput, "t1"))
         .await;
@@ -1194,6 +1226,54 @@ mod tests {
             302,
             "push client must not follow redirects (SSRF guard)"
         );
+    }
+
+    #[tokio::test]
+    async fn apns_dispatcher_sends_without_web_push_and_excludes_unpaired_or_out_of_scope_devices()
+    {
+        let relay = test_relay();
+        let other = tempfile::tempdir().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        {
+            let mut guard = relay.write().await;
+            pair(&mut guard, "open", Vec::new());
+            pair(
+                &mut guard,
+                "limited",
+                vec![other
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()],
+            );
+            guard.ensure_runtime_for_thread("t1").current_cwd = "/tmp/push-test".into();
+            for device in ["open", "limited", "revoked"] {
+                guard.apns_tokens.insert(
+                    device.into(),
+                    super::super::ApnsToken {
+                        token: "ab".repeat(32),
+                        environment: super::super::ApnsEnvironment::Development,
+                        topic: "dev.sealwire.mobile".into(),
+                        device_id: device.into(),
+                        relay_id: "relay-b".into(),
+                    },
+                );
+            }
+        }
+        PushDispatcher {
+            relay,
+            http: push_client(recording_lookup(seen.clone())),
+            vapid: test_vapid(),
+            apns: Some(super::super::apns::ApnsSender::new(
+                SigningKey::from_slice(&[7; 32]).unwrap(),
+                "KEY".into(),
+                "TEAM".into(),
+            )),
+        }
+        .handle(PushJob::new(PushKind::Completed, "t1"))
+        .await;
+        assert_eq!(*seen.lock().unwrap(), ["api.sandbox.push.apple.com"]);
     }
 
     #[tokio::test]

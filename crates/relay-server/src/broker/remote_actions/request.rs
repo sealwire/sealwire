@@ -16,7 +16,7 @@ use crate::{
         StartWorkflowInput, StopTurnInput, SubmitAskUserAnswerInput, ThreadsQuery,
         UpdateSessionSettingsInput, WatchThreadsInput,
     },
-    state::{PushSubscriptionInput, RequestClass},
+    state::{ApnsTokenInput, PushSubscriptionInput, RequestClass},
 };
 
 #[derive(Deserialize)]
@@ -284,6 +284,13 @@ pub(in crate::broker) enum RemoteActionRequest {
     RegisterPushSubscription {
         input: PushSubscriptionInput,
     },
+    RegisterApnsToken {
+        input: ApnsTokenInput,
+    },
+    UnregisterApnsToken {
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     UnregisterPushSubscription {
         endpoint: String,
         #[serde(default)]
@@ -344,6 +351,8 @@ impl RemoteActionRequest {
             Self::StopGoal { .. } => RemoteActionKind::StopGoal,
             Self::GoalCard { .. } => RemoteActionKind::GoalCard,
             Self::RegisterPushSubscription { .. } => RemoteActionKind::RegisterPushSubscription,
+            Self::RegisterApnsToken { .. } => RemoteActionKind::RegisterApnsToken,
+            Self::UnregisterApnsToken { .. } => RemoteActionKind::UnregisterApnsToken,
             Self::UnregisterPushSubscription { .. } => RemoteActionKind::UnregisterPushSubscription,
         }
     }
@@ -632,6 +641,13 @@ impl RemoteActionRequest {
                 input.device_id = Some(device_id);
                 Self::RegisterPushSubscription { input }
             }
+            Self::RegisterApnsToken { mut input } => {
+                input.device_id = Some(device_id);
+                Self::RegisterApnsToken { input }
+            }
+            Self::UnregisterApnsToken { .. } => Self::UnregisterApnsToken {
+                device_id: Some(device_id),
+            },
             Self::UnregisterPushSubscription { endpoint, .. } => Self::UnregisterPushSubscription {
                 endpoint,
                 device_id: Some(device_id),
@@ -693,6 +709,8 @@ pub(in crate::broker) enum RemoteActionKind {
     StopGoal,
     GoalCard,
     RegisterPushSubscription,
+    RegisterApnsToken,
+    UnregisterApnsToken,
     UnregisterPushSubscription,
 }
 
@@ -749,6 +767,8 @@ impl RemoteActionKind {
             Self::StopGoal => "stop_goal",
             Self::GoalCard => "goal_card",
             Self::RegisterPushSubscription => "register_push_subscription",
+            Self::RegisterApnsToken => "register_apns_token",
+            Self::UnregisterApnsToken => "unregister_apns_token",
             Self::UnregisterPushSubscription => "unregister_push_subscription",
         }
     }

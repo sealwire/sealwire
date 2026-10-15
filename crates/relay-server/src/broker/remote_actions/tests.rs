@@ -860,6 +860,7 @@ fn make_snapshot() -> SessionSnapshot {
         workflow_activity: vec![],
         workflows_revision: 0,
         push_vapid_public_key: None,
+        push_apns_available: false,
         projects_revision: 0,
         threads_revision: 0,
         thread_workspaces_revision: 0,
@@ -1192,6 +1193,48 @@ fn project_action_round_trips_and_binds_authenticated_device() {
     }
 
     assert!(requires_signed_attempt(RemoteActionKind::ProjectAction));
+}
+
+#[test]
+fn apns_actions_bind_authenticated_device_and_are_signed_writes() {
+    let reg: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "register_apns_token", "input": {
+            "token": "ab".repeat(32), "environment": "development",
+            "topic": "dev.sealwire.mobile", "device_id": "victim", "relay_id": "relay-b"
+        }
+    }))
+    .unwrap();
+    assert_eq!(reg.kind(), RemoteActionKind::RegisterApnsToken);
+    assert_eq!(
+        serde_json::to_value(&reg).unwrap()["input"]["relay_id"],
+        "relay-b"
+    );
+    match reg.bind_device("phone".into(), "surface", test_origin()) {
+        RemoteActionRequest::RegisterApnsToken { input } => {
+            assert_eq!(input.device_id.as_deref(), Some("phone"))
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
+    let unreg: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "unregister_apns_token", "device_id": "victim"
+    }))
+    .unwrap();
+    match unreg.bind_device("phone".into(), "surface", test_origin()) {
+        RemoteActionRequest::UnregisterApnsToken { device_id } => {
+            assert_eq!(device_id.as_deref(), Some("phone"))
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
+    for kind in [
+        RemoteActionKind::RegisterApnsToken,
+        RemoteActionKind::UnregisterApnsToken,
+    ] {
+        assert!(requires_signed_attempt(kind));
+        assert!(matches!(
+            super::request::remote_action_class(kind),
+            crate::state::RequestClass::Write
+        ));
+    }
 }
 
 #[test]

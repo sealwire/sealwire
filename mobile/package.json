@@ -6,12 +6,13 @@
     "build": "vite build -c vite.config.mjs",
     "sync": "npm run build && cap sync ios",
     "ios": "cap open ios",
-    "test": "npm run build && node --test build.test.mjs ios-project.test.mjs"
+    "test": "npm run build && node --test *.test.mjs"
   },
   "dependencies": {
     "@capacitor/core": "8.5.3",
     "@capacitor/ios": "8.5.3",
-    "@capacitor/keyboard": "8.0.6"
+    "@capacitor/keyboard": "8.0.6",
+    "@capacitor/push-notifications": "8.1.3"
   },
   "devDependencies": {
     "@capacitor/cli": "8.5.3"

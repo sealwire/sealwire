@@ -201,6 +201,12 @@ export async function recoverRemoteSession(reason) {
 
 export async function dispatchOrRecover(actionType, request, options = {}) {
   const skipPreclaim = options.skipPreclaim === true;
+  const checkRelay = () => {
+    if (options.expectedRelayId !== undefined && state.remoteAuth?.relayId !== options.expectedRelayId) {
+      throw new Error("remote action relay changed");
+    }
+  };
+  checkRelay();
 
   if (requiresSessionClaim(actionType) && !skipPreclaim) {
     await ensureRemoteClaim({
@@ -209,6 +215,8 @@ export async function dispatchOrRecover(actionType, request, options = {}) {
       syncAfterClaim: false,
     });
   }
+
+  checkRelay();
 
   // An expired or replaced session comes back as a re-authorization notice and is
   // retried inside `dispatchRemoteAction` under the SAME action id. Retrying here under a

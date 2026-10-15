@@ -258,6 +258,7 @@ pub struct SessionSnapshot {
     /// dispatcher is wired. Not secret — safe to publish in the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_vapid_public_key: Option<String>,
+    pub push_apns_available: bool,
     /// Cache key for the dedicated Projects channel. The full Projects payload
     /// (names + membership) is deliberately NOT embedded in the snapshot: it can grow
     /// unbounded (a paired device can create many projects / arbitrary memberships),

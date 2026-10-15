@@ -249,6 +249,39 @@ fn a_database_from_a_newer_build_is_refused_rather_than_downgraded() {
     assert_eq!(version, 99, "the newer schema stamp must not be rewritten");
 }
 
+#[test]
+fn schema_eighteen_adds_apns_tokens_without_losing_existing_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sealwire.db");
+    drop(UsageStore::open(&path));
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TABLE apns_token; PRAGMA user_version = 17;
+        INSERT INTO relay_setting (key, body) VALUES ('apns-test-canary', 'kept');",
+    )
+    .unwrap();
+    drop(conn);
+    let store = UsageStore::open(&path);
+    let count = store
+        .with_connection(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM apns_token", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|e| e.to_string())
+        })
+        .expect("a reopened database must have the native token table");
+    assert_eq!(count, 0);
+    let kept: String = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT body FROM relay_setting WHERE key = 'apns-test-canary'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, "kept");
+}
+
 /// The constant and the migration chain must agree.
 ///
 /// `migrate` refuses any file whose `user_version` is above

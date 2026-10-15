@@ -591,13 +591,15 @@ impl AppState {
         };
         let push = vapid.and_then(|vapid| {
             let public_key = vapid.public_b64url().to_string();
-            PushDispatcher::spawn(relay.clone(), vapid).map(|push_tx| (push_tx, public_key))
+            PushDispatcher::spawn(relay.clone(), vapid)
+                .map(|(push_tx, apns)| (push_tx, public_key, apns))
         });
         match push {
-            Ok((push_tx, public_key)) => {
+            Ok((push_tx, public_key, apns)) => {
                 {
                     let mut relay = relay.write().await;
                     relay.set_push_runtime(push_tx, public_key);
+                    relay.push_apns_available = apns;
                 }
                 spawn_push_attention_task(relay.clone(), change_tx.subscribe());
             }
@@ -975,6 +977,18 @@ in thread {thread_id}: {error}"
     #[cfg(test)]
     pub(crate) async fn run_stale_turn_watchdog_once(&self, now: u64) {
         self.stop_stale_turns_at(now).await;
+    }
+
+    pub async fn register_apns_token(
+        &self,
+        input: crate::state::ApnsTokenInput,
+    ) -> Result<(), String> {
+        self.relay.write().await.register_apns_token(input)
+    }
+
+    pub async fn unregister_apns_token(&self, device_id: String) -> Result<(), String> {
+        self.relay.write().await.unregister_apns_token(&device_id);
+        Ok(())
     }
 
     /// Register/replace a remote device's Web Push subscription (device-keyed).

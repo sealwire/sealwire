@@ -102,8 +102,12 @@ import { getRemoteServiceWorkerRegistration } from "./pwa.js";
 import {
   ensurePushSubscription,
   hasActiveSubscription,
+  nativePush,
+  pushSupported,
+  requestPushPermission,
 } from "./push-subscribe.js";
 import { remoteNotificationsHint, shouldAutoSubscribe } from "./notifications-view.js";
+import { handleNativePushAction } from "./native-push-navigation.js";
 import {
   fetchTranscriptEntryDetail as fetchRemoteTranscriptEntryDetail,
   fetchRemoteReviews,
@@ -208,7 +212,6 @@ import {
 } from "../shared/stop-pending-session.js";
 import {
   configureThreadNotifications,
-  ensureNotificationPermission,
   isDocumentForeground,
   notificationPermission,
 } from "../shared/thread-notify.js";
@@ -414,6 +417,8 @@ function RemoteApp() {
   const [askUserQuestionDetailLoading, setAskUserQuestionDetailLoading] = useState(() => new Set());
   const [askUserQuestionDetailErrors, setAskUserQuestionDetailErrors] = useState(() => new Map());
   const [remoteUiStore] = useState(() => createRemoteUiStore());
+  const [nativePushTarget, setNativePushTarget] = useState(null);
+  const nativePushProgress = useRef(null);
   const remoteUi = useRemoteUiStoreState(remoteUiStore);
   useEffect(() => {
     configureRemoteStopPending((threadId, value, turnMarker = true) => {
@@ -2090,10 +2095,45 @@ function RemoteApp() {
   // writes the result into the store. The auto-enroll effect keys off
   // `pushPermission`, so a grant that isn't stored would never trigger subscribe.
   async function requestAndStorePermission() {
-    const permission = await ensureNotificationPermission();
+    const permission = await requestPushPermission();
     remoteUiStore.getState().setPushPermission(permission);
     return permission;
   }
+
+  useEffect(() => {
+    let removeActionListener;
+    const connectNativePush = () => {
+      const push = nativePush();
+      if (!push) return;
+      removeActionListener?.();
+      remoteUiStore.getState().setPushSupported(pushSupported());
+      removeActionListener = push.onAction(setNativePushTarget);
+      void push.checkPermissions().then(({ receive }) => {
+        remoteUiStore.getState().setPushPermission(receive);
+      }).catch((error) => console.warn("Native notification permission check failed", error));
+    };
+    connectNativePush();
+    window.addEventListener("sealwire-native-ready", connectNativePush);
+    return () => {
+      window.removeEventListener("sealwire-native-ready", connectNativePush);
+      removeActionListener?.();
+    };
+  }, [remoteUiStore]);
+
+  useEffect(() => {
+    if (!nativePushTarget) return;
+    if (nativePushProgress.current?.action !== nativePushTarget) {
+      nativePushProgress.current = { action: nativePushTarget, relaySelected: false };
+    }
+    const consumed = handleNativePushAction(nativePushTarget, {
+      remoteProfiles: currentState.remoteProfiles,
+      currentRelayId: currentState.remoteAuth?.relayId,
+      ready: Boolean(currentState.socketConnected && session),
+      selectRelay: (relayId) => { void handlers.onSelectRelay(relayId); },
+      openThread: (threadId) => { void handleResumeThread(threadId); },
+    }, nativePushProgress.current);
+    if (consumed) setNativePushTarget(null);
+  }, [nativePushTarget, currentState.remoteProfiles, currentState.remoteAuth?.relayId, currentState.socketConnected, session]);
 
   async function resolvePushRegistration() {
     const captured = getRemoteServiceWorkerRegistration();
@@ -2117,24 +2157,26 @@ function RemoteApp() {
   // since a push subscription persists in the SW across reloads. Re-runs when the
   // VAPID key arrives or the permission flips (set at pairing / thread-open).
   useEffect(() => {
+    if (!currentState.remoteAuth?.payloadSecret || !currentState.socketConnected) return;
     if (
       !shouldAutoSubscribe({
+        native: Boolean(nativePush()),
         supported: remoteUi.pushSupported,
         hasVapidKey: Boolean(vapidPublicKey),
-        permissionGranted: notificationPermission() === "granted",
+        permissionGranted: nativePush() ? remoteUi.pushPermission === "granted" : notificationPermission() === "granted",
       })
     ) {
       return;
     }
     void (async () => {
-      const registration = await resolvePushRegistration();
+      const registration = nativePush() ? null : await resolvePushRegistration();
       // Always (re-)assert the subscription to the relay. The browser subscription
       // persists across reloads, but the relay may have missed the original
       // register (it's fire-and-forget and can be lost in transit).
       // ensurePushSubscription reuses the existing browser subscription, and the
       // relay dedups an identical register, so this reconcile is idempotent and
       // cheap — one request per load, and the relay no-ops when nothing changed.
-      const result = await ensurePushSubscription({ vapidPublicKey, registration });
+      const result = await ensurePushSubscription({ vapidPublicKey, registration, relayId: currentState.remoteAuth?.relayId });
       if (result?.ok) {
         remoteUiStore.getState().setPushSubscribed(true);
         return;
@@ -2144,7 +2186,7 @@ function RemoteApp() {
       const active = await hasActiveSubscription(registration);
       remoteUiStore.getState().setPushSubscribed(active);
     })();
-  }, [vapidPublicKey, remoteUi.pushSupported, remoteUi.pushPermission, remoteUiStore]);
+  }, [vapidPublicKey, remoteUi.pushSupported, remoteUi.pushPermission, remoteUiStore, currentState.remoteAuth?.relayId, currentState.remoteAuth?.payloadSecret, currentState.socketConnected]);
 
   // Re-register the subscription when the SW reports the push subscription
   // changed (browser-rotated endpoint). Permission must already be granted.
@@ -2159,7 +2201,7 @@ function RemoteApp() {
       if (notificationPermission() === "granted" && vapidPublicKey) {
         void (async () => {
           const registration = await resolvePushRegistration();
-          const result = await ensurePushSubscription({ vapidPublicKey, registration });
+          const result = await ensurePushSubscription({ vapidPublicKey, registration, relayId: currentState.remoteAuth?.relayId });
           remoteUiStore.getState().setPushSubscribed(Boolean(result?.ok));
         })();
       }
@@ -2791,6 +2833,8 @@ function RemoteApp() {
       sessionMetaModel,
       sessionPath: headerModel.sessionPath || t("No workspace path yet."),
       pushModel: {
+        native: Boolean(nativePush()),
+        apnsAvailable: Boolean(session?.push_apns_available),
         supported: remoteUi.pushSupported,
         permission: remoteUi.pushPermission,
         subscribed: remoteUi.pushSubscribed,

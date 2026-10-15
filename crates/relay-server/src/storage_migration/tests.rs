@@ -327,7 +327,7 @@ fn a_relay_without_a_database_yet_is_imported_into_a_new_one() {
 
     import(&old.paths).expect("import");
 
-    assert_eq!(user_version(&old.paths.db), 17);
+    assert_eq!(user_version(&old.paths.db), 18);
     assert_eq!(
         count(&old.paths.db, "SELECT COUNT(*) FROM paired_device"),
         1

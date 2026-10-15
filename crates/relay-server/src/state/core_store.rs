@@ -15,7 +15,7 @@ use super::PERSISTED_STATE_VERSION;
 /// Settings live in one table keyed by name; every other table holds one entity per row.
 pub(crate) const SETTINGS_TABLE: &str = "relay_setting";
 
-pub(crate) const ENTITY_TABLES: [&str; 23] = [
+pub(crate) const ENTITY_TABLES: [&str; 24] = [
     SETTINGS_TABLE,
     "session_settings",
     "session_fork",
@@ -30,6 +30,7 @@ pub(crate) const ENTITY_TABLES: [&str; 23] = [
     "device_record",
     "paired_device",
     "push_subscription",
+    "apns_token",
     "reviewer_thread",
     "project",
     "job_review",
@@ -221,6 +222,9 @@ pub(crate) fn rows_of(state: &PersistedRelayState) -> Result<CoreRows, String> {
         rows.device_secrets
             .insert(key.clone(), device.payload_secret.clone());
     }
+    for (key, value) in &state.apns_tokens {
+        rows.put("apns_token", key, value)?;
+    }
     for (key, value) in &state.push_subscriptions {
         rows.put("push_subscription", key, value)?;
     }
@@ -343,6 +347,7 @@ pub(crate) fn state_from_rows(
         orchestrator_system_prompt_version: rows.setting("orchestrator_system_prompt_version")?,
         orchestrator_proposals: proposals.into_iter().map(|(_, card)| card).collect(),
         push_subscriptions: rows.map("push_subscription")?,
+        apns_tokens: rows.map("apns_token")?,
         projects: rows.map("project")?,
         thread_project_id: rows.map("session_project")?,
         thread_custom_name: rows.map("session_custom_name")?,

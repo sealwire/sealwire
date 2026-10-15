@@ -814,6 +814,7 @@ impl RelayState {
         // Stop all relay-originated push to a revoked device: drop its stored
         // subscriptions so the dispatcher no longer sends thread names/status to it.
         self.push_subscriptions.remove(device_id);
+        self.apns_tokens.remove(device_id);
         // Same for live transcript deltas — a revoked device must stop being a
         // publish target immediately, not merely fail to decrypt.
         self.clear_watched_threads_for_device(device_id);

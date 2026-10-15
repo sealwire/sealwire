@@ -13,6 +13,23 @@
  */
 
 import { dispatchOrRecover } from "./actions.js";
+import { isNativeApp } from "./surface-wording.js";
+import { ensureNotificationPermission } from "../shared/thread-notify.js";
+
+export function nativePush() {
+  return isNativeApp() ? window.sealwireNative?.push || null : null;
+}
+
+export async function requestPushPermission() {
+  if (!nativePush()) return ensureNotificationPermission();
+  try {
+    const { receive } = await nativePush().requestPermissions();
+    return receive === "granted" || receive === "denied" ? receive : "default";
+  } catch (error) {
+    console.warn("Native notification permission request failed", error);
+    return "denied";
+  }
+}
 
 /**
  * Convert a base64url VAPID public key into the Uint8Array the
@@ -34,6 +51,7 @@ export function urlBase64ToUint8Array(base64String) {
 
 /** True iff this environment can subscribe to Web Push in a secure context. */
 export function pushSupported() {
+  if (isNativeApp()) return Boolean(nativePush());
   return (
     typeof navigator !== "undefined" &&
     "serviceWorker" in navigator &&
@@ -69,7 +87,27 @@ export function subscriptionToInput(sub) {
  * @param {{ vapidPublicKey?: string | null, registration?: ServiceWorkerRegistration | null }} options
  * @returns {Promise<{ ok: boolean, reason?: string, subscription?: PushSubscription }>}
  */
-export async function ensurePushSubscription({ vapidPublicKey, registration } = {}) {
+export async function ensurePushSubscription({ vapidPublicKey, registration, relayId, dispatch = dispatchOrRecover } = {}) {
+  const native = nativePush();
+  if (native) {
+    let input;
+    try {
+      if ((await native.checkPermissions()).receive !== "granted") {
+        return { ok: false, reason: "permission" };
+      }
+      if (!relayId) return { ok: false, reason: "missing-relay-id" };
+      input = await native.register();
+    } catch (error) {
+      console.warn("Native push registration failed", error);
+      return { ok: false, reason: "native-registration-failed" };
+    }
+    try {
+      await dispatch("register_apns_token", { input: { ...input, relay_id: relayId } }, { expectedRelayId: relayId });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: error?.message || "subscribe-failed" };
+    }
+  }
   if (!pushSupported()) {
     return { ok: false, reason: "unsupported" };
   }
@@ -112,6 +150,14 @@ export async function ensurePushSubscription({ vapidPublicKey, registration } = 
  * @returns {Promise<{ ok: boolean, reason?: string }>}
  */
 export async function disablePushSubscription({ registration } = {}) {
+  if (nativePush()) {
+    try {
+      await dispatchOrRecover("unregister_apns_token", {});
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: error?.message || "unsubscribe-failed" };
+    }
+  }
   if (!registration?.pushManager) {
     return { ok: false, reason: "missing-registration" };
   }

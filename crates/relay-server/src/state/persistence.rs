@@ -191,6 +191,9 @@ pub(super) struct PersistedRelayState {
     /// `#[serde(default)]` keeps old state files loadable (empty map).
     #[serde(default)]
     pub(super) push_subscriptions: std::collections::HashMap<String, Vec<super::PushSubscription>>,
+    // Native tokens live in database rows; the JSON format is only an import source.
+    #[serde(skip)]
+    pub(super) apns_tokens: std::collections::HashMap<String, super::ApnsToken>,
     /// Persisted Projects (named session groupings), keyed by project id.
     /// `#[serde(default)]` keeps pre-Projects state files loadable (empty map).
     #[serde(default)]
@@ -405,6 +408,7 @@ impl PersistedRelayState {
                 .cloned()
                 .collect(),
             push_subscriptions: relay.push_subscriptions.clone(),
+            apns_tokens: relay.apns_tokens.clone(),
             projects: relay.projects.clone(),
             thread_project_id: relay
                 .thread_project_id

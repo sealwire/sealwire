@@ -1,4 +1,5 @@
 export default {
+  "Notifications are blocked in iOS settings.": "通知已在 iOS 设置中关闭。",
   "Providers": "Agent",
   "This device": "这台设备",
   "Not paired": "未配对",

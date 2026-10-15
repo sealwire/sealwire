@@ -1540,6 +1540,26 @@ test("a relay leaving suspends action deadlines rather than failing them", async
   );
 });
 
+test("a scoped push registration cannot cross relays while awaiting its claim", async () => {
+  installBrowserStubs();
+  const { state } = await import("./state.js");
+  const { dispatchOrRecover } = await import("./actions.js");
+  const previous = { remoteAuth: state.remoteAuth, socket: state.socket, claimPromise: state.claimPromise };
+  let finishClaim;
+  state.remoteAuth = { relayId: "relay-a" };
+  state.socket = { readyState: 1, send: () => assert.fail("sent a registration to the other relay") };
+  state.claimPromise = new Promise((resolve) => { finishClaim = resolve; });
+  try {
+    const pending = dispatchOrRecover("register_apns_token", {}, { expectedRelayId: "relay-a" });
+    const rejected = assert.rejects(pending, /relay changed/);
+    state.remoteAuth = { relayId: "relay-b" };
+    finishClaim();
+    await rejected;
+  } finally {
+    Object.assign(state, previous);
+  }
+});
+
 // A registration the relay never received leaves the phone silent while the UI says it
 // is subscribed. The browser socket being open is not evidence the relay heard anything:
 // the broker accepts the frame whether or not a relay peer is in the room. Keeping the

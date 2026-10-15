@@ -44,14 +44,14 @@ pub(crate) use self::relay::{
 };
 pub(crate) use self::relay::{
     import_legacy_vapid_file, load_or_generate_vapid, next_relay_ingress, parse_ask_user_questions,
-    thread_status_is_working, ApprovalKind, BrokerPendingMessage, CachedRemoteActionResult,
-    ClaimChallenge, DeviceRecord, IssuedClaimChallenge, PairedDevice, PairingBroker,
-    PendingApproval, PendingAskUserQuestion, PendingPairingResult, PendingTranscriptDelta,
-    ProviderEventSession, PushDispatcher, PushSubscription, PushSubscriptionInput, RelayState,
-    RemoteActionReplayDecision, RemoteActionWait, RemoteActionWaitSource, RequestAdmission,
-    RequestClass, RequestSessionGrant, ReservationToken, ReviewerThread, SessionBinding,
-    SignedRequestFacts, ThreadSessionSettings, TranscriptDeltaKind, TurnFailureKind, TurnOutcome,
-    WaitOutcome, MAX_REVIEWERS_PER_PARENT,
+    thread_status_is_working, ApnsToken, ApnsTokenInput, ApprovalKind, BrokerPendingMessage,
+    CachedRemoteActionResult, ClaimChallenge, DeviceRecord, IssuedClaimChallenge, PairedDevice,
+    PairingBroker, PendingApproval, PendingAskUserQuestion, PendingPairingResult,
+    PendingTranscriptDelta, ProviderEventSession, PushDispatcher, PushSubscription,
+    PushSubscriptionInput, RelayState, RemoteActionReplayDecision, RemoteActionWait,
+    RemoteActionWaitSource, RequestAdmission, RequestClass, RequestSessionGrant, ReservationToken,
+    ReviewerThread, SessionBinding, SignedRequestFacts, ThreadSessionSettings, TranscriptDeltaKind,
+    TurnFailureKind, TurnOutcome, WaitOutcome, MAX_REVIEWERS_PER_PARENT,
 };
 // `PushKind` is referenced only by cross-module tests (codex/claude handler tests
 // assert an Error push); gate the re-export so non-test builds don't warn.

@@ -20,7 +20,7 @@ import { t } from "../shared/i18n.js";
 export function shouldAutoSubscribe(model = {}) {
   return (
     Boolean(model.supported) &&
-    Boolean(model.hasVapidKey) &&
+    (Boolean(model.native) || Boolean(model.hasVapidKey)) &&
     Boolean(model.permissionGranted)
   );
 }
@@ -40,10 +40,11 @@ export function remoteNotificationsHint(model = {}) {
     return t("Requires HTTPS / iOS 16.4+ installed to Home Screen.");
   }
   if (denied) {
+    if (model.native) return t("Notifications are blocked in iOS settings.");
     // The browser permission is the off switch; point the user at it.
     return t("Notifications are blocked in your browser settings.");
   }
-  if (!hasVapidKey) {
+  if (model.native ? !model.apnsAvailable : !hasVapidKey) {
     return t("Push isn't available on this relay yet.");
   }
   if (subscribed) {

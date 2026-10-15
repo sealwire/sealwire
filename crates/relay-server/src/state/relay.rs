@@ -49,6 +49,10 @@ pub(crate) use self::injections::{
     GoalMark, HandoverMark, InjectedMessage, InjectionTag, Injections, MessageAnchor, ReviewMark,
     ThreadInjections,
 };
+mod apns;
+#[cfg(test)]
+pub(crate) use self::apns::ApnsEnvironment;
+pub(crate) use self::apns::{ApnsToken, ApnsTokenInput};
 pub(crate) use self::push::{
     import_legacy_vapid_file, is_acceptable_push_endpoint, load_or_generate_vapid,
     PushAttentionTracker, PushDispatcher, PushJob, PushKind, PushSubscription,
@@ -728,6 +732,8 @@ pub struct RelayState {
     /// can have several browser subscriptions; deduped by endpoint). Persisted so
     /// a closed/locked phone keeps receiving pushes across a relay restart.
     pub(super) push_subscriptions: HashMap<String, Vec<PushSubscription>>,
+    pub(super) apns_tokens: HashMap<String, ApnsToken>,
+    pub(super) push_apns_available: bool,
     /// Sender into the push dispatcher task. State mutations only enqueue here
     /// (non-blocking, lock-safe); all network IO happens off the lock in the
     /// dispatcher. `None` in tests and before the dispatcher is wired.
@@ -880,6 +886,8 @@ impl RelayState {
             orchestrator_proposals: Vec::new(),
             starting_scheduled_proposals: Vec::new(),
             push_subscriptions: HashMap::new(),
+            apns_tokens: HashMap::new(),
+            push_apns_available: false,
             push_tx: None,
             push_vapid_public_key: None,
             push_attention: PushAttentionTracker::new(),
@@ -1037,6 +1045,8 @@ impl RelayState {
     pub(crate) fn prune_orphaned_push_subscriptions(&mut self) {
         let paired: HashSet<String> = self.paired_devices.keys().cloned().collect();
         self.push_subscriptions
+            .retain(|device_id, _| paired.contains(device_id));
+        self.apns_tokens
             .retain(|device_id, _| paired.contains(device_id));
     }
 
@@ -4878,6 +4888,7 @@ so {} never got it — hand over again when you are ready.",
             workflow_activity: self.workflow_activity_view(),
             workflows_revision: self.workflows_revision(),
             push_vapid_public_key: self.push_vapid_public_key.clone(),
+            push_apns_available: self.push_apns_available,
             projects_revision: self.projects_revision,
             threads_revision: self.threads_revision,
             thread_workspaces_revision: self.thread_workspaces_revision,
@@ -5390,6 +5401,7 @@ so {} never got it — hand over again when you are ready.",
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
         self.push_subscriptions = persisted.push_subscriptions.clone();
+        self.apns_tokens = persisted.apns_tokens.clone();
         self.prune_orphaned_push_subscriptions();
         // Durable reviewer-thread identity + completed (terminal) review-job cards
         // survive restart. The writer only persists terminal jobs, and we re-apply the
@@ -7085,6 +7097,7 @@ so {} never got it — hand over again when you are ready.",
         self.device_records = persisted.device_records.clone();
         self.paired_devices = persisted.paired_devices.clone();
         self.push_subscriptions = persisted.push_subscriptions.clone();
+        self.apns_tokens = persisted.apns_tokens.clone();
         self.prune_orphaned_push_subscriptions();
         // Durable reviewer-thread identity + completed (terminal) review-job cards
         // survive restart. The writer only persists terminal jobs, and we re-apply the
