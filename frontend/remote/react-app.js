@@ -2333,10 +2333,6 @@ function RemoteApp() {
           closeRemoteNavigation();
           remoteUiStore.getState().setRemoteInfoModalOpen(true);
         },
-        onOpenPairing() {
-          closeRemoteNavigation();
-          remoteUiStore.getState().setSettingsModalOpen(true, "device");
-        },
         onOpenSettings() {
           // Closes the drawer first on phones: the modal renders over the shell,
           // and leaving the nav open behind it means dismissing Settings drops
@@ -2870,7 +2866,6 @@ function RemoteSidebar({
   threadAttentionMap,
   threadReviewingSet,
   onOpenInfo,
-  onOpenPairing,
   onOpenSettings,
   onRefreshRelayDirectory,
   onRefreshThreads,
@@ -3056,21 +3051,6 @@ function RemoteSidebar({
       // over the very list the user just asked to search. `focusSignal` is therefore
       // irrelevant here — the component ignores it without the policy flag.
     }),
-    h(
-      "div",
-      { className: "sidebar-row" },
-      h("p", { className: "sidebar-caption" }, t("Device Pairing")),
-      h(
-        "button",
-        {
-          className: "sidebar-link-button",
-          id: "open-pairing-modal",
-          onClick: onOpenPairing,
-          type: "button",
-        },
-        t("Manage")
-      )
-    ),
     usesDrawer ? null : h(StartSessionSplitButton, {
       activeProvider: sessionPanelModel?.fields?.provider || "",
       buttonId: "remote-session-toggle",

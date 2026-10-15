@@ -246,7 +246,8 @@ async function openPairingModal(page) {
     Boolean(document.querySelector("#remote-settings-modal")?.open)
   );
   if (!isOpen) {
-    await page.click("#open-pairing-modal");
+    await page.click("#remote-sidebar-settings");
+    await page.click("#remote-settings-tab-device");
   }
   await page.waitForFunction(() => {
     const dialog = document.querySelector("#remote-settings-modal");

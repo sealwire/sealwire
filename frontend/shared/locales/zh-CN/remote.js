@@ -34,8 +34,6 @@ export default {
   "Camera access is off for Sealwire. Turn it on in Settings › Sealwire › Camera.":
     "Sealwire 没有相机权限，请到「设置 › Sealwire › 相机」里打开。",
   "The scanner could not open.": "扫码界面打不开。",
-  "Device Pairing": "设备配对",
-  "Manage": "管理",
   "Refresh relays": "刷新 relay 列表",
   "Refresh sessions": "刷新会话",
   "All relays": "所有 relay",

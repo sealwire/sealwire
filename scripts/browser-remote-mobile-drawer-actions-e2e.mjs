@@ -234,6 +234,8 @@ async function main() {
       0,
       "the phone drawer still carries the old New session split button"
     );
+    // Settings › This device is one tap away on the gear, so the sidebar drops the row.
+    assert.equal(await page.locator("#open-pairing-modal").count(), 0, "the phone drawer still shows Device Pairing · Manage");
 
     await page.tap("#remote-session-toggle");
     await page.waitForFunction(() => Boolean(document.getElementById("remote-start-session-dialog")?.open), null, {
@@ -254,6 +256,7 @@ async function main() {
     const desktop = await openPage(browser, server, { width: 1280, height: 800 }, false);
     assert.equal(await desktop.page.locator(".remote-app-shell .sidebar .start-session-split").count(), 1);
     assert.equal(await desktop.page.locator(".remote-app-shell .sidebar-fab-bar").count(), 0);
+    assert.equal(await desktop.page.locator("#open-pairing-modal").count(), 0, "the desktop sidebar still shows Device Pairing · Manage");
     await desktop.context.close();
 
     console.log("[remote-mobile-drawer-actions-e2e] ok");
