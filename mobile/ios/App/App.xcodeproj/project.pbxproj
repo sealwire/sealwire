@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		13A3766F451C442409F37CD0 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C823168D9491BC39E872095F /* Foundation.framework */; };
 		2BE305245D63E9DAB4451CEF /* NativeFeelUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70057C28ED760CAE7C6FBED /* NativeFeelUITests.swift */; };
+		5AF3E1C27B9D4E0F8A6B2C01 /* SafariZoomUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AF3E1C27B9D4E0F8A6B2C02 /* SafariZoomUITests.swift */; };
 		2FAD9763203C412B000D30F8 /* config.xml in Resources */ = {isa = PBXBuildFile; fileRef = 2FAD9762203C412B000D30F8 /* config.xml */; };
 		4D22ABE92AF431CB00220026 /* CapApp-SPM in Frameworks */ = {isa = PBXBuildFile; productRef = 4D22ABE82AF431CB00220026 /* CapApp-SPM */; };
 		50379B232058CBB4000EE86E /* capacitor.config.json in Resources */ = {isa = PBXBuildFile; fileRef = 50379B222058CBB4000EE86E /* capacitor.config.json */; };
@@ -43,6 +44,7 @@
 		9582B6822FE993A50072D4E8 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
 		A70057C28ED760CAE7C6FBED /* NativeFeelUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NativeFeelUITests.swift; sourceTree = "<group>"; };
+		5AF3E1C27B9D4E0F8A6B2C02 /* SafariZoomUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SafariZoomUITests.swift; sourceTree = "<group>"; };
 		C0119681CC09439AB3D9581D /* AppUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C823168D9491BC39E872095F /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 /* End PBXFileReference section */
@@ -71,6 +73,7 @@
 			isa = PBXGroup;
 			children = (
 				A70057C28ED760CAE7C6FBED /* NativeFeelUITests.swift */,
+				5AF3E1C27B9D4E0F8A6B2C02 /* SafariZoomUITests.swift */,
 			);
 			name = AppUITests;
 			path = AppUITests;
@@ -236,6 +239,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				2BE305245D63E9DAB4451CEF /* NativeFeelUITests.swift in Sources */,
+				5AF3E1C27B9D4E0F8A6B2C01 /* SafariZoomUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -65,6 +65,7 @@
       "public-transcript-delta",
       "public-thread-interleaving",
       "remote-mobile-header",
+      "remote-no-pinch-zoom",
       "remote-mobile-session-actions",
       "remote-mobile-stream-switch",
       "remote-new-session-menus",
@@ -87,6 +88,7 @@
       "public-transcript-delta",
       "public-thread-interleaving",
       "remote-mobile-header",
+      "remote-no-pinch-zoom",
       "remote-mobile-session-actions",
       "remote-mobile-stream-switch",
       "remote-new-session-menus",
@@ -192,6 +194,15 @@
         "mobile-header",
         "mobile-layout",
         "transcript-scroll"
+      ]
+    },
+    "remote-no-pinch-zoom": {
+      "script": "browser-remote-no-pinch-zoom-e2e.mjs",
+      "tier": "core",
+      "provider": "stub",
+      "transport": "static-remote",
+      "coverage": [
+        "mobile-layout"
       ]
     },
     "remote-cjk-project-name": {
