@@ -585,55 +585,9 @@ impl AppState {
             })?,
             _ => return Err("this folder is not in a git repository".to_string()),
         };
-        let mut chosen: Vec<&str> = Vec::new();
-        let mut paths: Vec<String> = Vec::new();
-        for path in &input.paths {
-            let change = changed
-                .get(path)
-                .ok_or_else(|| format!("{path} has no change to commit"))?;
-            chosen.push(path);
-            paths.push(path.clone());
-            // The old name is already out of the index, so it is committed but not added.
-            // A file written at the old name since is the user's to tick: committing that
-            // name would take its new contents.
-            match &change.renamed_from {
-                Some(Some(source)) => {
-                    let reused = tokio::fs::symlink_metadata(Path::new(workspace.as_str()).join(source))
-                        .await
-                        .is_ok();
-                    if reused && !input.paths.contains(source) {
-                        return Err(format!(
-                            "{source} was renamed to {path} and then written again; tick {source} too, or leave the rename out"
-                        ));
-                    }
-                    paths.push(source.clone());
-                }
-                Some(None) => {
-                    return Err(format!(
-                        "{path} was moved here from outside this folder; commit it from the repository's top folder"
-                    ))
-                }
-                None => {}
-            }
-        }
-        // A file that replaced a folder (or the reverse) names every changed path under it.
-        for path in &chosen {
-            let inside = format!("{path}/");
-            if let Some(other) = changed
-                .keys()
-                .find(|other| other.starts_with(&inside) && !input.paths.contains(other))
-            {
-                return Err(format!(
-                    "committing {path} would also take {other}, which is not ticked"
-                ));
-            }
-        }
-        chosen.sort();
-        chosen.dedup();
-        paths.sort();
-        paths.dedup();
+        let (chosen, paths) = plan_commit(&workspace, &changed, &input.paths).await?;
         let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
-        add.extend(chosen);
+        add.extend(chosen.iter().map(String::as_str));
         let staged = run_git_capture(&workspace, &add).await?;
         if !staged.status.success() {
             return Err(git_words(&staged));
@@ -860,48 +814,177 @@ impl GitView {
         Some(
             self.changed(workspace)
                 .await?
+                .entries
                 .into_iter()
                 .map(|(path, change)| (path, change.status))
                 .collect(),
         )
     }
 
-    async fn changed(&self, workspace: &TrustedWorkspace) -> Option<HashMap<String, Change>> {
+    async fn changed(&self, workspace: &TrustedWorkspace) -> Option<ChangedSet> {
         let raw = match tokio::time::timeout(EDITOR_GIT_BUDGET, read_status(workspace)).await {
             Ok(raw) => raw?,
             Err(_) => return None,
         };
-        Some(
-            parse_porcelain_z(&raw)
-                .into_iter()
-                .filter_map(|(path, status, renamed_from)| {
-                    let rel = path
-                        .strip_prefix(&self.prefix)
-                        .filter(|rel| !rel.is_empty())?;
-                    let renamed_from = renamed_from.map(|source| {
-                        source
-                            .strip_prefix(&self.prefix)
-                            .filter(|rel| !rel.is_empty())
-                            .map(str::to_string)
-                    });
-                    Some((
-                        rel.to_string(),
-                        Change {
-                            status,
-                            renamed_from,
-                        },
-                    ))
-                })
-                .collect(),
-        )
+        let inside = |path: &str| {
+            path.strip_prefix(&self.prefix)
+                .filter(|rel| !rel.is_empty())
+                .map(str::to_string)
+        };
+        let mut set = ChangedSet {
+            entries: HashMap::new(),
+            unreadable: Vec::new(),
+        };
+        for entry in parse_porcelain_z(&raw) {
+            let Some(rel) = inside(&entry.path) else {
+                continue;
+            };
+            if !entry.exact {
+                set.unreadable.push(rel);
+                continue;
+            }
+            let renamed_from = entry
+                .renamed_from
+                .map(|(source, exact)| if exact { inside(&source) } else { None });
+            set.entries.insert(
+                rel,
+                Change {
+                    status: entry.status,
+                    renamed_from,
+                },
+            );
+        }
+        Some(set)
     }
 }
 
+/// The folder's changes. `unreadable` holds paths that are not UTF-8, by a lossy spelling:
+/// they cannot be listed or picked, but a commit must still know they are there.
+struct ChangedSet {
+    entries: HashMap<String, Change>,
+    unreadable: Vec<String>,
+}
+
 /// One changed path. `renamed_from` is `Some(None)` when the rename came from outside the
-/// editor root.
+/// editor root, or from a name that is not UTF-8.
 struct Change {
     status: String,
     renamed_from: Option<Option<String>>,
+}
+
+/// What `git add` and `git commit` are given for the ticked `picked` paths: refused when a
+/// path would take a change the user did not tick, or one git cannot commit file by file.
+async fn plan_commit(
+    workspace: &TrustedWorkspace,
+    changed: &ChangedSet,
+    picked: &[String],
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let on_disk = |rel: &str| tokio::fs::symlink_metadata(Path::new(workspace.as_str()).join(rel));
+    let under = |dir: &str, path: &str| path.starts_with(&format!("{dir}/"));
+    let mut chosen: Vec<String> = Vec::new();
+    let mut paths: Vec<String> = Vec::new();
+    for path in picked {
+        let change = changed
+            .entries
+            .get(path)
+            .ok_or_else(|| format!("{path} has no change to commit"))?;
+        chosen.push(path.clone());
+        paths.push(path.clone());
+        let source = match &change.renamed_from {
+            None => continue,
+            Some(None) => {
+                return Err(format!(
+                    "{path} was moved here from outside this folder, or from a name that cannot be shown here; commit it with git"
+                ))
+            }
+            Some(Some(source)) => source,
+        };
+        // The old name is already out of the index, so it is committed but not added.
+        let Ok(old) = on_disk(source).await else {
+            paths.push(source.clone());
+            continue;
+        };
+        if same_file(&old, on_disk(path).await.ok().as_ref()) {
+            return Err(format!(
+                "{source} → {path} only changes letter case, which git cannot commit file by file on this disk; commit it with git"
+            ));
+        }
+        if old.is_dir() {
+            // The old name is a folder now: its files carry the rename's deletion with them.
+            if !changed
+                .entries
+                .keys()
+                .any(|other| under(source, other) && picked.contains(other))
+            {
+                return Err(format!(
+                    "{source} was renamed to {path} and is a folder now; tick its files too, or leave the rename out"
+                ));
+            }
+            continue;
+        }
+        // A file written at the old name since is the user's to tick: committing that name
+        // would take its new contents.
+        if !picked.contains(source) {
+            return Err(format!(
+                "{source} was renamed to {path} and then written again; tick {source} too, or leave the rename out"
+            ));
+        }
+        paths.push(source.clone());
+    }
+    // A path that replaced a folder (or the reverse) names every change under it.
+    for path in &chosen {
+        if let Some(other) = changed
+            .entries
+            .keys()
+            .find(|other| under(path, other) && !picked.contains(other))
+        {
+            return Err(format!(
+                "committing {path} would also take {other}, which is not ticked"
+            ));
+        }
+        if let Some(other) = changed.unreadable.iter().find(|other| under(path, other)) {
+            return Err(format!(
+                "committing {path} would also take {other}, whose name cannot be shown here; commit it with git"
+            ));
+        }
+    }
+    // A file that became a folder is committed through the files in it: git refuses the
+    // folder's own name, and a file inside it already replaces the old file in the commit.
+    let mut kept = Vec::new();
+    for path in &paths {
+        let folder = on_disk(path)
+            .await
+            .map(|meta| meta.is_dir())
+            .unwrap_or(false);
+        if folder {
+            if !paths.iter().any(|other| under(path, other)) {
+                return Err(format!(
+                    "{path} is a folder now; tick the files in it to commit the change"
+                ));
+            }
+            continue;
+        }
+        kept.push(path.clone());
+    }
+    chosen.sort();
+    chosen.dedup();
+    kept.sort();
+    kept.dedup();
+    Ok((chosen, kept))
+}
+
+/// Whether two names reach one file, as a case-only rename does on a case-insensitive disk.
+fn same_file(a: &std::fs::Metadata, b: Option<&std::fs::Metadata>) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        b.is_some_and(|b| a.dev() == b.dev() && a.ino() == b.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        false
+    }
 }
 
 impl GitView {}
@@ -934,12 +1017,26 @@ async fn read_status(workspace: &TrustedWorkspace) -> Option<Vec<u8>> {
     }
 }
 
-/// `XY path\0`, plus a second `orig\0` field after a rename or copy. The source of a
-/// rename is kept: committing the new name alone would leave its deletion behind.
-fn parse_porcelain_z(raw: &[u8]) -> Vec<(String, String, Option<String>)> {
+/// One `git status --porcelain -z` entry. A name that is not UTF-8 is kept by a lossy
+/// spelling with `exact` false, so it is never taken for a real name but is still seen.
+struct StatusEntry {
+    path: String,
+    exact: bool,
+    status: String,
+    /// The source of a rename, with its own `exact`. Committing the new name alone would
+    /// leave its deletion behind.
+    renamed_from: Option<(String, bool)>,
+}
+
+/// `XY path\0`, plus a second `orig\0` field after a rename or copy.
+fn parse_porcelain_z(raw: &[u8]) -> Vec<StatusEntry> {
     let mut fields = raw
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty());
+    let decode = |bytes: &[u8]| match std::str::from_utf8(bytes) {
+        Ok(text) => (text.to_string(), true),
+        Err(_) => (String::from_utf8_lossy(bytes).to_string(), false),
+    };
     let mut entries = Vec::new();
     while let Some(field) = fields.next() {
         if field.len() < 4 {
@@ -951,18 +1048,13 @@ fn parse_porcelain_z(raw: &[u8]) -> Vec<(String, String, Option<String>)> {
         } else {
             None
         };
-        let Ok(path) = std::str::from_utf8(&field[3..]) else {
-            continue;
-        };
-        let renamed_from = source
-            .filter(|_| x == 'R')
-            .and_then(|source| std::str::from_utf8(source).ok())
-            .map(str::to_string);
-        entries.push((
-            path.to_string(),
-            status_letter(x, y).to_string(),
-            renamed_from,
-        ));
+        let (path, exact) = decode(&field[3..]);
+        entries.push(StatusEntry {
+            path,
+            exact,
+            status: status_letter(x, y).to_string(),
+            renamed_from: source.filter(|_| x == 'R').map(decode),
+        });
     }
     entries
 }
@@ -1193,23 +1285,36 @@ mod tests {
     }
 
     #[test]
-    fn porcelain_parsing_keeps_the_source_of_a_rename_beside_its_new_name() {
-        let raw = b"R  new.rs\0old.rs\0C  copy.rs\0orig.rs\0 M src/a.rs\0?? b.txt\0UU c.rs\0";
-        let entry = |path: &str, status: &str, from: Option<&str>| {
+    fn porcelain_parsing_keeps_the_source_of_a_rename_and_marks_names_that_are_not_utf8() {
+        let raw = b"R  new.rs\0old.rs\0C  copy.rs\0orig.rs\0 M src/a.rs\0?? b.txt\0UU c.rs\0?? odd-\xff\0";
+        let parsed: Vec<_> = parse_porcelain_z(raw)
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.path,
+                    entry.status,
+                    entry.renamed_from.map(|(source, _)| source),
+                    entry.exact,
+                )
+            })
+            .collect();
+        let entry = |path: &str, status: &str, from: Option<&str>, exact: bool| {
             (
                 path.to_string(),
                 status.to_string(),
                 from.map(str::to_string),
+                exact,
             )
         };
         assert_eq!(
-            parse_porcelain_z(raw),
+            parsed,
             vec![
-                entry("new.rs", "R", Some("old.rs")),
-                entry("copy.rs", "R", None),
-                entry("src/a.rs", "M", None),
-                entry("b.txt", "?", None),
-                entry("c.rs", "U", None),
+                entry("new.rs", "R", Some("old.rs"), true),
+                entry("copy.rs", "R", None, true),
+                entry("src/a.rs", "M", None, true),
+                entry("b.txt", "?", None, true),
+                entry("c.rs", "U", None, true),
+                entry("odd-\u{fffd}", "?", None, false),
             ]
         );
     }

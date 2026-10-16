@@ -431,3 +431,127 @@ async fn a_ticked_file_that_replaced_a_folder_does_not_take_the_folders_unticked
         "with every affected file ticked it goes through: {body}"
     );
 }
+
+#[tokio::test]
+async fn a_rename_that_only_changes_letter_case_is_committed_or_plainly_refused() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["mv", "src/lib.rs", "src/Lib.rs"]);
+    let before = head_subject(&root);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src/Lib.rs"], "message": "Capitalise", "device_id": "d1" }),
+    )
+    .await;
+    if status == StatusCode::OK {
+        assert_eq!(head_subject(&root), "Capitalise");
+    } else {
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("letter case"),
+            "the reason is the real one: {body}"
+        );
+        assert_eq!(head_subject(&root), before);
+    }
+}
+
+#[tokio::test]
+async fn a_rename_whose_old_name_became_a_folder_commits_with_that_folders_files_ticked() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["mv", "src/lib.rs", "src/core.rs"]);
+    std::fs::create_dir_all(format!("{root}/src/lib.rs")).unwrap();
+    std::fs::write(format!("{root}/src/lib.rs/child.txt"), "child\n").unwrap();
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router.clone(),
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src/core.rs"], "message": "Half", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the folder's file is not ticked: {body}"
+    );
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src/core.rs", "src/lib.rs/child.txt"], "message": "Both", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let out = std::process::Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "HEAD", "src"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let mut tree: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    tree.sort();
+    assert_eq!(tree, ["src/core.rs", "src/lib.rs/child.txt"]);
+}
+
+#[tokio::test]
+async fn a_file_replaced_by_a_folder_commits_once_every_change_is_ticked() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    std::fs::remove_file(format!("{root}/seed.txt")).unwrap();
+    std::fs::create_dir_all(format!("{root}/seed.txt")).unwrap();
+    std::fs::write(format!("{root}/seed.txt/child"), "c\n").unwrap();
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt", "seed.txt/child"], "message": "Folder", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(head_subject(&root), "Folder");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_ticked_file_does_not_take_an_unticked_file_whose_name_is_not_utf8() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    // A tracked file under `config/` whose name is not UTF-8, put in through the index: the
+    // disk here may refuse such a name, but a repository can still carry one.
+    let blob = std::process::Command::new("git")
+        .args(["hash-object", "-w", "seed.txt"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let blob = String::from_utf8(blob.stdout).unwrap().trim().to_string();
+    let mut name = b"config/hidden-".to_vec();
+    name.push(0xff);
+    let mut info = format!("100644 {blob}\t").into_bytes();
+    info.extend_from_slice(&name);
+    info.push(b'\n');
+    let mut child = std::process::Command::new("git")
+        .args(["update-index", "--index-info"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(&info).unwrap();
+    }
+    assert!(child.wait().unwrap().success());
+    git(&root, &["commit", "-q", "-m", "hidden"]);
+    // The folder is gone from disk and a file named `config` took its place.
+    std::fs::write(format!("{root}/config"), "now a file\n").unwrap();
+    let before = head_subject(&root);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["config"], "message": "Take config", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(head_subject(&root), before);
+}
