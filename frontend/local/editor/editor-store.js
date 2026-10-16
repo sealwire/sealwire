@@ -130,8 +130,11 @@ export function createEditorStore({
     expanded: { "": true },
     changedOnly: false,
     changes: { entries: [], sessions: [], loading: false, complete: true, isRepo: true },
-    // Left panel: the file tree or the changed files.
+    // Left panel: the file tree, the changed files, or the branches for History.
     panelView: "files",
+    // The History tab: whether it is in the tab strip, and whether it is the one shown.
+    historyOpen: false,
+    showingHistory: false,
     // "diff" or "edit" per document; edit when absent.
     viewModes: {},
     commit: { committing: false, error: null, last: null },
@@ -410,6 +413,7 @@ export function createEditorStore({
       nextPreview = null;
     }
     setTabs(next, path, root, nextPreview);
+    leaveHistory(root);
     const key = ensureDoc(root, path);
     if (line) {
       setDoc(key, { revealLine: { line, at: now() } });
@@ -437,9 +441,29 @@ export function createEditorStore({
   }
 
   function setPanelView(view) {
-    set({ panelView: view === "changes" ? "changes" : "files" });
-    if (view === "changes") {
+    const next = view === "changes" || view === "history" ? view : "files";
+    set({ panelView: next });
+    if (next === "changes") {
       void loadChanges();
+    }
+    if (next === "history") {
+      showHistory();
+    }
+  }
+
+  function showHistory() {
+    flushSaves();
+    set({ historyOpen: true, showingHistory: true });
+  }
+
+  function closeHistory() {
+    set({ historyOpen: false, showingHistory: false });
+  }
+
+  // Bringing a file forward in the Editor's own folder takes the place of the History tab.
+  function leaveHistory(root) {
+    if (root === get().root && get().showingHistory) {
+      set({ showingHistory: false });
     }
   }
 
@@ -471,6 +495,7 @@ export function createEditorStore({
     if (paths.includes(path)) {
       flushSaves();
       setTabs(paths, path, root);
+      leaveHistory(root);
     }
   }
 
@@ -1003,6 +1028,8 @@ export function createEditorStore({
     addWorktree,
     pinTab,
     setPanelView,
+    showHistory,
+    closeHistory,
     setViewMode,
     commit,
     setAutosave,

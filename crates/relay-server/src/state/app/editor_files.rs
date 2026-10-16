@@ -22,7 +22,7 @@ pub(crate) const EDITOR_FILE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const EDITOR_DIR_MAX_ENTRIES: usize = 5000;
 const EDITOR_STAT_MAX_PATHS: usize = 64;
 /// Same ceiling as the changed-file count: an unignored build tree makes `-uall` slow.
-const EDITOR_GIT_BUDGET: Duration = Duration::from_secs(2);
+pub(super) const EDITOR_GIT_BUDGET: Duration = Duration::from_secs(2);
 const EDITOR_STATUS_LIMIT: usize = 1024 * 1024;
 /// Fixed wording, so the refusal cannot be used to learn which paths exist.
 const EDITOR_OUT_OF_SCOPE: &str = "this folder is outside the relay's allowed roots";
@@ -30,7 +30,7 @@ const EDITOR_UNTRUSTED: &str = "this folder is not trusted yet";
 
 impl AppState {
     /// Scope first (where the caller may reach), then trust (permission to run git in it).
-    async fn editor_workspace(
+    pub(super) async fn editor_workspace(
         &self,
         device_id: Option<&str>,
         root: &str,
@@ -715,20 +715,20 @@ fn branch_choice(input: &EditorBranchInput) -> BranchChoice<'_> {
 
 /// The editor root inside its repository: git reports paths from the repository top, and
 /// the editor may be rooted lower down.
-struct GitView {
-    prefix: String,
+pub(super) struct GitView {
+    pub(super) prefix: String,
 }
 
 /// Whether the root is in a repository, and where. `Unknown` means git did not answer in
 /// time (a hung config include, a slow disk): report nothing rather than guess.
-enum GitProbe {
+pub(super) enum GitProbe {
     Repo(GitView),
     NotRepo,
     Unknown,
 }
 
 impl GitView {
-    async fn open(workspace: &TrustedWorkspace) -> GitProbe {
+    pub(super) async fn open(workspace: &TrustedWorkspace) -> GitProbe {
         let probe = async {
             let output = background_git(workspace)
                 .args(["rev-parse", "--show-prefix"])
@@ -932,7 +932,7 @@ fn revision_of(bytes: &[u8]) -> String {
 }
 
 /// Text the editor can round-trip; anything else is shown as binary and never saved.
-fn editable_text(bytes: Vec<u8>) -> Option<String> {
+pub(super) fn editable_text(bytes: Vec<u8>) -> Option<String> {
     if bytes.iter().take(8000).any(|byte| *byte == 0) {
         return None;
     }

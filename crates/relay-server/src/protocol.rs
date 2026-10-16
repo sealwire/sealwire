@@ -2080,6 +2080,83 @@ pub struct EditorCommitReceipt {
     pub subject: String,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EditorLogQuery {
+    pub root: String,
+    /// Empty or absent: every local and remote-tracking branch.
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub remote: bool,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Plain text searched for in commit messages.
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub skip: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorLogCommit {
+    pub id: String,
+    /// Rewritten to the commits the log lists when it is narrowed to a path.
+    pub parents: Vec<String>,
+    pub author: String,
+    pub time: i64,
+    /// As git decorates it: `HEAD -> main`, `origin/main`, `tag: v1`.
+    pub refs: Vec<String>,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorLogView {
+    pub root: String,
+    pub is_repo: bool,
+    /// False when git did not answer in time; `commits` is then empty.
+    pub complete: bool,
+    pub commits: Vec<EditorLogCommit>,
+    pub more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorCommitFileEntry {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorCommitDetail {
+    pub id: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+    pub committer: String,
+    pub committed_at: i64,
+    pub message: String,
+    /// Against the first parent, inside the editor root, with root-relative paths.
+    pub files: Vec<EditorCommitFileEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorCommitFileView {
+    pub path: String,
+    /// `None` when the file did not exist on that side, or is binary or too large.
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub binary: bool,
+    pub too_large: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EditorChangesView {
     pub root: String,

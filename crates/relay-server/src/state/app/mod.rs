@@ -312,6 +312,7 @@ mod broker;
 mod checkpoint;
 mod delegation;
 mod editor_files;
+mod editor_history;
 mod fork;
 #[cfg(test)]
 mod fork_card_tests;

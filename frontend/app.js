@@ -308,6 +308,7 @@ import {
 } from "./shared/nav-destinations.js";
 import { createEditorStore } from "./local/editor/editor-store.js";
 import { createEditorApi } from "./local/editor/editor-api.js";
+import { createHistoryStore } from "./local/editor/history-store.js";
 import { EDITOR_PREFS_EVENT, loadEditorAutosave } from "./local/editor/editor-prefs.js";
 import { createEditorPanelHost, LocalRightPanel } from "./local/editor/editor-panel.js";
 import {
@@ -691,8 +692,9 @@ function editorStorage() {
   }
 }
 
+const editorApi = createEditorApi({ apiFetch, getDeviceId: () => state.deviceId });
 const editorStore = createEditorStore({
-  api: createEditorApi({ apiFetch, getDeviceId: () => state.deviceId }),
+  api: editorApi,
   storage: editorStorage(),
   autosave: loadEditorAutosave(),
 });
@@ -706,6 +708,7 @@ function editorFallbackRoot() {
 
 const editorHost = {
   store: editorStore,
+  history: createHistoryStore({ api: editorApi }),
   isVisible: () => sessionViewStore.getState().location.context?.kind === "editor",
   // Arriving by history (reload, Back) skips openEditorScreen, so the screen asks for this.
   ensureLoaded() {

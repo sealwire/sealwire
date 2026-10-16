@@ -13,35 +13,17 @@ import { branchMenuModel } from "./branch-menu-model.js";
 import { carrySelection, groupChanges } from "./changes-model.js";
 import { CHEVRON_DOWN_SVG, CHEVRON_RIGHT_SVG } from "../../svg.js";
 import { docKey } from "./editor-store.js";
+import { baseName, dirName, svg, useStore } from "./editor-ui.js";
+import { HistoryPanel, HistoryTab, HistoryView } from "./history-view.js";
 
 const h = React.createElement;
-const { useEffect, useMemo, useRef, useState, useSyncExternalStore, useCallback } = React;
+const { useEffect, useMemo, useRef, useState } = React;
 
 const DISK_CHECK_MS = 3000;
 // Git status for files that are not open (an agent working elsewhere in the tree).
 const TREE_REFRESH_MS = 15000;
 
-export function useStore(store, select = (state) => state) {
-  return useSyncExternalStore(
-    useCallback((listener) => store.subscribe(listener), [store]),
-    () => select(store.getState()),
-    () => select(store.getState())
-  );
-}
-
-function svg(markup, className) {
-  return h("span", { className, "aria-hidden": "true", dangerouslySetInnerHTML: { __html: markup } });
-}
-
-function baseName(path) {
-  const parts = String(path || "").split("/").filter(Boolean);
-  return parts[parts.length - 1] || path || "";
-}
-
-function dirName(path) {
-  const index = String(path || "").lastIndexOf("/");
-  return index > 0 ? path.slice(0, index) : "";
-}
+export { useStore };
 
 /** A tab's label, with the folder added when two open files share a name. */
 export function tabLabels(paths) {
@@ -578,7 +560,7 @@ function ChangesPanel({ store, activePath }) {
   );
 }
 
-function FilePanel({ store, activePath }) {
+function FilePanel({ store, activePath, history = null }) {
   const changedOnly = useStore(store, (state) => state.changedOnly);
   const panelView = useStore(store, (state) => state.panelView);
   const changeCount = useStore(store, (state) => state.changes.entries.length);
@@ -592,6 +574,7 @@ function FilePanel({ store, activePath }) {
       ...[
         ["files", t("Files"), null],
         ["changes", t("Changes"), changeCount || null],
+        ...(history ? [["history", t("History"), null]] : []),
       ].map(([view, label, count]) =>
         h(
           "button",
@@ -611,7 +594,10 @@ function FilePanel({ store, activePath }) {
     panelView === "changes"
       ? h(ChangesPanel, { store, activePath })
       : null,
-    panelView === "changes" ? null : h(
+    panelView === "history" && history
+      ? h(HistoryPanel, { store, history })
+      : null,
+    panelView === "changes" || (panelView === "history" && history) ? null : h(
       "div",
       { className: "editor-panel-head" },
       h("span", { className: "editor-panel-title" }, t("Files")),
@@ -628,7 +614,7 @@ function FilePanel({ store, activePath }) {
         h("span", { className: "editor-switch-track", "aria-hidden": "true" })
       )
     ),
-    panelView === "changes" ? null : h(
+    panelView === "changes" || (panelView === "history" && history) ? null : h(
       "div",
       { className: "editor-tree", role: "tree" },
       changedOnly
@@ -642,7 +628,7 @@ function docAttention(doc) {
   return Boolean(doc && (doc.conflict || doc.missing || doc.saveError || doc.overwritten));
 }
 
-export function TabStrip({ store, root, paths, active, autosave, onBack = null, onCloseRequest, onFocus = null, className = "" }) {
+export function TabStrip({ store, root, paths, active, autosave, onBack = null, onCloseRequest, onFocus = null, className = "", lead = null }) {
   const docs = useStore(store, (state) => state.docs);
   const preview = useStore(store, (state) => state.tabsByRoot[root]?.preview || null);
   const [menu, setMenu] = useState(null);
@@ -668,6 +654,7 @@ export function TabStrip({ store, root, paths, active, autosave, onBack = null, 
     h(
       "div",
       { className: "editor-tabs", role: "tablist", ref: stripRef, onWheel },
+      lead,
       ...paths.map((path, index) => {
         const doc = docs[docKey(root, path)];
         const attention = docAttention(doc);
@@ -1070,6 +1057,9 @@ function EditorScreenImpl({ host }) {
   const returnThreadId = useStore(store, (state) => state.returnThreadId);
   const viewModes = useStore(store, (state) => state.viewModes);
   const changes = useStore(store, (state) => state.changes);
+  const history = host.history || null;
+  const historyOpen = useStore(store, (state) => Boolean(history) && state.historyOpen);
+  const showingHistory = useStore(store, (state) => Boolean(history) && state.showingHistory);
   const cursor = useMemo(() => createStore(() => ({ line: 1, column: 1, selected: 0 })), []);
   const [comparing, setComparing] = useState(null);
   const [confirm, setConfirm] = useState(null);
@@ -1172,9 +1162,14 @@ function EditorScreenImpl({ host }) {
       if (!host.isVisible?.()) {
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "w" && active) {
-        event.preventDefault();
-        void requestClose([active]);
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "w") {
+        if (showingHistory) {
+          event.preventDefault();
+          store.closeHistory();
+        } else if (active) {
+          event.preventDefault();
+          void requestClose([active]);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1205,6 +1200,8 @@ function EditorScreenImpl({ host }) {
         ? t("This folder is not trusted yet. Sealwire only opens files in folders you have trusted.")
         : rootError
     );
+  } else if (showingHistory) {
+    body = h(HistoryView, { store, history });
   } else if (!active) {
     body = h(Placeholder, null, t("Pick a file on the left to open it."));
   } else if (doc?.loading) {
@@ -1219,12 +1216,12 @@ function EditorScreenImpl({ host }) {
     body = null;
   }
 
-  const compareDoc = comparing && doc && (doc.conflict || doc.overwritten) ? doc : null;
+  const compareDoc = !showingHistory && comparing && doc && (doc.conflict || doc.overwritten) ? doc : null;
 
   return h(
     "div",
     { className: "editor-screen" },
-    h(FilePanel, { store, activePath: active }),
+    h(FilePanel, { store, activePath: showingHistory ? null : active, history }),
     h(
       "section",
       { className: "editor-main" },
@@ -1232,12 +1229,20 @@ function EditorScreenImpl({ host }) {
         store,
         root,
         paths,
-        active,
         autosave,
         onBack: returnThreadId && host.backToSession ? () => host.backToSession(returnThreadId) : null,
         onCloseRequest: (targets) => void requestClose(targets),
+        active: showingHistory ? null : active,
+        lead: historyOpen
+          ? h(HistoryTab, {
+              key: "history",
+              active: showingHistory,
+              onFocus: () => store.showHistory(),
+              onClose: () => store.closeHistory(),
+            })
+          : null,
       }),
-      active && !rootError
+      active && !rootError && !showingHistory
         ? h(Breadcrumb, {
             path: active,
             changedBy,
@@ -1245,7 +1250,7 @@ function EditorScreenImpl({ host }) {
             onMode: (next) => store.setViewMode(activeKey, next),
           })
         : null,
-      !rootError && !(comparing && doc && (doc.conflict || doc.overwritten))
+      !rootError && !showingHistory && !(comparing && doc && (doc.conflict || doc.overwritten))
         ? h(DocBanners, { store, docKey: activeKey, doc, onCompare: () => setComparing(activeKey) })
         : null,
       compareDoc
@@ -1273,7 +1278,7 @@ function EditorScreenImpl({ host }) {
       body,
       !body && !compareDoc && mode === "diff" && doc ? h(DiffView, { doc, base: doc.base, path: doc.path }) : null,
       h(CodeHost, { store, docKey: activeKey, doc, cursor, hidden: Boolean(body || compareDoc || mode === "diff") }),
-      h(StatusLine, { doc, cursor, autosave, language }),
+      showingHistory ? null : h(StatusLine, { doc, cursor, autosave, language }),
       confirm
         ? h(CloseConfirm, {
             paths: confirm.unsaved,

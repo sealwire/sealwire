@@ -51,7 +51,8 @@ use protocol::{
     AskUserAnswerReceipt, BulkRevokeDevicesReceipt, ClientErrorCode, CommentHandBackInput,
     CommentMutationReceipt, CommentResolveInput, CreateCommentInput, DeleteThreadInput,
     DevicesResponse, EditorBaseView, EditorBranchInput, EditorBranchesView, EditorChangesView,
-    EditorCommitInput, EditorCommitReceipt, EditorDirListing, EditorFileStat, EditorFileView,
+    EditorCommitDetail, EditorCommitFileView, EditorCommitInput, EditorCommitReceipt,
+    EditorDirListing, EditorFileStat, EditorFileView, EditorLogQuery, EditorLogView,
     EditorSwitchReceipt, EditorWorktreeReceipt, EditorWriteInput, EditorWriteOutcome,
     ForkSessionInput, HealthResponse, HeartbeatInput, ListCommentsQuery, ListCommentsResponse,
     ListReviewTicksQuery, ListReviewTicksResponse, LocalTranscriptEvent, ModelOptionView,
@@ -456,6 +457,9 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/editor/worktree", post(editor_worktree))
         .route("/api/editor/commit", post(editor_commit))
         .route("/api/editor/changes", get(editor_changes))
+        .route("/api/editor/history", get(editor_history))
+        .route("/api/editor/history/commit", get(editor_history_commit))
+        .route("/api/editor/history/file", get(editor_history_file))
         .route(
             "/api/thread/workspace",
             get(thread_workspace).post(pin_thread_workspace),
@@ -1339,6 +1343,67 @@ async fn editor_changes(
         .editor_changes(query.device_id.as_deref(), &query.root)
         .await
         .map(|changes| Json(ApiEnvelope::ok(changes)))
+        .map_err(bad_request)
+}
+
+async fn editor_history(
+    State(context): State<AppContext>,
+    Query(query): Query<EditorLogQuery>,
+) -> Result<Json<ApiEnvelope<EditorLogView>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_log(query)
+        .await
+        .map(|log| Json(ApiEnvelope::ok(log)))
+        .map_err(bad_request)
+}
+
+#[derive(Debug, Deserialize)]
+struct EditorHistoryCommitQuery {
+    root: String,
+    id: String,
+    #[serde(default)]
+    device_id: Option<String>,
+}
+
+async fn editor_history_commit(
+    State(context): State<AppContext>,
+    Query(query): Query<EditorHistoryCommitQuery>,
+) -> Result<Json<ApiEnvelope<EditorCommitDetail>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_commit_detail(query.device_id.as_deref(), &query.root, &query.id)
+        .await
+        .map(|detail| Json(ApiEnvelope::ok(detail)))
+        .map_err(bad_request)
+}
+
+#[derive(Debug, Deserialize)]
+struct EditorHistoryFileQuery {
+    root: String,
+    id: String,
+    path: String,
+    #[serde(default)]
+    old_path: Option<String>,
+    #[serde(default)]
+    device_id: Option<String>,
+}
+
+async fn editor_history_file(
+    State(context): State<AppContext>,
+    Query(query): Query<EditorHistoryFileQuery>,
+) -> Result<Json<ApiEnvelope<EditorCommitFileView>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_commit_file(
+            query.device_id.as_deref(),
+            &query.root,
+            &query.id,
+            &query.path,
+            query.old_path.as_deref(),
+        )
+        .await
+        .map(|file| Json(ApiEnvelope::ok(file)))
         .map_err(bad_request)
 }
 

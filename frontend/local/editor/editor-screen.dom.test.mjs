@@ -26,6 +26,7 @@ const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { createEditorStore, docKey } = await import("./editor-store.js");
 const { EditorScreen } = await import("./editor-screen.js");
+const { createHistoryStore } = await import("./history-store.js");
 
 const h = React.createElement;
 
@@ -128,6 +129,84 @@ test("files that arrive in the Changes list come ticked", async () => {
     assert.equal(boxes.length, 2);
     assert.deepEqual(boxes.map((box) => box.checked), [true, true]);
     assert.equal(container.querySelector(".editor-commit-button").textContent, "Commit 2 files");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("History is a tab beside the files: picking a file tab hides it, and its tab brings it back", async () => {
+  const relay = relayWith({ "/a/foo.rs": "now\n" });
+  relay.api.branches = async () => ({
+    root: "/a",
+    current: "main",
+    branches: [{ name: "main", remote: false, worktree: "/a" }],
+    worktrees: [],
+    busy: null,
+  });
+  const store = createEditorStore({ api: relay.api, autosave: true });
+  await store.setRoot("/a");
+  store.openFile("foo.rs");
+  const asked = [];
+  const history = createHistoryStore({
+    api: {
+      history: async (query) => {
+        asked.push(query);
+        return {
+          commits: [
+            { id: "c2", parents: ["c1"], author: "Ann", time: 2, refs: ["HEAD -> main"], subject: "Tune foo" },
+            { id: "c1", parents: [], author: "Ann", time: 1, refs: [], subject: "Start" },
+          ],
+          more: false,
+          complete: true,
+          is_repo: true,
+        };
+      },
+      historyCommit: async (root, id) => ({
+        id,
+        parents: ["c1"],
+        author: "Ann",
+        email: "ann@example.com",
+        time: 2,
+        message: "Tune foo\n\nWhy it changed.",
+        files: [{ path: "foo.rs", old_path: null, status: "M" }],
+        truncated: false,
+      }),
+      historyFile: async (root, id, path) => ({ path, before: "then\n", after: "now\n", binary: false, too_large: false }),
+    },
+  });
+  const host = { store, history, isVisible: () => true, ensureLoaded() {} };
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(h(EditorScreen, { host })));
+    await settle();
+    const historyButton = [...container.querySelectorAll(".editor-panel-view")].find((button) => button.textContent === "History");
+    await act(async () => historyButton.click());
+    await settle();
+    assert.ok(container.querySelector(".editor-tab.is-history.is-active"), "History opens as the active tab");
+    assert.equal(asked[0].root, "/a");
+    const rows = container.querySelectorAll(".editor-history-row");
+    assert.equal(rows.length, 2);
+    assert.equal(container.querySelectorAll(".editor-history-row .editor-graph").length, 2);
+    assert.ok(container.querySelector(".editor-history-branch[data-branch=main]"), "the panel lists the branches");
+
+    await act(async () => rows[0].click());
+    await settle();
+    assert.equal(container.querySelector(".editor-history-subject").textContent, "Tune foo");
+    await act(async () => container.querySelector(".editor-history-files .editor-change-open").click());
+    await settle();
+    assert.equal(history.getState().file.data.before, "then\n");
+
+    await act(async () => container.querySelector('.editor-tab[data-path="foo.rs"]').click());
+    await settle();
+    assert.equal(container.querySelector(".editor-history"), null, "the file tab takes the place of History");
+    assert.ok(container.querySelector(".editor-tab.is-history:not(.is-active)"), "History stays in the strip");
+
+    await act(async () => container.querySelector(".editor-tab.is-history").click());
+    await settle();
+    assert.ok(container.querySelector(".editor-history"));
+    assert.equal(history.getState().selected, "c2", "the picked commit is still picked");
   } finally {
     await act(async () => root.unmount());
   }
