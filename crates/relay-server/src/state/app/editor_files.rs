@@ -906,9 +906,11 @@ async fn refuse_hidden_entries(
     Ok(())
 }
 
-/// Commit `plan` on top of `base`, the HEAD it was checked against. Built in an index of its
-/// own, from `base` plus exactly the ticked changes, so nothing else staged rides along and
-/// a refused commit leaves the user's staging untouched. Returns the new commit's id.
+/// Commit `plan` on top of `base`, the HEAD it was checked against. The tree is built in an
+/// index of its own, from `base` plus exactly the ticked changes, so nothing else staged
+/// rides along. The commit object is made with `base` as its only parent and published by
+/// moving HEAD only if it still points at `base`, so a commit someone else made meanwhile,
+/// or a merge someone started, is never folded in or undone. Returns the new commit's id.
 async fn commit_from(
     workspace: &TrustedWorkspace,
     prefix: &str,
@@ -916,7 +918,11 @@ async fn commit_from(
     message: &str,
     base: Option<&str>,
 ) -> Result<String, String> {
-    let index = ScratchIndex::in_git_dir(workspace).await?;
+    let index = ScratchFile::in_git_dir(workspace, "index").await?;
+    let message_file = ScratchFile::in_git_dir(workspace, "msg").await?;
+    let top = git_line(workspace, &["rev-parse", "--show-toplevel"])
+        .await
+        .ok_or_else(|| "could not find the top of this repository".to_string())?;
     let in_scratch = |args: &[&str]| {
         let mut command = background_git(workspace);
         command
@@ -927,13 +933,34 @@ async fn commit_from(
             .stderr(Stdio::piped());
         command
     };
+    // Hooks run from the top of the worktree, against the scratch index, as `git commit`
+    // would run them.
+    let hook = |name: &str, args: &[&str]| {
+        let mut command = in_scratch(&["-C", &top, "hook", "run", "--ignore-missing", name]);
+        if !args.is_empty() {
+            command.arg("--").args(args);
+        }
+        command
+    };
+    let run = |mut command: tokio::process::Command, what: &'static str| async move {
+        let output = command
+            .output()
+            .await
+            .map_err(|error| format!("could not run git {what}: {error}"))?;
+        if output.status.success() {
+            Ok(output)
+        } else {
+            Err(git_words(&output))
+        }
+    };
+
     let seed: Vec<&str> = match base {
         Some(base) => vec!["read-tree", base],
         None => vec!["read-tree", "--empty"],
     };
     apply_changes(plan, in_scratch, Some(&seed)).await?;
-    // Against `base`, not whatever HEAD is now: the check and the commit's parent must be
-    // the same commit. Repository settings must not narrow what it sees.
+    // Against `base`, not whatever HEAD is now: the check and the parent must be one commit.
+    // Repository settings must not narrow what it sees.
     let mut diff_args = vec![
         "diff",
         "--cached",
@@ -946,13 +973,7 @@ async fn commit_from(
         "--no-textconv",
     ];
     diff_args.extend(base);
-    let diff = in_scratch(&diff_args)
-        .output()
-        .await
-        .map_err(|error| format!("could not run git diff: {error}"))?;
-    if !diff.status.success() {
-        return Err(git_words(&diff));
-    }
+    let diff = run(in_scratch(&diff_args), "diff").await?;
     let mut touched = 0;
     for field in diff
         .stdout
@@ -974,66 +995,112 @@ async fn commit_from(
     if touched == 0 {
         return Err("the ticked files have nothing to commit".to_string());
     }
-    let mut child = in_scratch(&["commit", "--file=-"])
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not run git commit: {error}"))?;
-    // Written while the output drains: hooks run before git reads the message, and a
-    // hook filling the output pipe would otherwise wait on us while we wait on git.
-    let stdin = child.stdin.take();
-    let body = message.as_bytes().to_vec();
-    let write = async move {
-        if let Some(mut stdin) = stdin {
-            stdin.write_all(&body).await?;
-        }
-        Ok::<(), std::io::Error>(())
-    };
-    let (written, output) = tokio::join!(write, child.wait_with_output());
-    let output = output.map_err(|error| format!("git commit did not finish: {error}"))?;
-    if let Err(error) = written {
-        tracing::warn!(%error, "editor commit: writing the message to git failed");
-    }
-    if !output.status.success() {
-        return Err(git_words(&output));
-    }
-    let commit = git_line(workspace, &["rev-parse", "--verify", "HEAD^{commit}"])
+
+    run(hook("pre-commit", &[]), "hook").await?;
+    let message_path = message_file.path().to_string_lossy().to_string();
+    tokio::fs::write(message_file.path(), message)
         .await
-        .ok_or_else(|| "the commit was made but HEAD could not be read".to_string())?;
-    // git takes the parent as HEAD stands when it starts; if someone else committed after
-    // this tree was built, that parent is theirs and this tree would undo their change.
-    let parent = git_line(
-        workspace,
-        &["rev-parse", "--verify", "--quiet", &format!("{commit}^1")],
+        .map_err(|error| format!("could not write the commit message: {error}"))?;
+    run(
+        hook("prepare-commit-msg", &[&message_path, "message"]),
+        "hook",
     )
-    .await;
-    if parent.as_deref() != base {
-        let undone = match parent.as_deref() {
-            Some(parent) => {
-                run_git_capture(
-                    workspace,
-                    &[
-                        "update-ref",
-                        "-m",
-                        "sealwire: undo a commit built on an older HEAD",
-                        "HEAD",
-                        parent,
-                        &commit,
-                    ],
-                )
-                .await
-            }
-            None => run_git_capture(workspace, &["update-ref", "-d", "HEAD", &commit]).await,
-        };
-        if !undone.is_ok_and(|output| output.status.success()) {
-            tracing::warn!(%commit, "editor commit: built on a moved HEAD and could not be undone");
+    .await?;
+    run(hook("commit-msg", &[&message_path]), "hook").await?;
+    // What `git commit -F` does to a message it does not open in an editor.
+    let mut stripspace = background_git(workspace)
+        .arg("stripspace")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run git stripspace: {error}"))?;
+    let written = tokio::fs::read(message_file.path())
+        .await
+        .map_err(|error| format!("could not read the commit message back: {error}"))?;
+    let stdin = stripspace.stdin.take();
+    let feed = async move {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(&written).await;
         }
+    };
+    let ((), cleaned) = tokio::join!(feed, stripspace.wait_with_output());
+    let cleaned = cleaned.map_err(|error| format!("could not run git stripspace: {error}"))?;
+    if cleaned.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Err("the commit message is empty".to_string());
+    }
+    tokio::fs::write(message_file.path(), &cleaned.stdout)
+        .await
+        .map_err(|error| format!("could not write the commit message: {error}"))?;
+
+    let tree = run(in_scratch(&["write-tree"]), "write-tree").await?;
+    let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+    let mut commit_args = vec!["commit-tree".to_string(), tree];
+    if let Some(base) = base {
+        commit_args.extend(["-p".to_string(), base.to_string()]);
+    }
+    // `commit-tree` does not read `commit.gpgSign` itself; `git commit` would have.
+    if git_line(
+        workspace,
+        &["config", "--type=bool", "--get", "commit.gpgsign"],
+    )
+    .await
+    .as_deref()
+        == Some("true")
+    {
+        commit_args.push("-S".to_string());
+    }
+    commit_args.extend(["-F".to_string(), message_path.clone()]);
+    let commit_args: Vec<&str> = commit_args.iter().map(String::as_str).collect();
+    let made = run(in_scratch(&commit_args), "commit-tree").await?;
+    let commit = String::from_utf8_lossy(&made.stdout).trim().to_string();
+    if commit_id_shape(&commit).is_none() {
+        return Err("git did not say which commit it made".to_string());
+    }
+
+    if let Some(operation) = operation_in_progress(workspace).await {
+        return Err(format!(
+            "{operation} started here meanwhile; nothing was committed, finish it with git"
+        ));
+    }
+    let subject = String::from_utf8_lossy(&cleaned.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let expected = base.map_or_else(|| "0".repeat(commit.len()), str::to_string);
+    let reflog = format!("commit: {subject}");
+    let published = background_git(workspace)
+        .args(["update-ref", "-m", &reflog, "HEAD", &commit, &expected])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|error| format!("could not run git update-ref: {error}"))?;
+    if !published.status.success() {
         return Err(
             "someone else committed here while this commit was being made; nothing was committed, try again"
                 .to_string(),
         );
     }
     catch_up_index(workspace, prefix, plan, &commit).await;
+    let after = background_git(workspace)
+        .args(["-C", &top, "hook", "run", "--ignore-missing", "post-commit"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    if !after.is_ok_and(|status| status.success()) {
+        tracing::warn!(%commit, "editor commit: the post-commit hook failed");
+    }
     Ok(commit)
+}
+
+fn commit_id_shape(id: &str) -> Option<&str> {
+    let hex = id.bytes().all(|byte| byte.is_ascii_hexdigit());
+    (hex && (id.len() == 40 || id.len() == 64)).then_some(id)
 }
 
 /// Bring the user's own index to what was committed, for the ticked paths only: entries are
@@ -1054,7 +1121,14 @@ async fn catch_up_index(
     if ticked.is_empty() {
         return;
     }
-    let mut args = vec!["ls-tree", "-z", "--full-name", commit, "--"];
+    let mut args = vec![
+        "--literal-pathspecs",
+        "ls-tree",
+        "-z",
+        "--full-name",
+        commit,
+        "--",
+    ];
     args.extend(ticked.iter().copied());
     let listing = match run_git_capture(workspace, &args).await {
         Ok(output) if output.status.success() => output.stdout,
@@ -1063,35 +1137,48 @@ async fn catch_up_index(
             return;
         }
     };
-    let mut committed: HashMap<String, String> = HashMap::new();
+    // Records are NUL-ended (`-z`): a file name may hold a line break or a tab.
+    let mut committed: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
     for entry in listing
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
     {
-        let text = String::from_utf8_lossy(entry);
-        let Some((meta, path)) = text.split_once('\t') else {
+        let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
             continue;
         };
-        let fields: Vec<&str> = meta.split(' ').collect();
+        let (meta, path) = (&entry[..tab], &entry[tab + 1..]);
+        let fields: Vec<&[u8]> = meta.split(|byte| *byte == b' ').collect();
         // A folder in the commit is not an index entry; its files are ticked on their own.
         if let [mode, kind, id] = fields[..] {
-            if kind != "tree" {
-                committed.insert(path.to_string(), format!("{mode} {id} 0\t{path}\n"));
+            if kind != b"tree" {
+                let mut record = Vec::new();
+                record.extend_from_slice(mode);
+                record.push(b' ');
+                record.extend_from_slice(id);
+                record.extend_from_slice(b" 0\t");
+                record.extend_from_slice(path);
+                record.push(0);
+                committed.insert(path.to_vec(), record);
             }
         }
     }
     let zeros = "0".repeat(commit.len());
-    let mut removals = String::new();
-    let mut additions = String::new();
+    let mut removals = Vec::new();
+    let mut additions = Vec::new();
     for path in ticked {
-        let full = format!("{prefix}{path}");
+        let full = format!("{prefix}{path}").into_bytes();
         match committed.get(&full) {
-            Some(line) => additions.push_str(line),
-            None => removals.push_str(&format!("0 {zeros}\t{full}\n")),
+            Some(record) => additions.extend_from_slice(record),
+            None => {
+                removals.extend_from_slice(format!("0 {zeros}\t").as_bytes());
+                removals.extend_from_slice(&full);
+                removals.push(0);
+            }
         }
     }
+    removals.extend_from_slice(&additions);
     let mut child = match background_git(workspace)
-        .args(["update-index", "--index-info"])
+        .args(["update-index", "-z", "--index-info"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1104,9 +1191,7 @@ async fn catch_up_index(
         }
     };
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin
-            .write_all(format!("{removals}{additions}").as_bytes())
-            .await;
+        let _ = stdin.write_all(&removals).await;
     }
     if !child
         .wait_with_output()
@@ -1220,16 +1305,16 @@ async fn apply_changes(
     Ok(())
 }
 
-/// A throwaway index file for one commit, removed (with git's lock beside it) when dropped.
-/// It lists every path in HEAD, so it lives in the repository's own git directory, never a
-/// shared temp folder.
-struct ScratchIndex(PathBuf);
+/// A throwaway file for one commit (its index, its message), removed with any lock git left
+/// beside it. It lives in the repository's own git directory: the index lists every path in
+/// HEAD, so it never goes to a shared temp folder.
+struct ScratchFile(PathBuf);
 
-impl ScratchIndex {
-    async fn in_git_dir(workspace: &TrustedWorkspace) -> Result<Self, String> {
+impl ScratchFile {
+    async fn in_git_dir(workspace: &TrustedWorkspace, kind: &str) -> Result<Self, String> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let name = format!("sealwire-commit-{}-{n}.index", std::process::id());
+        let name = format!("sealwire-commit-{}-{n}.{kind}", std::process::id());
         let path = git_line(workspace, &["rev-parse", "--git-path", &name])
             .await
             .ok_or_else(|| "could not find this repository's git directory".to_string())?;
@@ -1241,7 +1326,7 @@ impl ScratchIndex {
     }
 }
 
-impl Drop for ScratchIndex {
+impl Drop for ScratchFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
         let mut lock = self.0.clone().into_os_string();

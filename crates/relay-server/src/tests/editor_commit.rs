@@ -869,3 +869,106 @@ async fn the_commit_is_built_in_an_index_inside_the_repository() {
     );
     assert!(!index.exists(), "and it is gone afterwards");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_commit_made_by_a_post_commit_hook_is_kept_and_so_is_ours() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, root) = editor_repo().await;
+    let hook = format!("{root}/.git/hooks/post-commit");
+    std::fs::write(
+        &hook,
+        // Guarded: the hook's own commit runs post-commit again.
+        "#!/bin/sh\n[ -n \"$IN_FOLLOW_UP\" ] && exit 0\nunset GIT_INDEX_FILE\nIN_FOLLOW_UP=1 git commit -q --allow-empty -m 'Follow-up from the hook'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Ours", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(
+        git_output(&root, &["log", "--format=%s", "-2"]),
+        "Follow-up from the hook\nOurs"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_merge_that_starts_while_a_commit_is_prepared_is_never_finished_by_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["switch", "-q", "-c", "side"]);
+    std::fs::write(format!("{root}/incoming.txt"), "incoming\n").unwrap();
+    git(&root, &["add", "incoming.txt"]);
+    git(&root, &["commit", "-q", "-m", "incoming"]);
+    git(&root, &["switch", "-q", "main"]);
+    let before = git_output(&root, &["rev-parse", "HEAD"]);
+    // Another process starts a merge while the Editor's commit is being prepared.
+    let hook = format!("{root}/.git/hooks/pre-commit");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nunset GIT_INDEX_FILE\ngit merge -q --no-ff --no-commit side >/dev/null 2>&1\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Ours", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(git_output(&root, &["rev-parse", "HEAD"]), before);
+    assert!(
+        std::path::Path::new(&format!("{root}/.git/MERGE_HEAD")).exists(),
+        "the merge is left for the user to finish"
+    );
+}
+
+#[tokio::test]
+async fn a_file_name_holding_a_line_break_cannot_touch_other_index_entries() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    std::fs::remove_file(format!("{root}/new.txt")).unwrap();
+    std::fs::create_dir_all(format!("{root}/sub")).unwrap();
+    let zeros = "0".repeat(40);
+    let name = format!("chosen\n0 {zeros}\tseed.txt");
+    std::fs::write(format!("{root}/sub/{name}"), "x\n").unwrap();
+    let sub = format!("{root}/sub");
+    let router = git_context_router(&sub, vec![sub.clone()], vec![sub.clone()]).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": sub, "paths": [name], "message": "Odd name", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(
+        git_output(&root, &["ls-files", "seed.txt"]),
+        "seed.txt",
+        "an entry outside the root is untouched"
+    );
+    assert_eq!(git_output(&root, &["diff", "--cached", "--name-only"]), "");
+}
+
+#[tokio::test]
+async fn a_file_name_that_reads_like_pathspec_magic_is_caught_up_literally() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    std::fs::write(format!("{root}/:(top)magic"), "m\n").unwrap();
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": [":(top)magic"], "message": "Magic", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(git_output(&root, &["diff", "--cached", "--name-only"]), "");
+}
