@@ -600,10 +600,15 @@ impl AppState {
             &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
         )
         .await;
-        let commit = commit_from(&workspace, &git.prefix, &plan, message, base.as_deref()).await?;
+        let branch = git_raw_line(&workspace, &["symbolic-ref", "--quiet", "HEAD"]).await;
+        let head = HeadAt {
+            commit: base.as_deref(),
+            branch: branch.as_deref(),
+        };
+        let (commit, subject) = commit_from(&workspace, &git.prefix, &plan, message, head).await?;
         Ok(EditorCommitReceipt {
             commit: commit.chars().take(7).collect(),
-            subject: message.lines().next().unwrap_or_default().to_string(),
+            subject,
         })
     }
 
@@ -906,21 +911,30 @@ async fn refuse_hidden_entries(
     Ok(())
 }
 
-/// Commit `plan` on top of `base`, the HEAD it was checked against. The tree is built in an
-/// index of its own, from `base` plus exactly the ticked changes, so nothing else staged
-/// rides along. The commit object is made with `base` as its only parent and published by
-/// moving HEAD only if it still points at `base`, so a commit someone else made meanwhile,
-/// or a merge someone started, is never folded in or undone. Returns the new commit's id.
+/// Where HEAD stood when a commit was planned: the commit it named, and the branch it was
+/// on (`None` when detached). Publishing must find both unchanged.
+struct HeadAt<'a> {
+    commit: Option<&'a str>,
+    branch: Option<&'a str>,
+}
+
+/// Commit `plan` on top of `head`, as it was checked. The tree is built in an index of its
+/// own, from that commit plus exactly the ticked changes, so nothing else staged rides
+/// along; it is frozen after pre-commit and checked again. The commit object gets that one
+/// parent and is published only if HEAD still points there on the same branch, so a commit
+/// or merge someone else makes meanwhile is never folded in or undone. Returns the new
+/// commit's id and the subject of its cleaned message.
 async fn commit_from(
     workspace: &TrustedWorkspace,
     prefix: &str,
     plan: &CommitPlan,
     message: &str,
-    base: Option<&str>,
-) -> Result<String, String> {
+    head: HeadAt<'_>,
+) -> Result<(String, String), String> {
+    let base = head.commit;
     let index = ScratchFile::in_git_dir(workspace, "index").await?;
     let message_file = ScratchFile::in_git_dir(workspace, "msg").await?;
-    let top = git_line(workspace, &["rev-parse", "--show-toplevel"])
+    let top = git_raw_line(workspace, &["rev-parse", "--show-toplevel"])
         .await
         .ok_or_else(|| "could not find the top of this repository".to_string())?;
     let in_scratch = |args: &[&str]| {
@@ -934,7 +948,7 @@ async fn commit_from(
         command
     };
     // Hooks run from the top of the worktree, against the scratch index, as `git commit`
-    // would run them.
+    // runs them.
     let hook = |name: &str, args: &[&str]| {
         let mut command = in_scratch(&["-C", &top, "hook", "run", "--ignore-missing", name]);
         if !args.is_empty() {
@@ -953,17 +967,7 @@ async fn commit_from(
             Err(git_words(&output))
         }
     };
-
-    let seed: Vec<&str> = match base {
-        Some(base) => vec!["read-tree", base],
-        None => vec!["read-tree", "--empty"],
-    };
-    apply_changes(plan, in_scratch, Some(&seed)).await?;
-    // Against `base`, not whatever HEAD is now: the check and the parent must be one commit.
-    // Repository settings must not narrow what it sees.
-    let mut diff_args = vec![
-        "diff",
-        "--cached",
+    let flags = [
         "--name-only",
         "-z",
         "--no-renames",
@@ -972,31 +976,42 @@ async fn commit_from(
         "--no-ext-diff",
         "--no-textconv",
     ];
+
+    let seed: Vec<&str> = match base {
+        Some(base) => vec!["read-tree", base],
+        None => vec!["read-tree", "--empty"],
+    };
+    apply_changes(plan, in_scratch, Some(&seed)).await?;
+    // Against the planned commit, not whatever HEAD is now; repository settings must not
+    // narrow what the check sees.
+    let mut diff_args = vec!["diff", "--cached"];
+    diff_args.extend(flags);
     diff_args.extend(base);
-    let diff = run(in_scratch(&diff_args), "diff").await?;
-    let mut touched = 0;
-    for field in diff
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|field| !field.is_empty())
-    {
-        touched += 1;
-        let path = std::str::from_utf8(field)
-            .ok()
-            .and_then(|path| path.strip_prefix(prefix))
-            .filter(|rel| plan.allowed.contains(*rel));
-        if path.is_none() {
-            return Err(format!(
-                "committing these files would also change {}, which is not ticked",
-                String::from_utf8_lossy(field)
-            ));
-        }
-    }
-    if touched == 0 {
-        return Err("the ticked files have nothing to commit".to_string());
-    }
+    let staged = run(in_scratch(&diff_args), "diff").await?;
+    check_only_ticked(&staged.stdout, prefix, plan)?;
 
     run(hook("pre-commit", &[]), "hook").await?;
+    // The tree is taken here, as `git commit` takes it: the message hooks that follow
+    // cannot add to it. Whatever pre-commit changed is checked like the user's own picks.
+    let tree = run(in_scratch(&["write-tree"]), "write-tree").await?;
+    let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+    let from = match base {
+        Some(base) => base.to_string(),
+        None => {
+            let empty = run(
+                in_scratch(&["hash-object", "-t", "tree", "/dev/null"]),
+                "hash-object",
+            )
+            .await?;
+            String::from_utf8_lossy(&empty.stdout).trim().to_string()
+        }
+    };
+    let mut tree_args = vec!["diff-tree", "-r"];
+    tree_args.extend(flags);
+    tree_args.extend([from.as_str(), tree.as_str()]);
+    let frozen = run(in_scratch(&tree_args), "diff-tree").await?;
+    check_only_ticked(&frozen.stdout, prefix, plan)?;
+
     let message_path = message_file.path().to_string_lossy().to_string();
     tokio::fs::write(message_file.path(), message)
         .await
@@ -1007,47 +1022,17 @@ async fn commit_from(
     )
     .await?;
     run(hook("commit-msg", &[&message_path]), "hook").await?;
-    // What `git commit -F` does to a message it does not open in an editor.
-    let mut stripspace = background_git(workspace)
-        .arg("stripspace")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not run git stripspace: {error}"))?;
-    let written = tokio::fs::read(message_file.path())
-        .await
-        .map_err(|error| format!("could not read the commit message back: {error}"))?;
-    let stdin = stripspace.stdin.take();
-    let feed = async move {
-        if let Some(mut stdin) = stdin {
-            let _ = stdin.write_all(&written).await;
-        }
-    };
-    let ((), cleaned) = tokio::join!(feed, stripspace.wait_with_output());
-    let cleaned = cleaned.map_err(|error| format!("could not run git stripspace: {error}"))?;
-    if cleaned.stdout.iter().all(u8::is_ascii_whitespace) {
-        return Err("the commit message is empty".to_string());
-    }
-    tokio::fs::write(message_file.path(), &cleaned.stdout)
+    let cleaned = clean_message(workspace, message_file.path()).await?;
+    tokio::fs::write(message_file.path(), &cleaned)
         .await
         .map_err(|error| format!("could not write the commit message: {error}"))?;
+    let subject = cleaned.lines().next().unwrap_or_default().to_string();
 
-    let tree = run(in_scratch(&["write-tree"]), "write-tree").await?;
-    let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
     let mut commit_args = vec!["commit-tree".to_string(), tree];
     if let Some(base) = base {
         commit_args.extend(["-p".to_string(), base.to_string()]);
     }
-    // `commit-tree` does not read `commit.gpgSign` itself; `git commit` would have.
-    if git_line(
-        workspace,
-        &["config", "--type=bool", "--get", "commit.gpgsign"],
-    )
-    .await
-    .as_deref()
-        == Some("true")
-    {
+    if signs_commits(workspace).await? {
         commit_args.push("-S".to_string());
     }
     commit_args.extend(["-F".to_string(), message_path.clone()]);
@@ -1063,11 +1048,13 @@ async fn commit_from(
             "{operation} started here meanwhile; nothing was committed, finish it with git"
         ));
     }
-    let subject = String::from_utf8_lossy(&cleaned.stdout)
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .to_string();
+    let branch_now = git_raw_line(workspace, &["symbolic-ref", "--quiet", "HEAD"]).await;
+    if branch_now.as_deref() != head.branch {
+        return Err(
+            "HEAD moved to another branch while this commit was being made; nothing was committed"
+                .to_string(),
+        );
+    }
     let expected = base.map_or_else(|| "0".repeat(commit.len()), str::to_string);
     let reflog = format!("commit: {subject}");
     let published = background_git(workspace)
@@ -1079,15 +1066,18 @@ async fn commit_from(
         .await
         .map_err(|error| format!("could not run git update-ref: {error}"))?;
     if !published.status.success() {
-        return Err(
+        let words = git_words(&published);
+        return Err(if words.contains("but expected") {
             "someone else committed here while this commit was being made; nothing was committed, try again"
-                .to_string(),
-        );
+                .to_string()
+        } else {
+            format!("nothing was committed: {words}")
+        });
     }
     catch_up_index(workspace, prefix, plan, &commit).await;
-    let after = background_git(workspace)
-        .args(["-C", &top, "hook", "run", "--ignore-missing", "post-commit"])
-        .stdin(Stdio::null())
+    // Against the scratch index, like the other hooks: the user's own staging is not this
+    // commit's, and a hook that amends must not take it in.
+    let after = hook("post-commit", &[])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -1095,7 +1085,111 @@ async fn commit_from(
     if !after.is_ok_and(|status| status.success()) {
         tracing::warn!(%commit, "editor commit: the post-commit hook failed");
     }
-    Ok(commit)
+    Ok((commit, subject))
+}
+
+/// Every path in a `--name-only -z` listing must be a ticked one, inside the editor root.
+fn check_only_ticked(listing: &[u8], prefix: &str, plan: &CommitPlan) -> Result<(), String> {
+    let mut touched = 0;
+    for field in listing
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+    {
+        touched += 1;
+        let ticked = std::str::from_utf8(field)
+            .ok()
+            .and_then(|path| path.strip_prefix(prefix))
+            .is_some_and(|rel| plan.allowed.contains(rel));
+        if !ticked {
+            return Err(format!(
+                "committing these files would also change {}, which is not ticked",
+                String::from_utf8_lossy(field)
+            ));
+        }
+    }
+    if touched == 0 {
+        return Err("the ticked files have nothing to commit".to_string());
+    }
+    Ok(())
+}
+
+/// The message as `git commit -F` would record it, by the repository's `commit.cleanup`
+/// (a message not opened in an editor defaults to whitespace cleanup).
+async fn clean_message(workspace: &TrustedWorkspace, file: &Path) -> Result<String, String> {
+    let mode = run_git_capture(workspace, &["config", "--get", "commit.cleanup"]).await?;
+    let mode = match mode.status.code() {
+        Some(0) => String::from_utf8_lossy(&mode.stdout).trim().to_string(),
+        Some(1) => String::new(),
+        _ => return Err(git_words(&mode)),
+    };
+    let written = tokio::fs::read(file)
+        .await
+        .map_err(|error| format!("could not read the commit message back: {error}"))?;
+    let cleaned = match mode.as_str() {
+        "verbatim" => written,
+        "strip" | "whitespace" | "scissors" | "default" | "" => {
+            let mut stripspace = background_git(workspace);
+            stripspace.arg("stripspace");
+            if mode == "strip" {
+                stripspace.arg("--strip-comments");
+            }
+            let mut child = stripspace
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| format!("could not run git stripspace: {error}"))?;
+            let stdin = child.stdin.take();
+            let feed = async move {
+                if let Some(mut stdin) = stdin {
+                    let _ = stdin.write_all(&written).await;
+                }
+            };
+            let ((), output) = tokio::join!(feed, child.wait_with_output());
+            let output =
+                output.map_err(|error| format!("could not run git stripspace: {error}"))?;
+            if !output.status.success() {
+                return Err(git_words(&output));
+            }
+            output.stdout
+        }
+        other => {
+            return Err(format!(
+                "commit.cleanup is set to {other:?}, which git does not know"
+            ))
+        }
+    };
+    let cleaned = String::from_utf8_lossy(&cleaned).to_string();
+    if cleaned.trim().is_empty() {
+        return Err("the commit message is empty".to_string());
+    }
+    Ok(cleaned)
+}
+
+/// `commit.gpgSign`, as `git commit` reads it: a value git cannot read stops the commit
+/// rather than quietly leaving it unsigned.
+async fn signs_commits(workspace: &TrustedWorkspace) -> Result<bool, String> {
+    let output = run_git_capture(
+        workspace,
+        &["config", "--type=bool", "--get", "commit.gpgsign"],
+    )
+    .await?;
+    match output.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&output.stdout).trim() == "true"),
+        Some(1) => Ok(false),
+        _ => Err(git_words(&output)),
+    }
+}
+
+/// One line of git's output with only its own newline removed: a path can end in a space.
+async fn git_raw_line(workspace: &TrustedWorkspace, args: &[&str]) -> Option<String> {
+    let output = run_git_capture(workspace, args).await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let line = text.strip_suffix('\n').unwrap_or(&text);
+    (!line.is_empty()).then(|| line.to_string())
 }
 
 fn commit_id_shape(id: &str) -> Option<&str> {
@@ -1674,7 +1768,11 @@ mod tests {
             allowed: HashSet::from(["a.txt".to_string()]),
             untouched_sources: HashSet::new(),
         };
-        let result = commit_from(&workspace, "", &plan, "mine", Some(&planned_on)).await;
+        let head = HeadAt {
+            commit: Some(&planned_on),
+            branch: Some("refs/heads/main"),
+        };
+        let result = commit_from(&workspace, "", &plan, "mine", head).await;
         assert!(result.is_err(), "{result:?}");
         assert_eq!(
             git(&["rev-parse", "HEAD"]),

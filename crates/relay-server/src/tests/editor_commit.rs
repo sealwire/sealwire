@@ -972,3 +972,192 @@ async fn a_file_name_that_reads_like_pathspec_magic_is_caught_up_literally() {
     assert_eq!(status, StatusCode::OK, "body={body}");
     assert_eq!(git_output(&root, &["diff", "--cached", "--name-only"]), "");
 }
+
+#[cfg(unix)]
+fn hook(root: &str, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = format!("{root}/.git/hooks/{name}");
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hooks_run_in_the_repository_itself_even_when_its_name_ends_in_a_space() {
+    let parent = tempfile::TempDir::new().expect("tmp");
+    let parent = parent
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let spaced = format!("{parent}/repo ");
+    let sibling = format!("{parent}/repo");
+    for repo in [&spaced, &sibling] {
+        std::fs::create_dir_all(format!("{repo}/sub")).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@e.com"],
+            vec!["config", "user.name", "T"],
+            vec!["commit", "-q", "--allow-empty", "-m", "start"],
+        ] {
+            git(repo, &args);
+        }
+    }
+    hook(
+        &sibling,
+        "pre-commit",
+        &format!("touch '{parent}/sibling-hook-ran'"),
+    );
+    std::fs::write(format!("{spaced}/sub/a.txt"), "a\n").unwrap();
+    let sub = format!("{spaced}/sub");
+    let router = git_context_router(&sub, vec![sub.clone()], vec![sub.clone()]).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": sub, "paths": ["a.txt"], "message": "Spaced", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert!(
+        !std::path::Path::new(&format!("{parent}/sibling-hook-ran")).exists(),
+        "the neighbouring repository's hook never ran"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_message_hook_cannot_slip_an_unticked_file_into_the_commit() {
+    let (_dir, root) = editor_repo().await;
+    std::fs::write(format!("{root}/victim.txt"), "unticked\n").unwrap();
+    hook(&root, "commit-msg", "git add victim.txt");
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Picked", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(
+        git_output(&root, &["ls-tree", "--name-only", "HEAD", "victim.txt"]),
+        "",
+        "body={body}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_post_commit_hook_does_not_see_the_users_unticked_staging() {
+    let (_dir, root) = editor_repo().await;
+    std::fs::write(format!("{root}/victim.txt"), "staged, not ticked\n").unwrap();
+    git(&root, &["add", "victim.txt"]);
+    hook(
+        &root,
+        "post-commit",
+        "[ -n \"$AMENDING\" ] && exit 0\nAMENDING=1 git commit -q --amend --no-edit",
+    );
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Picked", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(
+        git_output(&root, &["ls-tree", "--name-only", "HEAD", "victim.txt"]),
+        ""
+    );
+    assert_eq!(
+        git_output(&root, &["diff", "--cached", "--name-only"]),
+        "victim.txt",
+        "still staged for later"
+    );
+}
+
+#[tokio::test]
+async fn a_signing_setting_git_cannot_read_stops_the_commit() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["config", "commit.gpgsign", "tru"]);
+    let before = head_subject(&root);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Unsigned?", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(head_subject(&root), before);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_commit_never_lands_on_a_branch_switched_to_while_it_was_prepared() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["branch", "other"]);
+    let main_before = git_output(&root, &["rev-parse", "main"]);
+    hook(
+        &root,
+        "pre-commit",
+        "unset GIT_INDEX_FILE\ngit switch -q other",
+    );
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Mine", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(git_output(&root, &["rev-parse", "main"]), main_before);
+    assert_eq!(git_output(&root, &["rev-parse", "other"]), main_before);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hook_refusing_the_branch_update_is_reported_in_its_own_words() {
+    let (_dir, root) = editor_repo().await;
+    hook(
+        &root,
+        "reference-transaction",
+        "if [ \"$1\" = prepared ]; then echo 'Policy: this branch is locked' >&2; exit 1; fi",
+    );
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Locked", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("this branch is locked"),
+        "{body}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_repositorys_message_cleanup_setting_is_applied() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["config", "commit.cleanup", "strip"]);
+    hook(&root, "commit-msg", "echo '# only a comment' > \"$1\"");
+    let before = head_subject(&root);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Will be emptied", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an empty message after cleanup is refused: {body}"
+    );
+    assert_eq!(head_subject(&root), before);
+}
