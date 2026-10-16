@@ -795,6 +795,7 @@ fn make_snapshot() -> SessionSnapshot {
         transcript_revision: 3,
         server_time: 11,
         provider: "codex".to_string(),
+        native_terminal_providers: vec!["codex".to_string()],
         service_ready: true,
         provider_connected: true,
         broker_connected: true,
@@ -1353,6 +1354,7 @@ fn remote_action_result_size_breakdown_reports_large_thread_transcript_payloads(
         None,
         // thread_skills
         None,
+        None,
         // reviews
         None,
         // workflows
@@ -1422,6 +1424,7 @@ fn make_large_thread_transcript_plaintext() -> RemoteActionResultPlaintext {
         thread_workspace: None,
         thread_settings: None,
         thread_skills: None,
+        terminal: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -1458,6 +1461,7 @@ fn make_large_ask_user_detail_plaintext() -> RemoteActionResultPlaintext {
         thread_workspace: None,
         thread_settings: None,
         thread_skills: None,
+        terminal: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -1853,6 +1857,7 @@ fn encrypted_fetch_reviews_result_carries_the_reviews_payload_to_the_device() {
         thread_workspace: None,
         thread_settings: None,
         thread_skills: None,
+        terminal: None,
         reviews: Some(reviews),
         workflows: None,
         devices: None,
@@ -1920,6 +1925,7 @@ fn encrypted_fetch_ask_result_carries_the_ask_detail_payload_to_the_device() {
         thread_workspace: None,
         thread_settings: None,
         thread_skills: None,
+        terminal: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -1971,6 +1977,7 @@ fn encrypted_dedicated_workflows_and_devices_payloads_reach_the_device() {
         thread_workspace: None,
         thread_settings: None,
         thread_skills: None,
+        terminal: None,
         reviews: None,
         workflows: Some(crate::protocol::WorkflowsResponse {
             workflows_revision: 4,
@@ -2032,6 +2039,7 @@ fn encrypted_fetch_projects_result_carries_the_projects_payload_to_the_device() 
         thread_workspace: None,
         thread_settings: None,
         thread_skills: None,
+        terminal: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -2085,6 +2093,7 @@ fn encrypted_fetch_workspace_git_context_result_reaches_the_device() {
         thread_workspace: None,
         thread_settings: None,
         thread_skills: None,
+        terminal: None,
         workspace_git_context: Some(crate::protocol::WorkspaceGitContextView {
             cwd: "/repo/checkout".to_string(),
             is_repo: true,
@@ -3014,6 +3023,7 @@ fn fetch_thread_skills_binds_the_asking_device_and_requires_device_authenticatio
 #[test]
 fn encrypted_fetch_thread_skills_result_reaches_the_device() {
     let result = RemoteActionResultPlaintext {
+        terminal: None,
         kind: remote_action_result_kind(RemoteActionKind::FetchThreadSkills),
         action: RemoteActionKind::FetchThreadSkills,
         ok: true,
@@ -3286,4 +3296,26 @@ async fn an_action_reply_under_a_replaced_secret_carries_nothing_the_re_pair_all
 
     assert!(!text.contains("the secret reply"), "transcript leaked");
     assert!(!text.contains("cat secrets.txt"), "approval leaked");
+}
+
+#[test]
+fn terminal_actions_bind_the_signed_actor_and_keystrokes_do_not_fill_the_workflow_ledger() {
+    for (action, expected) in [
+        ("open_terminal", crate::state::RequestClass::Write),
+        ("read_terminal", crate::state::RequestClass::Read),
+        ("write_terminal", crate::state::RequestClass::Stream),
+        ("close_terminal", crate::state::RequestClass::Write),
+    ] {
+        let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({"type":action,"input":{"thread_id":"session","device_id":"spoofed"}})).unwrap();
+        assert!(requires_signed_attempt(request.kind()));
+        assert_eq!(
+            super::request::remote_action_class(request.kind()),
+            expected
+        );
+        let bound = request.bind_device("phone".to_string(), "surface", test_origin());
+        assert_eq!(
+            serde_json::to_value(bound).unwrap()["input"]["device_id"],
+            "phone"
+        );
+    }
 }

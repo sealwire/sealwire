@@ -93,6 +93,13 @@ pub(super) fn parse_claude_approval(
     })
 }
 
+pub(super) fn native_terminal_permissions(approval: &str, sandbox: &str) -> Result<(), String> {
+    if approval != "bypass" || !matches!(sandbox, "workspace-write" | "danger-full-access") {
+        return Err("Claude terminal requires Full access (YOLO): native shell commands run directly, without tool approvals or a filesystem sandbox. Use Conversation for other permission modes.".to_string());
+    }
+    Ok(())
+}
+
 pub(super) fn claude_permission_mode(approval_policy: &str, _sandbox: &str) -> &'static str {
     match approval_policy {
         "bypass" => "bypassPermissions",

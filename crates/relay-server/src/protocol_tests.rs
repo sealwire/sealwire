@@ -80,6 +80,7 @@ fn make_snapshot() -> SessionSnapshot {
         transcript_revision: 3,
         server_time: 11,
         provider: "codex".to_string(),
+        native_terminal_providers: vec!["codex".to_string()],
         service_ready: true,
         provider_connected: true,
         broker_connected: true,

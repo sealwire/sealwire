@@ -628,11 +628,22 @@ impl AppState {
         self.send_message_inner_with_turn(input, images, None).await
     }
 
-    async fn send_message_inner_with_turn(
+    pub(super) async fn send_message_inner_with_turn(
         &self,
         input: SendMessageInput,
         images: &[ProviderImage],
         skill: Option<&crate::protocol::SkillInvocationInput>,
+    ) -> Result<(SessionSnapshot, Option<String>), String> {
+        self.send_message_with_native_request(input, images, skill, None)
+            .await
+    }
+
+    pub(super) async fn send_message_with_native_request(
+        &self,
+        input: SendMessageInput,
+        images: &[ProviderImage],
+        skill: Option<&crate::protocol::SkillInvocationInput>,
+        native_request_id: Option<&str>,
     ) -> Result<(SessionSnapshot, Option<String>), String> {
         let device_id = require_device_id(input.device_id)?;
         self.expire_stale_controller_if_needed().await;
@@ -922,9 +933,29 @@ impl AppState {
         }
 
         let turn_base_sha = self.session_turn_base_sha(&target_cwd).await;
-        let turn_id = target
-            .start_turn_with_skills(&turn_text, &model, &effort, images, &skill_inputs)
-            .await?;
+        let turn_id = if let Some(request_id) = native_request_id {
+            target
+                .bridge()
+                .start_native_turn(
+                    &target.provider_handle,
+                    request_id,
+                    &turn_text,
+                    &model,
+                    &effort,
+                )
+                .await?
+        } else {
+            target
+                .start_turn_with_skills(
+                    &turn_text,
+                    &model,
+                    &effort,
+                    images,
+                    &skill_inputs,
+                    skill.map(|pick| pick.name.as_str()),
+                )
+                .await?
+        };
         // The provider may have materialized its binding while this call was in
         // flight; the relay session id it was resolved from is unaffected.
         let effective_thread_id = target.session_id.clone();

@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -461,6 +462,33 @@ pub struct SkillInputRef {
 
 #[async_trait]
 pub trait ProviderBridge: Send + Sync {
+    fn native_terminal_binary(&self) -> Option<std::ffi::OsString> {
+        None
+    }
+
+    fn native_terminal_events(&self) -> Option<tokio::sync::broadcast::Receiver<Value>> {
+        None
+    }
+
+    async fn native_terminal_request(
+        &self,
+        _method: &str,
+        _params: Value,
+    ) -> Result<Value, String> {
+        Err("This provider does not expose a native terminal".to_string())
+    }
+
+    async fn start_native_turn(
+        &self,
+        _thread: &str,
+        _request_id: &str,
+        _text: &str,
+        _model: &str,
+        _effort: &str,
+    ) -> Result<Option<String>, String> {
+        Err("This provider cannot admit native input".to_string())
+    }
+
     async fn shutdown(&self) {}
 
     async fn refresh_workspace_trust(&self) -> Result<(), String> {
@@ -609,6 +637,8 @@ pub trait ProviderBridge: Send + Sync {
     }
     /// `start_turn` with skills attached by path. A provider that cannot take them must
     /// refuse: running the turn without the skill the person picked is a silent lie.
+    /// `selected_skill` is a catalog-validated picker choice; raw slash text alone
+    /// does not authorize a native command.
     async fn start_turn_with_skills(
         &self,
         thread_id: &str,
@@ -617,6 +647,7 @@ pub trait ProviderBridge: Send + Sync {
         effort: &str,
         images: &[ProviderImage],
         skills: &[SkillInputRef],
+        _selected_skill: Option<&str>,
     ) -> Result<Option<String>, String> {
         if !skills.is_empty() {
             return Err(format!(

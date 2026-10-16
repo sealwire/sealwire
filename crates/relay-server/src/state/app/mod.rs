@@ -101,6 +101,8 @@ pub(crate) const TASK_REVIEWER_READ_ONLY_MSG: &str =
 
 #[derive(Clone)]
 pub struct AppState {
+    terminals: Arc<tokio::sync::Mutex<HashMap<String, Arc<crate::terminal::Terminal>>>>,
+    claude_terminal_routes: Arc<tokio::sync::Mutex<HashSet<String>>>,
     relay: Arc<RwLock<RelayState>>,
     /// The private orchestration engines this build registered, if any.
     ///
@@ -344,6 +346,9 @@ mod skills;
 pub(crate) mod team;
 mod team_command_reducer;
 mod team_diff;
+mod terminal;
+#[cfg(test)]
+mod terminal_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 mod thread_workspace;
@@ -447,6 +452,8 @@ impl AppState {
         }
 
         Self {
+            terminals: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            claude_terminal_routes: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             relay,
             orchestrators: relay_api::Orchestrators::default(),
             team_driver: Arc::new(std::sync::Mutex::new(None)),
@@ -629,6 +636,8 @@ impl AppState {
         }
 
         let state = Self {
+            terminals: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            claude_terminal_routes: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             relay,
             orchestrators: relay_api::Orchestrators::default(),
             team_driver: Arc::new(std::sync::Mutex::new(None)),
@@ -1014,6 +1023,17 @@ in thread {thread_id}: {error}"
     }
 
     pub async fn shutdown_providers(&self) {
+        for terminal in self
+            .terminals
+            .lock()
+            .await
+            .drain()
+            .map(|(_, terminal)| terminal)
+        {
+            if let Err(error) = terminal.close() {
+                tracing::debug!(%error, "native terminal already closed");
+            }
+        }
         for provider in self.providers.values() {
             provider.shutdown().await;
         }

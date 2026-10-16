@@ -22,11 +22,14 @@ test("selectWorkerFiles: keeps runtime modules, drops tests + fakes", () => {
     "package.json",
     "package-lock.json",
     "README.md",
+    "native-mod",
   ];
   const selected = selectWorkerFiles(entries);
 
   assert.ok(selected.includes("worker.mjs"), "keeps worker.mjs");
   assert.ok(selected.includes("protocol.mjs"), "keeps runtime module");
+  assert.ok(selected.includes("native-mod/.claude-plugin/plugin.json"), "keeps native plugin manifest");
+  assert.ok(selected.includes("native-mod/hooks/register.js"), "keeps native admission hooks");
   assert.ok(selected.includes("package.json"), "keeps package.json");
   assert.ok(selected.includes("package-lock.json"), "keeps lockfile");
 

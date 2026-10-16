@@ -39,19 +39,21 @@ impl CodexBridge {
     }
 
     pub(super) async fn initialize(&self) -> Result<(), String> {
-        self.send_request(
-            "initialize",
-            json!({
-                "clientInfo": {
-                    "name": "agent-relay",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": {
-                    "experimentalApi": true
-                }
-            }),
-        )
-        .await?;
+        let initialized = self
+            .send_request(
+                "initialize",
+                json!({
+                    "clientInfo": {
+                        "name": "agent-relay",
+                        "version": env!("CARGO_PKG_VERSION")
+                    },
+                    "capabilities": {
+                        "experimentalApi": true
+                    }
+                }),
+            )
+            .await?;
+        *self.native_initialize.lock().await = Some(initialized);
 
         self.send_json(json!({ "method": "initialized" })).await
     }
@@ -129,6 +131,7 @@ pub(super) fn spawn_stdout_reader(
     pending_responses: PendingResponses,
     state: Arc<RwLock<RelayState>>,
     provider_key: &'static str,
+    native_events: tokio::sync::broadcast::Sender<Value>,
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -138,6 +141,11 @@ pub(super) fn spawn_stdout_reader(
                 Ok(Some(line)) => {
                     handle_stdout_line(&line, &stdin, &pending_responses, &state, provider_key)
                         .await;
+                    if let Ok(payload) = serde_json::from_str::<Value>(&line) {
+                        if payload.get("method").is_some() {
+                            let _ = native_events.send(payload);
+                        }
+                    }
                 }
                 Ok(None) => {
                     let mut relay = state.write().await;
@@ -1380,7 +1388,14 @@ mod disconnect_tests {
         let stdin = Arc::new(Mutex::new(child.stdin.take().expect("child stdin")));
         let stdout = child.stdout.take().expect("child stdout");
         let pending_responses = Arc::new(Mutex::new(HashMap::new()));
-        spawn_stdout_reader(stdout, stdin, pending_responses, state.clone(), "codex");
+        spawn_stdout_reader(
+            stdout,
+            stdin,
+            pending_responses,
+            state.clone(),
+            "codex",
+            tokio::sync::broadcast::channel(16).0,
+        );
         child.wait().await.expect("child exits");
 
         timeout(Duration::from_secs(2), async {
@@ -1452,6 +1467,7 @@ mod disconnect_tests {
             Arc::new(Mutex::new(HashMap::new())),
             state,
             "codex",
+            tokio::sync::broadcast::channel(16).0,
         );
 
         let exited = timeout(Duration::from_secs(5), child.wait()).await;

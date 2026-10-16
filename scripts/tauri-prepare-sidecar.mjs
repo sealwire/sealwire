@@ -133,6 +133,7 @@ function prepareClaudeWorkerResources() {
 
   const files = selectWorkerFiles(readdirSync(sourceDir));
   for (const file of files) {
+    mkdirSync(path.dirname(path.join(targetDir, file)), { recursive: true });
     cpSync(path.join(sourceDir, file), path.join(targetDir, file), {
       recursive: true,
     });

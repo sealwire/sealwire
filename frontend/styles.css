@@ -13722,3 +13722,7 @@ button.editor-change-group-title:hover {
 .editor-history-info > * {
   flex: none;
 }
+
+.session-presentation-controls { display: flex; gap: 4px; margin: 8px 0 12px; }
+.session-presentation-controls button { border: 1px solid var(--border-subtle); border-radius: 7px; background: transparent; color: inherit; padding: 5px 12px; font: inherit; cursor: pointer; }
+.session-presentation-controls button[aria-pressed="true"] { background: var(--on-panel); }

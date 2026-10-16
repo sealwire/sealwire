@@ -726,9 +726,18 @@ impl SessionTarget {
         effort: &str,
         images: &[ProviderImage],
         skills: &[crate::provider::SkillInputRef],
+        selected_skill: Option<&str>,
     ) -> Result<Option<String>, String> {
         self.bridge
-            .start_turn_with_skills(&self.provider_handle, text, model, effort, images, skills)
+            .start_turn_with_skills(
+                &self.provider_handle,
+                text,
+                model,
+                effort,
+                images,
+                skills,
+                selected_skill,
+            )
             .await
     }
 

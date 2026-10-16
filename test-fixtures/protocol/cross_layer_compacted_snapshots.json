@@ -26,6 +26,9 @@
     "last_progress_at": null,
     "logs": [],
     "model": "gpt-5.4",
+    "native_terminal_providers": [
+      "codex"
+    ],
     "pending_approvals": [],
     "pending_ask_user_questions": [],
     "provider": "codex",
@@ -135,6 +138,9 @@
     "last_progress_at": null,
     "logs": [],
     "model": "gpt-5.4",
+    "native_terminal_providers": [
+      "codex"
+    ],
     "pending_approvals": [],
     "pending_ask_user_questions": [],
     "provider": "codex",

@@ -1002,6 +1002,8 @@ impl AppState {
             }
         }
 
+        self.release_thread_terminal(thread_id).await;
+
         let mut message = "Session archived and removed from local history.".to_string();
         if !reviewer_threads.is_empty() {
             // Non-destructive default: keep (un-hide) reviewers unless told to delete.
@@ -1164,6 +1166,8 @@ normal thread instead."
             );
             relay.notify();
         }
+
+        self.release_thread_terminal(thread_id).await;
 
         let _ = self.list_threads(20, None).await;
 

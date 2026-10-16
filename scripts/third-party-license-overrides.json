@@ -57,5 +57,17 @@
     "file": "litellm-model-prices.txt",
     "source": "https://raw.githubusercontent.com/BerriAI/litellm/a9e79c8d4645f963c642387e2fef9b8c5474765e/LICENSE",
     "shippedIn": "crates/relay-server/src/usage/model-prices.json"
+  },
+  {
+    "id": "rust winapi-i686-pc-windows-gnu@0.4.0",
+    "file": "winapi-rs-0.3.9-MIT.txt",
+    "selectedLicense": "MIT",
+    "source": "https://raw.githubusercontent.com/retep998/winapi-rs/0.3.9/LICENSE-MIT"
+  },
+  {
+    "id": "rust winapi-x86_64-pc-windows-gnu@0.4.0",
+    "file": "winapi-rs-0.3.9-MIT.txt",
+    "selectedLicense": "MIT",
+    "source": "https://raw.githubusercontent.com/retep998/winapi-rs/0.3.9/LICENSE-MIT"
   }
 ]

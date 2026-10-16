@@ -269,6 +269,7 @@ function renderConversationContent(content) {
 
 export function createSessionRenderer({
   state,
+  terminalTransport = null,
   renderSettings = () => {},
   renderPairingApprovalModal,
   resolveActiveThread,
@@ -1432,6 +1433,7 @@ export function createSessionRenderer({
 
     renderConversationContent(
       h(LocalTranscriptPanel, {
+        terminalTransport,
         activeThreadId,
         activeThreadLabel,
         approval,

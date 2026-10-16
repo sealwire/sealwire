@@ -1,3 +1,5 @@
+import { SessionPresentation, useTerminalMode, workflowEntries } from "../shared/native-terminal.js";
+import { dispatchOrRecover } from "./actions.js";
 import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 import { TranscriptPane } from "../shared/transcript-pane.js";
@@ -21,6 +23,11 @@ import { reviewActivity } from "../shared/review-state.js";
 import { t } from "../shared/i18n.js";
 
 const h = React.createElement;
+const remoteTerminalTransport = async (action, input, relayId) => {
+  const type = { open: "open_terminal", read: "read_terminal", input: "write_terminal", close: "close_terminal" }[action];
+  const result = await dispatchOrRecover(type, { input }, { expectedRelayId: relayId });
+  return result?.terminal;
+};
 
 export function RemoteTranscriptPanel({
   currentState,
@@ -52,13 +59,16 @@ export function RemoteTranscriptPanel({
   uiState,
 }) {
   const relayNicknames = useRelayNicknames();
+  const relayId = currentState.remoteAuth?.relayId || null;
+  const terminalTransport = useCallback((action, input) => remoteTerminalTransport(action, input, relayId), [relayId]);
   const transcriptRef = useRef(null);
   const transcriptOptionsRef = useRef(null);
 
   const approval = sessionView?.approval || null;
   // Filtered HERE, before the scroll bookkeeping below — a withdrawn row must
   // not anchor "latest user message" scrolling any more than it may render.
-  const entries = visibleTranscriptEntries(session?.transcript);
+  const [terminalMode, setTerminalMode] = useTerminalMode(session?.active_thread_id, `remote:${relayId}`, session?.native_terminal_providers?.includes(session?.provider) === true);
+  const entries = visibleTranscriptEntries(terminalMode ? workflowEntries(session?.transcript) : session?.transcript);
   const hydrationLoading = Boolean(
     session?.transcript_truncated
       && currentState.transcriptHydrationBaseSnapshot
@@ -123,6 +133,7 @@ export function RemoteTranscriptPanel({
   const transcriptOptions = transcriptOptionsRef.current;
 
   useRemoteTranscriptScrollBookkeeping({
+    enabled: !terminalMode,
     currentState,
     entries,
     session,
@@ -270,6 +281,6 @@ export function RemoteTranscriptPanel({
           h("button", { type: "button", onClick: () => void viewRemoteThread(session.active_thread_id) }, t("Retry"))
         )
       : null,
-    h("div", { className: "chat-thread", id: "remote-transcript", ref: transcriptRef }, body)
+    h("div", { className: "chat-thread", id: "remote-transcript", ref: transcriptRef }, h(SessionPresentation, { threadId: session?.active_thread_id, provider: session?.provider, nativeTerminalProviders: session?.native_terminal_providers, transport: terminalTransport, terminalMode, onTerminalMode: setTerminalMode }, body))
   );
 }

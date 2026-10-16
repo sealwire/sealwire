@@ -95,19 +95,25 @@ fn only_the_reviewed_functions_read_a_raw_provider_thread_field() {
         "acp/rpc.rs: a new reader of an ACP payload's sessionId",
     );
     // `refresh_workspace_trust` only hands the worker's own handle back to the worker
-    // (rule 5); it never addresses `RelayState` with it.
+    // (rule 5); it never addresses `RelayState` with it. `native_terminal_request`
+    // likewise translates its handle before reading settings; its maps retain handles.
     assert_eq!(
         functions_containing(CLAUDE, r#"["provider_session_id"]"#),
         vec![
             "apply_worker_event",
             "fork_thread",
+            "native_terminal_request",
             "refresh_workspace_trust"
         ],
         "claude.rs: a new reader of a worker event's provider_session_id",
     );
     assert_eq!(
         functions_containing(CLAUDE, r#"["pending_thread_id"]"#),
-        vec!["apply_worker_event", "pending_session_id"],
+        vec![
+            "apply_worker_event",
+            "native_terminal_request",
+            "pending_session_id"
+        ],
         "claude.rs: a new reader of a deferred-start placeholder id",
     );
 }

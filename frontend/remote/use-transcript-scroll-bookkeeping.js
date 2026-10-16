@@ -16,6 +16,7 @@ import { setRemoteTranscriptElement } from "./ui-refs.js";
 // is only observable through the real hook, so the regression test drives this
 // hook directly (use-transcript-scroll-bookkeeping.dom.test.mjs).
 export function useRemoteTranscriptScrollBookkeeping({
+  enabled = true,
   currentState,
   entries,
   session,
@@ -47,6 +48,7 @@ export function useRemoteTranscriptScrollBookkeeping({
   renderedScrollKeyRef.current = remoteScrollKey;
 
   useLayoutEffect(() => {
+    if (!enabled) return undefined;
     const transcript = transcriptRef.current;
     setRemoteTranscriptElement(transcript);
     if (!transcript) {

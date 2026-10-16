@@ -1821,6 +1821,7 @@ async fn production_session_answers_a_phone_hello_with_the_pinned_identity() {
                     thread_workspace: None,
                     thread_settings: None,
                     thread_skills: None,
+                    terminal: None,
                     reviews: None,
                     workflows: None,
                     devices: None,

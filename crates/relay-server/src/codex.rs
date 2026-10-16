@@ -76,6 +76,8 @@ pub struct CodexBridge {
     state: Arc<RwLock<RelayState>>,
     provider_name: &'static str,
     binary_name: &'static str,
+    native_events: tokio::sync::broadcast::Sender<Value>,
+    native_initialize: Mutex<Option<Value>>,
     /// Test-only per-bridge JSON-RPC timeout override (milliseconds). Zero = default.
     #[cfg(test)]
     test_request_timeout_ms: AtomicU64,
@@ -83,6 +85,26 @@ pub struct CodexBridge {
 
 #[async_trait]
 impl ProviderBridge for CodexBridge {
+    fn native_terminal_binary(&self) -> Option<std::ffi::OsString> {
+        Some(crate::provider::resolve_binary(self.binary_name))
+    }
+
+    fn native_terminal_events(&self) -> Option<tokio::sync::broadcast::Receiver<Value>> {
+        Some(self.native_events.subscribe())
+    }
+
+    async fn native_terminal_request(&self, method: &str, params: Value) -> Result<Value, String> {
+        if method == "initialize" {
+            return self
+                .native_initialize
+                .lock()
+                .await
+                .clone()
+                .ok_or_else(|| "Codex is not initialized".to_string());
+        }
+        self.send_request(method, params).await
+    }
+
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
         self.list_threads(limit).await
     }
@@ -242,6 +264,7 @@ impl ProviderBridge for CodexBridge {
         effort: &str,
         images: &[ProviderImage],
         skills: &[SkillInputRef],
+        _selected_skill: Option<&str>,
     ) -> Result<Option<String>, String> {
         self.start_turn_with_inputs(thread_id, text, model, effort, images, skills)
             .await
@@ -471,12 +494,14 @@ impl CodexBridge {
         let pending_responses = Arc::new(Mutex::new(HashMap::new()));
 
         let stdin = Arc::new(Mutex::new(stdin));
+        let (native_events, _) = tokio::sync::broadcast::channel(1024);
         spawn_stdout_reader(
             stdout,
             stdin.clone(),
             pending_responses.clone(),
             state.clone(),
             provider_key,
+            native_events.clone(),
         );
         spawn_stderr_reader(stderr, state.clone());
 
@@ -488,6 +513,8 @@ impl CodexBridge {
             state,
             provider_name: provider_key,
             binary_name,
+            native_events,
+            native_initialize: Mutex::new(None),
             #[cfg(test)]
             test_request_timeout_ms: AtomicU64::new(0),
         };
@@ -1199,7 +1226,10 @@ fn is_thread_not_loaded_error(error: &str) -> bool {
 /// value needs reshaping: `"bypass"` is the unified YOLO knob and maps to
 /// codex's `approvalPolicy=never` + `sandbox=danger-full-access` combo
 /// regardless of what sandbox the user previously had selected.
-fn resolve_codex_policy<'a>(approval_policy: &'a str, sandbox: &'a str) -> (&'a str, &'a str) {
+pub(crate) fn resolve_codex_policy<'a>(
+    approval_policy: &'a str,
+    sandbox: &'a str,
+) -> (&'a str, &'a str) {
     if approval_policy == "bypass" {
         ("never", "danger-full-access")
     } else {

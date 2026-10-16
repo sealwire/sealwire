@@ -5,6 +5,8 @@
 // app while dev (which runs the repo copy) keeps working.
 
 // Non-.mjs files the worker needs at runtime for `npm ci --omit=dev`.
+export const WORKER_RUNTIME_RESOURCES = ["native-mod/package.json", "native-mod/.claude-plugin/plugin.json", "native-mod/hooks/hooks.json", "native-mod/hooks/register.js"];
+
 export const WORKER_STATIC_FILES = ["package.json", "package-lock.json"];
 
 function isRuntimeModule(name) {
@@ -19,5 +21,5 @@ function isRuntimeModule(name) {
 export function selectWorkerFiles(entries) {
   const modules = entries.filter(isRuntimeModule).sort();
   const statics = WORKER_STATIC_FILES.filter((name) => entries.includes(name));
-  return [...statics, ...modules];
+  return [...statics, ...modules, ...(entries.includes("native-mod") ? WORKER_RUNTIME_RESOURCES : [])];
 }

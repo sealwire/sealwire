@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
-import { WORKER_STATIC_FILES, selectWorkerFiles } from "./tauri-worker-files.mjs";
+import { WORKER_STATIC_FILES, WORKER_RUNTIME_RESOURCES, selectWorkerFiles } from "./tauri-worker-files.mjs";
 
 // These tests exercise the ACTUAL npm artifact — the tarball `npm publish`
 // would upload — not the source tree. The source tree always has every worker
@@ -257,7 +257,7 @@ function workerFilesThatMustShip() {
     .filter((entry) => !entry.isDirectory())
     .map((entry) => entry.name);
   const tracked = trackedWorkerPaths().filter((rel) => !rel.includes("/") && !isFixture(rel));
-  const wanted = new Set([...selectWorkerFiles(onDisk), ...tracked]);
+  const wanted = new Set([...selectWorkerFiles(onDisk), ...WORKER_RUNTIME_RESOURCES, ...tracked]);
   for (const name of NOT_IN_NPM_PACKAGE) wanted.delete(name);
   return [...wanted].sort();
 }
@@ -275,24 +275,18 @@ function trackedWorkerPaths() {
   return paths.map((p) => p.slice("claude-worker/".length));
 }
 
-// Both packagers only ever see top-level `.mjs` plus the two manifests —
-// `claude-worker/*.mjs` in the npm `files` list, a flat readdir filtered to .mjs
-// in the Tauri selector. So a nested module, or a runtime file with any other
-// extension, is dropped by both while every other guard here still passes.
-// These two assert that premise rather than trusting it.
-test("claude-worker/ stays flat, which is what both packagers assume", () => {
+// Native plugins load resources by path; imports cannot reveal their manifests
+// or hook entrypoints, so nested files need an explicit packaging contract.
+test("nested worker runtime files have an explicit packaging contract", () => {
   const nested = trackedWorkerPaths()
-    .filter((rel) => rel.includes("/"))
+    .filter((rel) => rel.includes("/") && !WORKER_RUNTIME_RESOURCES.includes(rel))
     .map((rel) => `claude-worker/${rel}`);
   assert.deepEqual(
     nested,
     [],
-    `These committed claude-worker paths are below the top level, where ` +
-      `neither packager looks:\n  ${nested.join("\n  ")}\n` +
-      `If they are needed at runtime, make both packagers recursive first: the ` +
-      `"claude-worker/*.mjs" globs in package.json and selectWorkerFiles in ` +
-      `scripts/tauri-worker-files.mjs. If they are not, move them out of ` +
-      `claude-worker/.`,
+    `These nested worker files have no packaging contract:\n  ${nested.join("\n  ")}\n` +
+      `Add runtime resources to package.json and WORKER_RUNTIME_RESOURCES, or ` +
+      `keep development-only files outside claude-worker/.`,
   );
 });
 

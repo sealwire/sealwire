@@ -1,0 +1,14 @@
+.session-presentation-controls { display: flex; gap: 4px; margin: 8px 0 12px; }
+.session-presentation-controls button { border: 1px solid var(--border-subtle); border-radius: 7px; background: transparent; color: inherit; padding: 5px 12px; font: inherit; cursor: pointer; }
+.session-presentation-controls button[aria-pressed="true"] { background: var(--on-panel); }
+.native-terminal-policy { margin: 0 0 8px; font-size: 13px; }
+.native-terminal { background: #151515; color: #e5e5e5; border: 1px solid #414141; border-radius: 8px; padding: 10px; margin-bottom: 16px; overflow: hidden; }
+.native-terminal-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; }
+.native-terminal-toolbar button, .native-terminal-keys button { color: inherit; background: transparent; border: 1px solid #666; border-radius: 4px; padding: 3px 9px; font: 12px system-ui, sans-serif; }
+.native-terminal-keys { display: flex; gap: 8px; margin-top: 8px; }
+.native-terminal-status { font: 12px system-ui, sans-serif; color: #aaa; margin-bottom: 8px; }
+.native-terminal-screen { height: clamp(160px, calc(100dvh - 460px), 640px); overflow: auto; }
+.native-terminal-screen .xterm { height: 100%; }
+.native-terminal-error { display: flex; gap: 12px; align-items: center; padding-top: 10px; font: 13px system-ui, sans-serif; color: #ffb3b3; }
+.native-terminal-error button { flex-shrink: 0; }
+@media (max-width: 600px) { .native-terminal { padding: 7px; margin-inline: 0; } .native-terminal-screen { height: clamp(200px, 44dvh, 420px); } }

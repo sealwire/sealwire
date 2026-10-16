@@ -7044,6 +7044,7 @@ tree; got {}",
             effort: &str,
             images: &[ProviderImage],
             skills: &[crate::provider::SkillInputRef],
+            _selected_skill: Option<&str>,
         ) -> Result<Option<String>, String> {
             if !skills.is_empty() && self.name != "codex" {
                 return Err(format!("{} cannot take a skill by path", self.name));

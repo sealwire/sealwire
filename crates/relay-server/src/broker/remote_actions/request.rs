@@ -36,6 +36,18 @@ pub(in crate::broker) enum RemoteActionRequest {
         challenge: String,
         proof: String,
     },
+    OpenTerminal {
+        input: crate::terminal::TerminalInput,
+    },
+    ReadTerminal {
+        input: crate::terminal::TerminalInput,
+    },
+    WriteTerminal {
+        input: crate::terminal::TerminalInput,
+    },
+    CloseTerminal {
+        input: crate::terminal::TerminalInput,
+    },
     StartSession {
         input: StartSessionInput,
     },
@@ -303,6 +315,10 @@ impl RemoteActionRequest {
         match self {
             Self::ClaimChallenge { .. } => RemoteActionKind::ClaimChallenge,
             Self::ClaimDevice { .. } => RemoteActionKind::ClaimDevice,
+            Self::OpenTerminal { .. } => RemoteActionKind::OpenTerminal,
+            Self::ReadTerminal { .. } => RemoteActionKind::ReadTerminal,
+            Self::WriteTerminal { .. } => RemoteActionKind::WriteTerminal,
+            Self::CloseTerminal { .. } => RemoteActionKind::CloseTerminal,
             Self::StartSession { .. } => RemoteActionKind::StartSession,
             Self::ForkSession { .. } => RemoteActionKind::ForkSession,
             Self::ResumeSession { .. } => RemoteActionKind::ResumeSession,
@@ -374,6 +390,22 @@ impl RemoteActionRequest {
                 challenge,
                 proof,
             },
+            Self::OpenTerminal { mut input } => {
+                input.device_id = Some(device_id);
+                Self::OpenTerminal { input }
+            }
+            Self::ReadTerminal { mut input } => {
+                input.device_id = Some(device_id);
+                Self::ReadTerminal { input }
+            }
+            Self::WriteTerminal { mut input } => {
+                input.device_id = Some(device_id);
+                Self::WriteTerminal { input }
+            }
+            Self::CloseTerminal { mut input } => {
+                input.device_id = Some(device_id);
+                Self::CloseTerminal { input }
+            }
             Self::StartSession { mut input } => {
                 input.device_id = Some(device_id);
                 Self::StartSession { input }
@@ -661,6 +693,10 @@ impl RemoteActionRequest {
 pub(in crate::broker) enum RemoteActionKind {
     ClaimChallenge,
     ClaimDevice,
+    OpenTerminal,
+    ReadTerminal,
+    WriteTerminal,
+    CloseTerminal,
     StartSession,
     ForkSession,
     ResumeSession,
@@ -719,6 +755,10 @@ impl RemoteActionKind {
         match self {
             Self::ClaimChallenge => "claim_challenge",
             Self::ClaimDevice => "claim_device",
+            Self::OpenTerminal => "open_terminal",
+            Self::ReadTerminal => "read_terminal",
+            Self::WriteTerminal => "write_terminal",
+            Self::CloseTerminal => "close_terminal",
             Self::StartSession => "start_session",
             Self::ForkSession => "fork_session",
             Self::ResumeSession => "resume_session",
@@ -778,7 +818,9 @@ impl RemoteActionKind {
 /// is treated as one until someone declares otherwise here.
 pub(super) fn remote_action_class(action: RemoteActionKind) -> RequestClass {
     match action {
+        // Keystrokes have a terminal-scoped sequence; the durable write ledger is for workflows.
         RemoteActionKind::Heartbeat | RemoteActionKind::WatchThreads => RequestClass::Untracked,
+        RemoteActionKind::WriteTerminal => RequestClass::Stream,
         RemoteActionKind::ListProviders
         | RemoteActionKind::ListThreads
         | RemoteActionKind::ListProviderModels
@@ -789,6 +831,7 @@ pub(super) fn remote_action_class(action: RemoteActionKind) -> RequestClass {
         | RemoteActionKind::FetchWorkspaceGitContext
         | RemoteActionKind::FetchThreadWorkspace
         | RemoteActionKind::FetchThreadSettings
+        | RemoteActionKind::ReadTerminal
         | RemoteActionKind::FetchThreadSkills
         | RemoteActionKind::FetchReviews
         | RemoteActionKind::FetchWorkflows
@@ -821,6 +864,8 @@ pub(super) fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
             | RemoteActionKind::FetchWorkspaceGitContext
             | RemoteActionKind::FetchThreadWorkspace
             | RemoteActionKind::FetchThreadSettings
+            | RemoteActionKind::WriteTerminal
+            | RemoteActionKind::ReadTerminal
             | RemoteActionKind::FetchThreadSkills
             | RemoteActionKind::FetchReviews
             | RemoteActionKind::FetchWorkflows

@@ -1,3 +1,4 @@
+import { createLocalTerminalTransport } from "./shared/native-terminal.js";
 import {
   appShell,
   archiveThreadButton,
@@ -1186,6 +1187,7 @@ function refreshAgentWorkingIndicator() {
 }
 
 const renderer = createSessionRenderer({
+  terminalTransport: createLocalTerminalTransport(apiFetch, () => state.deviceId),
   state,
   getComposerScope: composerScopeKey,
   renderSettings: () => settings.render(),

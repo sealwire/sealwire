@@ -111,6 +111,7 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub transcript_generation: String,
     pub provider: String,
+    pub native_terminal_providers: Vec<String>,
     /// Static per relay process; rides the snapshot so both surfaces get it
     /// through the channel they already consume (no extra remote action).
     #[serde(default)]

@@ -36,6 +36,7 @@
  */
 
 import { createInterface } from "node:readline";
+import { createNativeTerminalManager } from "./native-terminal.mjs";
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
@@ -1467,6 +1468,18 @@ async function main() {
   const pendingAskUserQuestions = new Map();
   const sessionContext = { pendingApprovals, pendingAskUserQuestions };
 
+  const nativeTerminals = createNativeTerminalManager({
+    emit, reply: (cmd, value) => emitResponse(cmd.id, value),
+    fail: (cmd, error) => emitErrorResponse(cmd.id, error),
+    pendingApprovals, pendingAskUserQuestions, nextApproval, nextAskUserRequest,
+    releaseSdk: async (id) => {
+      const entry = findSessionEntry(sessions, id);
+      const options = entry?.options;
+      const result = releaseSession(sessions, id, sessionContext);
+      if (!result.released && !result.noop) throw new Error(result.reason);
+      return options;
+    },
+  });
   const rl = createInterface({ input: process.stdin });
   log("claude-worker ready");
 
@@ -1482,9 +1495,18 @@ async function main() {
       continue;
     }
 
+    if (cmd.type === "delete_session" && nativeTerminals.has(cmd.provider_session_id)) {
+      try { await nativeTerminals.releaseSession(cmd.provider_session_id); }
+      catch (error) { emitErrorResponse(cmd.id, error.message); continue; }
+    }
+    if (nativeTerminals.accepts(cmd)) {
+      nativeTerminals.handle(cmd);
+      continue;
+    }
     switch (cmd.type) {
       case "shutdown": {
         log("shutting down");
+        await nativeTerminals.close();
         for (const entry of sessions.values()) {
           closeSessionEntry(entry);
         }
@@ -1967,7 +1989,7 @@ async function main() {
       }
 
       case "list_live_sessions": {
-        emitResponse(cmd.id, { sessions: liveSessionRows(sessions) });
+        emitResponse(cmd.id, { sessions: [...liveSessionRows(sessions), ...nativeTerminals.liveRows()] });
         break;
       }
 

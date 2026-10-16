@@ -23,6 +23,7 @@ mod state;
 mod state_paths;
 mod storage_migration;
 mod teams;
+mod terminal;
 mod usage;
 #[cfg(windows)]
 mod windows_state_permissions;
@@ -199,6 +200,18 @@ struct LocalImageInput {
 #[tokio::main]
 async fn main() -> ExitCode {
     let subcommand = std::env::args().nth(1);
+    if subcommand.as_deref() == Some("terminal-host") {
+        let code = match terminal::run_host().await {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        };
+        // Tokio's uncancellable stdin read would wait for the worker to close
+        // its pipe even after the CLI has exited and this host has finished.
+        std::process::exit(code);
+    }
     // `migrate-storage` reads these to find the old files; anything else would run
     // against a fresh default database while the real state waits to be imported.
     if subcommand.as_deref() != Some("migrate-storage") {
@@ -501,6 +514,10 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         )
         .route("/api/session/resume", post(resume_session))
         .route("/api/session/settings", post(update_session_settings))
+        .route("/api/session/terminal/open", post(open_terminal))
+        .route("/api/session/terminal/read", get(read_terminal))
+        .route("/api/session/terminal/input", post(write_terminal))
+        .route("/api/session/terminal/close", post(close_terminal))
         .route("/api/session/heartbeat", post(session_heartbeat))
         .route("/api/session/watch-threads", post(session_watch_threads))
         .route(
@@ -2866,7 +2883,9 @@ async fn with_durable_mutations(
     request: Request,
     next: Next,
 ) -> Response {
-    let mutating = request.uri().path().starts_with("/api/") && !method_is_safe(request.method());
+    let mutating = request.uri().path().starts_with("/api/")
+        && !request.uri().path().starts_with("/api/session/terminal/")
+        && !method_is_safe(request.method());
     let response = next.run(request).await;
     if !mutating || !response.status().is_success() {
         return response;
@@ -3023,3 +3042,48 @@ fn forbidden_csrf(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
 
 #[cfg(test)]
 mod tests;
+
+async fn open_terminal(
+    State(context): State<AppContext>,
+    Json(input): Json<terminal::TerminalInput>,
+) -> Result<Json<ApiEnvelope<terminal::TerminalFrame>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .open_terminal(input)
+        .await
+        .map(|frame| Json(ApiEnvelope::ok(frame)))
+        .map_err(bad_request)
+}
+async fn read_terminal(
+    State(context): State<AppContext>,
+    Query(input): Query<terminal::TerminalInput>,
+) -> Result<Json<ApiEnvelope<terminal::TerminalFrame>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .read_terminal(input)
+        .await
+        .map(|frame| Json(ApiEnvelope::ok(frame)))
+        .map_err(bad_request)
+}
+async fn write_terminal(
+    State(context): State<AppContext>,
+    Json(input): Json<terminal::TerminalInput>,
+) -> Result<Json<ApiEnvelope<()>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .write_terminal(input)
+        .await
+        .map(|()| Json(ApiEnvelope::ok(())))
+        .map_err(bad_request)
+}
+async fn close_terminal(
+    State(context): State<AppContext>,
+    Json(input): Json<terminal::TerminalInput>,
+) -> Result<Json<ApiEnvelope<()>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .close_terminal(input)
+        .await
+        .map(|()| Json(ApiEnvelope::ok(())))
+        .map_err(bad_request)
+}

@@ -80,6 +80,7 @@ pub(super) struct RemoteActionResultPlaintext {
     pub(super) thread_settings: Option<ThreadSettingsView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) thread_skills: Option<ThreadSkillsView>,
+    pub(super) terminal: Option<crate::terminal::TerminalFrame>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) reviews: Option<ReviewsResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,6 +138,7 @@ fn busy_remote_action_result(
         thread_workspace: None,
         thread_settings: None,
         thread_skills: None,
+        terminal: None,
         reviews: None,
         workflows: None,
         devices: None,
@@ -218,6 +220,7 @@ pub(super) struct RemoteActionOutcome {
     pub(super) thread_workspace: Option<ResolvedWorkspace>,
     pub(super) thread_settings: Option<ThreadSettingsView>,
     pub(super) thread_skills: Option<ThreadSkillsView>,
+    pub(super) terminal: Option<crate::terminal::TerminalFrame>,
     pub(super) reviews: Option<ReviewsResponse>,
     pub(super) workflows: Option<WorkflowsResponse>,
     pub(super) devices: Option<DevicesResponse>,
@@ -653,6 +656,7 @@ pub(super) async fn publish_remote_action_result_private(
         thread_workspace,
         thread_settings,
         thread_skills,
+        terminal,
         reviews,
         workflows,
         devices,
@@ -684,6 +688,7 @@ pub(super) async fn publish_remote_action_result_private(
         thread_workspace.as_ref(),
         thread_settings.as_ref(),
         thread_skills.as_ref(),
+        terminal.as_ref(),
         reviews.as_ref(),
         workflows.as_ref(),
         devices.as_ref(),
@@ -715,6 +720,7 @@ pub(super) async fn publish_remote_action_result_private(
         thread_workspace,
         thread_settings,
         thread_skills,
+        terminal,
         reviews,
         workflows,
         devices,
@@ -827,6 +833,7 @@ pub(super) async fn replay_encrypted_remote_action_result(
             thread_workspace: cached.thread_workspace,
             thread_settings: cached.thread_settings,
             thread_skills: cached.thread_skills,
+            terminal: cached.terminal,
             reviews: cached.reviews,
             workflows: cached.workflows,
             devices: cached.devices,
@@ -1019,6 +1026,7 @@ pub(super) fn cached_remote_action_result(
         thread_workspace: outcome.thread_workspace,
         thread_settings: outcome.thread_settings,
         thread_skills: outcome.thread_skills,
+        terminal: outcome.terminal,
         reviews: outcome.reviews,
         workflows: outcome.workflows,
         devices: outcome.devices,
@@ -1053,6 +1061,7 @@ pub(super) fn measure_remote_action_result_sizes(
     thread_workspace: Option<&ResolvedWorkspace>,
     thread_settings: Option<&ThreadSettingsView>,
     thread_skills: Option<&ThreadSkillsView>,
+    terminal: Option<&crate::terminal::TerminalFrame>,
     reviews: Option<&ReviewsResponse>,
     workflows: Option<&WorkflowsResponse>,
     devices: Option<&DevicesResponse>,
@@ -1083,6 +1092,7 @@ pub(super) fn measure_remote_action_result_sizes(
         thread_workspace,
         thread_settings,
         thread_skills,
+        terminal,
         reviews,
         workflows,
         devices,
@@ -1233,6 +1243,7 @@ struct RemoteActionResultPlaintextRef<'a> {
     thread_settings: Option<&'a ThreadSettingsView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_skills: Option<&'a ThreadSkillsView>,
+    terminal: Option<&'a crate::terminal::TerminalFrame>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reviews: Option<&'a ReviewsResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1282,6 +1293,10 @@ pub(super) fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActio
         | RemoteActionKind::FetchThreadWorkspace
         | RemoteActionKind::SetThreadWorkspace
         | RemoteActionKind::FetchThreadSettings
+        | RemoteActionKind::OpenTerminal
+        | RemoteActionKind::ReadTerminal
+        | RemoteActionKind::CloseTerminal
+        | RemoteActionKind::WriteTerminal
         | RemoteActionKind::FetchThreadSkills
         | RemoteActionKind::FetchReviews
         | RemoteActionKind::FetchWorkflows

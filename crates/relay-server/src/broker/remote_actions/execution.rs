@@ -437,6 +437,32 @@ pub(super) async fn execute_remote_action(
                 thread_workspace: Some(thread_workspace),
                 ..RemoteActionOutcome::default()
             }),
+        RemoteActionRequest::OpenTerminal { input } => {
+            state
+                .open_terminal(input)
+                .await
+                .map(|terminal| RemoteActionOutcome {
+                    terminal: Some(terminal),
+                    ..RemoteActionOutcome::default()
+                })
+        }
+        RemoteActionRequest::ReadTerminal { input } => {
+            state
+                .read_terminal(input)
+                .await
+                .map(|terminal| RemoteActionOutcome {
+                    terminal: Some(terminal),
+                    ..RemoteActionOutcome::default()
+                })
+        }
+        RemoteActionRequest::WriteTerminal { input } => state
+            .write_terminal(input)
+            .await
+            .map(|()| RemoteActionOutcome::default()),
+        RemoteActionRequest::CloseTerminal { input } => state
+            .close_terminal(input)
+            .await
+            .map(|()| RemoteActionOutcome::default()),
         RemoteActionRequest::FetchThreadSettings {
             device_id,
             thread_id,

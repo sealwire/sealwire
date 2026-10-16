@@ -93,6 +93,8 @@ pub(crate) struct RequestSessionGrant {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestClass {
+    /// Sequenced terminal input: replies are cached; the terminal prevents replay after eviction.
+    Stream,
     /// Declared side-effect free: a retry may run it again under a new authorization.
     Read,
     /// Everything not declared read-only. Runs at most once per (device, action id).
@@ -355,13 +357,14 @@ impl RelayState {
     ) -> RequestAdmission {
         match facts.class {
             RequestClass::Untracked => RequestAdmission::Run,
-            RequestClass::Read => match self.reserve_remote_action_with_digest(
-                facts.device_id,
-                facts.action_id,
-                facts.action_kind,
-                facts.digest,
-                now_secs,
-            ) {
+            RequestClass::Read | RequestClass::Stream => match self
+                .reserve_remote_action_with_digest(
+                    facts.device_id,
+                    facts.action_id,
+                    facts.action_kind,
+                    facts.digest,
+                    now_secs,
+                ) {
                 Ok(crate::state::RemoteActionReplayDecision::Execute) => {
                     match self
                         .recent_remote_actions
@@ -636,6 +639,14 @@ mod tests {
             ),
             RequestAdmission::Execute(_)
         ));
+        assert!(matches!(
+            relay.admit_signed_request(
+                &facts(&sid, 1_003, now, "terminal-input", RequestClass::Stream),
+                now,
+                1
+            ),
+            RequestAdmission::Execute(_)
+        ));
     }
 
     #[test]
@@ -779,6 +790,7 @@ mod tests {
             thread_workspace: None,
             thread_settings: None,
             thread_skills: None,
+            terminal: None,
             reviews: None,
             workflows: None,
             devices: None,

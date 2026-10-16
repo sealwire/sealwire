@@ -6141,6 +6141,7 @@ async fn a_picked_codex_skill_rides_as_a_structured_input_naming_its_path() {
         "low",
         &[],
         std::slice::from_ref(&skill),
+        Some("probe"),
     )
     .await
     .expect("turn/start with a skill input");

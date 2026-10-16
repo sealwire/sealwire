@@ -1,3 +1,4 @@
+import { SessionPresentation, useTerminalMode, workflowEntries } from "../shared/native-terminal.js";
 import React, { useLayoutEffect, useRef } from "react";
 
 import { ConversationEmptyState } from "../shared/conversation.js";
@@ -16,6 +17,7 @@ const h = React.createElement;
 export function LocalTranscriptPanel({
   activeThreadId,
   activeThreadLabel,
+  terminalTransport = null,
   approval,
   buildTranscriptOptions,
   entries: rawEntries,
@@ -39,7 +41,8 @@ export function LocalTranscriptPanel({
 }) {
   // Filtered HERE, before the scroll bookkeeping below — a withdrawn row must
   // not anchor "latest user message" scrolling any more than it may render.
-  const entries = visibleTranscriptEntries(rawEntries);
+  const [terminalMode, setTerminalMode] = useTerminalMode(activeThreadId, "local", session?.native_terminal_providers?.includes(session?.provider) === true);
+  const entries = visibleTranscriptEntries(terminalMode ? workflowEntries(rawEntries) : rawEntries);
   const loaderRef = useRef(null);
   // Ref-latched so a changing onLoadOlderTranscript identity never forces the
   // attach effect (deps: [scrollElement]) to re-run and re-attach.
@@ -170,7 +173,7 @@ export function LocalTranscriptPanel({
   useLocalTranscriptScrollBookkeeping({
     activeThreadId,
     entries,
-    mode: inScrollBranch ? (emptyReady ? "empty-ready" : "entries") : null,
+    mode: inScrollBranch && !terminalMode ? (emptyReady ? "empty-ready" : "entries") : null,
     resetEpoch,
     scrollElement,
     session,
@@ -189,5 +192,5 @@ export function LocalTranscriptPanel({
     loaderRef.current?.sync(historyKey);
   });
 
-  return content;
+  return h(SessionPresentation, { threadId: viewingConversation ? activeThreadId : null, provider: session?.provider, nativeTerminalProviders: session?.native_terminal_providers, transport: terminalTransport, terminalMode, onTerminalMode: setTerminalMode }, content);
 }

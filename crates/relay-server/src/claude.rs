@@ -36,8 +36,9 @@ use crate::{
 };
 
 use self::protocol::{
-    bool_at, claude_permission_mode, compact_json, new_user_message_uuid, normalize_id,
-    parse_claude_approval, parse_thread_array, parse_thread_summary, string_at, unix_now, value_at,
+    bool_at, claude_permission_mode, compact_json, native_terminal_permissions,
+    new_user_message_uuid, normalize_id, parse_claude_approval, parse_thread_array,
+    parse_thread_summary, string_at, unix_now, value_at,
 };
 
 type PendingResponses = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
@@ -110,6 +111,8 @@ pub struct ClaudeCodeBridge {
     /// Kept so the Orchestrator's MCP bridge resolves beside the worker that is
     /// actually running, not beside the one the default path would guess.
     worker_path: String,
+    native_events: tokio::sync::broadcast::Sender<Value>,
+    native_sessions: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Which sealwire tool surface a thread gets, resolved FRESH every turn.
@@ -357,6 +360,10 @@ impl ClaudeCodeBridge {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        command.env(
+            "SEALWIRE_TERMINAL_HOST_BINARY",
+            std::env::current_exe().map_err(|error| error.to_string())?,
+        );
         let mut child = command
             .spawn()
             .map_err(|error| format!("failed to start claude worker: {error}"))?;
@@ -378,11 +385,13 @@ impl ClaudeCodeBridge {
         let pending_responses = Arc::new(Mutex::new(HashMap::new()));
 
         let stdin = Arc::new(Mutex::new(stdin));
+        let (native_events, _) = tokio::sync::broadcast::channel(256);
         spawn_stdout_reader(
             stdout,
             stdin.clone(),
             pending_responses.clone(),
             state.clone(),
+            native_events.clone(),
         );
         spawn_stderr_reader(stderr, state.clone());
 
@@ -396,6 +405,8 @@ impl ClaudeCodeBridge {
             deferred_start_list_gate: Arc::new(RwLock::new(())),
             cached_models: Arc::new(RwLock::new(None)),
             worker_path: worker_path.to_string(),
+            native_events,
+            native_sessions: Mutex::new(std::collections::HashSet::new()),
         };
 
         {
@@ -406,6 +417,223 @@ impl ClaudeCodeBridge {
         }
 
         Ok(bridge)
+    }
+
+    async fn native_model_id(&self, model: &str) -> Result<String, String> {
+        if model.starts_with("claude-") {
+            return Ok(model.to_string());
+        }
+        let cached = self.cached_models.read().await.clone();
+        let models = match cached {
+            Some(models) => models,
+            None => self.list_models().await?,
+        };
+        models
+            .iter()
+            .find(|row| row.model == model)
+            .and_then(|row| row.resolved_model.clone())
+            .ok_or_else(|| {
+                format!("Claude did not resolve native model {model}; refresh its model catalog")
+            })
+    }
+
+    async fn start_turn_impl(
+        &self,
+        thread_id: &str,
+        text: &str,
+        model: &str,
+        effort: &str,
+        images: &[ProviderImage],
+        native_request_id: Option<&str>,
+        selected_skill: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let transcript_text = user_message_transcript_text(text, images.len()).unwrap_or_default();
+        let image_payloads = images
+            .iter()
+            .map(|image| {
+                json!({
+                    "media_type": image.media_type,
+                    "data": image.data,
+                })
+            })
+            .collect::<Vec<_>>();
+        // A pending provider handle materializes on its first turn. The worker
+        // `start` both creates the SDK session and sends the first message;
+        // `session_started` moves only the stable session's binding to the real
+        // SDK id.
+        let pending = self.pending_threads.lock().await.remove(thread_id);
+        if let Some(config) = pending {
+            // `list_sessions` may observe the SDK id after `start` creates it but
+            // before the async stream emits `session_started`. Serialize just
+            // those two operations. The worker emits the start response after
+            // `session_started`, and Rust consumes stdout in order, so releasing
+            // this guard after the response means the stable binding is ready.
+            let _deferred_start_guard = self.deferred_start_list_gate.write().await;
+            // Mint the user message's identity up front and hand it to the
+            // worker. The `start` command accepts the same
+            // `turn_id`/`user_item_id`/`user_message_uuid` triple the `send`
+            // path uses (worker.mjs createUserTurn), so the worker stamps the SDK
+            // message with our uuid. That lets us record the message locally now
+            // with ids the worker will reuse when it later replays `user_message`
+            // (and that a history re-read reproduces), collapsing all three into
+            // one idempotent transcript entry instead of a duplicate.
+            let turn_id = format!(
+                "claude-turn-{}",
+                self.next_request_id.fetch_add(1, Ordering::Relaxed)
+            );
+            let user_message_uuid = new_user_message_uuid();
+            let user_item_id = format!("user:{user_message_uuid}");
+            let mut cmd = json!({
+                "type": "start",
+                "cwd": config.cwd,
+                "model": config.model,
+                "permissionMode": config.permission_mode,
+                "settingSources": self.setting_sources(Some(&config.cwd)).await,
+                "pending_thread_id": thread_id,
+                "prompt": text,
+                "images": image_payloads.clone(),
+                "turn_id": turn_id,
+                "user_item_id": user_item_id,
+                "user_message_uuid": user_message_uuid,
+            });
+            // The turn's own effort wins: it is what the relay resolved for the
+            // work about to run, while the config's was captured when the empty
+            // thread was opened and may be a settings change out of date.
+            insert_effort(
+                &mut cmd,
+                if effort.trim().is_empty() {
+                    config.effort.as_str()
+                } else {
+                    effort
+                },
+            );
+            // The persona was set when the thread was created; this deferred
+            // `start` is the first time a worker session actually exists to
+            // receive it.
+            if let Some(prompt) = config.system_prompt.as_deref() {
+                cmd["systemPrompt"] = Value::String(prompt.to_string());
+            }
+            if let Some(device_id) = config.orchestrator_tools.as_deref() {
+                cmd["mcpServers"] = orchestrator_mcp_config(&self.worker_path, device_id);
+                cmd["allowedTools"] = orchestrator_allowed_tools();
+                cmd["tools"] = Value::Array(Vec::new());
+            } else {
+                attach_orchestrator_session(&self.state, &self.worker_path, thread_id, &mut cmd)
+                    .await;
+            }
+            let result = match self.send_request("start", cmd).await {
+                Ok(result) => result,
+                Err(error) => {
+                    // Restore pending state so a retry can succeed.
+                    self.pending_threads
+                        .lock()
+                        .await
+                        .insert(thread_id.to_string(), config);
+                    return Err(error);
+                }
+            };
+            // The worker emits `session_started` before the `start` response and
+            // the relay reads stdout strictly in order, so by the time this
+            // resolves the stable session's binding already names the real SDK id,
+            // which the worker hands back on the response thread. Record the first
+            // user message against that provider id NOW, so
+            // the very next snapshot already carries it instead of waiting on the
+            // worker's later async `user_message` replay (the projection window
+            // the remote surface had no repair path for).
+            let real_session_id =
+                string_at(&result, &["thread", "id"]).unwrap_or_else(|| thread_id.to_string());
+            self.record_local_user_message(
+                &real_session_id,
+                user_item_id,
+                transcript_text,
+                turn_id.clone(),
+            )
+            .await;
+            return Ok(Some(turn_id));
+        }
+
+        let turn_id = format!(
+            "claude-turn-{}",
+            self.next_request_id.fetch_add(1, Ordering::Relaxed)
+        );
+        // The user message's identity must be ONE value shared by both the live
+        // stream and any later history re-read. The worker stamps this uuid onto
+        // the SDK message, so `getSessionMessages` -> `mapSessionMessages` later
+        // reproduces exactly `user:{uuid}` — the same id we record live below.
+        //
+        // We used to use the relay turn_id (`user:claude-turn-N`) here, which
+        // diverged from the SDK's own message uuid. On a thread switch-away-and
+        // -back the per-thread runtime merged the live (`user:claude-turn-N`)
+        // copy with the fresh history read (`user:<sdk-uuid>`), so the same
+        // user message appeared twice. A real, unique uuid keeps the two paths in
+        // sync and is collision-safe across relay restarts (unlike the per-process
+        // turn counter, which resets to 1).
+        let user_message_uuid = new_user_message_uuid();
+        let user_item_id = format!("user:{user_message_uuid}");
+        let settings = {
+            let session_id = relay_session_for_claude_handle(&self.state, thread_id).await;
+            let relay = self.state.read().await;
+            relay.thread_settings(&session_id)
+        };
+        let permission_mode = settings
+            .as_ref()
+            .map(|settings| claude_permission_mode(&settings.approval_policy, &settings.sandbox))
+            .unwrap_or_else(|| claude_permission_mode("default", "workspace-write"));
+        let cwd = self.cwd_for_thread(thread_id).await;
+        let mut cmd = json!({
+            "type": "send",
+            "provider_session_id": thread_id,
+            "prompt": text,
+            "images": image_payloads,
+            "turn_id": turn_id,
+            "user_item_id": user_item_id,
+            "user_message_uuid": user_message_uuid,
+            "model": model,
+            "permissionMode": permission_mode,
+            "settingSources": self.setting_sources(cwd.as_deref()).await,
+        });
+        // The relay has already resolved and clamped this to something the model
+        // supports; an empty string means "no opinion", not "default effort", so
+        // send the key only when there is one. The worker treats a change here
+        // like a model change and rebuilds the session, since the SDK bakes it
+        // in at query() time.
+        insert_effort(&mut cmd, effort);
+        attach_orchestrator_session(&self.state, &self.worker_path, thread_id, &mut cmd).await;
+        if let Some(cwd) = cwd {
+            if let Some(object) = cmd.as_object_mut() {
+                object.insert("cwd".to_string(), Value::String(cwd));
+            }
+        }
+        let native = self.native_sessions.lock().await.contains(thread_id);
+        let (approval_policy, sandbox) = settings
+            .as_ref()
+            .map(|settings| (settings.approval_policy.as_str(), settings.sandbox.as_str()))
+            .unwrap_or(("default", "workspace-write"));
+        if native && native_terminal_permissions(approval_policy, sandbox).is_err() {
+            self.resume_thread(thread_id, approval_policy, sandbox)
+                .await?;
+            if native_request_id.is_some() {
+                return Err("Claude terminal requires Full access (YOLO); submit this message in Conversation".to_string());
+            }
+        }
+        if self.native_sessions.lock().await.contains(thread_id) {
+            cmd["native_model"] = json!(self.native_model_id(model).await?);
+            cmd["managed_skill"] = json!(selected_skill);
+            if let Some(request_id) = native_request_id {
+                cmd["native_request_id"] = json!(request_id);
+            }
+            self.send_request("send", cmd).await?;
+        } else {
+            self.send_command(cmd).await?;
+            self.record_local_user_message(
+                thread_id,
+                user_item_id,
+                transcript_text,
+                turn_id.clone(),
+            )
+            .await;
+        }
+        Ok(Some(turn_id))
     }
 
     async fn send_command(&self, value: Value) -> Result<(), String> {
@@ -563,6 +791,64 @@ impl ClaudeCodeBridge {
 
 #[async_trait]
 impl ProviderBridge for ClaudeCodeBridge {
+    fn native_terminal_events(&self) -> Option<tokio::sync::broadcast::Receiver<Value>> {
+        Some(self.native_events.subscribe())
+    }
+
+    async fn native_terminal_request(
+        &self,
+        method: &str,
+        mut params: Value,
+    ) -> Result<Value, String> {
+        let handle = params["provider_session_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if method == "terminal/open" {
+            let pending = self.pending_threads.lock().await.get(&handle).cloned();
+            let session_id = relay_session_for_claude_handle(&self.state, &handle).await;
+            let settings = self
+                .state
+                .read()
+                .await
+                .thread_settings(&session_id)
+                .ok_or("Unknown Claude session")?;
+            native_terminal_permissions(&settings.approval_policy, &settings.sandbox)?;
+            let cwd = self
+                .cwd_for_thread(&handle)
+                .await
+                .or_else(|| pending.as_ref().map(|p| p.cwd.clone()))
+                .ok_or("Session has no workspace")?;
+            params["cwd"] = json!(cwd);
+            params["native_model"] = json!(self.native_model_id(&settings.model).await?);
+            params["model"] = json!(settings.model);
+            params["effort"] = json!(settings.reasoning_effort);
+            params["permissionMode"] = json!(claude_permission_mode(
+                &settings.approval_policy,
+                &settings.sandbox
+            ));
+            params["settingSources"] = json!(self.setting_sources(Some(&cwd)).await);
+            if let Some(config) = pending.as_ref() {
+                params["pending_thread_id"] = json!(handle);
+                if let Some(prompt) = &config.system_prompt {
+                    params["systemPrompt"] = json!(prompt);
+                }
+            }
+            attach_orchestrator_session(&self.state, &self.worker_path, &handle, &mut params).await;
+            let _guard = self.deferred_start_list_gate.write().await;
+            let result = self.send_request(method, params).await?;
+            let id = result["provider_session_id"]
+                .as_str()
+                .ok_or("Native runtime returned no session")?;
+            self.native_sessions.lock().await.insert(id.to_string());
+            if pending.is_some() {
+                self.pending_threads.lock().await.remove(&handle);
+            }
+            return Ok(result);
+        }
+        self.send_request(method, params).await
+    }
+
     async fn list_threads(&self, limit: usize) -> Result<Vec<ThreadSummaryView>, String> {
         // A deferred `start` creates the real SDK session before its async stream
         // announces `session_started`. Do not let `list_sessions` expose that id
@@ -889,6 +1175,15 @@ impl ProviderBridge for ClaudeCodeBridge {
             // no-op so the user can re-enter the empty composer view.
             return Ok(());
         };
+        let native = self.native_sessions.lock().await.contains(&real_session_id);
+        if native && native_terminal_permissions(_approval_policy, _sandbox).is_err() {
+            self.send_request(
+                "terminal/return",
+                json!({ "provider_session_id": real_session_id }),
+            )
+            .await?;
+            self.native_sessions.lock().await.remove(&real_session_id);
+        }
         let cwd = self.cwd_for_thread(thread_id).await;
         let mut cmd = json!({
             "type": "resume",
@@ -1092,6 +1387,7 @@ impl ProviderBridge for ClaudeCodeBridge {
                 .unwrap_or("worker declined without a reason");
             return Err(format!("session not released: {reason}"));
         }
+        self.native_sessions.lock().await.remove(&real_session_id);
         Ok(())
     }
 
@@ -1133,7 +1429,10 @@ impl ProviderBridge for ClaudeCodeBridge {
                 Ok(reply) if reply.get("released").and_then(Value::as_bool) != Some(true) => {
                     Some(format!("worker answered {reply}"))
                 }
-                Ok(_) => None,
+                Ok(_) => {
+                    self.native_sessions.lock().await.remove(id);
+                    None
+                }
             };
             if let Some(failure) = failure {
                 self.state.write().await.push_log(
@@ -1177,167 +1476,37 @@ impl ProviderBridge for ClaudeCodeBridge {
         effort: &str,
         images: &[ProviderImage],
     ) -> Result<Option<String>, String> {
-        let transcript_text = user_message_transcript_text(text, images.len()).unwrap_or_default();
-        let image_payloads = images
-            .iter()
-            .map(|image| {
-                json!({
-                    "media_type": image.media_type,
-                    "data": image.data,
-                })
-            })
-            .collect::<Vec<_>>();
-        // A pending provider handle materializes on its first turn. The worker
-        // `start` both creates the SDK session and sends the first message;
-        // `session_started` moves only the stable session's binding to the real
-        // SDK id.
-        let pending = self.pending_threads.lock().await.remove(thread_id);
-        if let Some(config) = pending {
-            // `list_sessions` may observe the SDK id after `start` creates it but
-            // before the async stream emits `session_started`. Serialize just
-            // those two operations. The worker emits the start response after
-            // `session_started`, and Rust consumes stdout in order, so releasing
-            // this guard after the response means the stable binding is ready.
-            let _deferred_start_guard = self.deferred_start_list_gate.write().await;
-            // Mint the user message's identity up front and hand it to the
-            // worker. The `start` command accepts the same
-            // `turn_id`/`user_item_id`/`user_message_uuid` triple the `send`
-            // path uses (worker.mjs createUserTurn), so the worker stamps the SDK
-            // message with our uuid. That lets us record the message locally now
-            // with ids the worker will reuse when it later replays `user_message`
-            // (and that a history re-read reproduces), collapsing all three into
-            // one idempotent transcript entry instead of a duplicate.
-            let turn_id = format!(
-                "claude-turn-{}",
-                self.next_request_id.fetch_add(1, Ordering::Relaxed)
-            );
-            let user_message_uuid = new_user_message_uuid();
-            let user_item_id = format!("user:{user_message_uuid}");
-            let mut cmd = json!({
-                "type": "start",
-                "cwd": config.cwd,
-                "model": config.model,
-                "permissionMode": config.permission_mode,
-                "settingSources": self.setting_sources(Some(&config.cwd)).await,
-                "pending_thread_id": thread_id,
-                "prompt": text,
-                "images": image_payloads.clone(),
-                "turn_id": turn_id,
-                "user_item_id": user_item_id,
-                "user_message_uuid": user_message_uuid,
-            });
-            // The turn's own effort wins: it is what the relay resolved for the
-            // work about to run, while the config's was captured when the empty
-            // thread was opened and may be a settings change out of date.
-            insert_effort(
-                &mut cmd,
-                if effort.trim().is_empty() {
-                    config.effort.as_str()
-                } else {
-                    effort
-                },
-            );
-            // The persona was set when the thread was created; this deferred
-            // `start` is the first time a worker session actually exists to
-            // receive it.
-            if let Some(prompt) = config.system_prompt.as_deref() {
-                cmd["systemPrompt"] = Value::String(prompt.to_string());
-            }
-            if let Some(device_id) = config.orchestrator_tools.as_deref() {
-                cmd["mcpServers"] = orchestrator_mcp_config(&self.worker_path, device_id);
-                cmd["allowedTools"] = orchestrator_allowed_tools();
-                cmd["tools"] = Value::Array(Vec::new());
-            } else {
-                attach_orchestrator_session(&self.state, &self.worker_path, thread_id, &mut cmd)
-                    .await;
-            }
-            let result = match self.send_request("start", cmd).await {
-                Ok(result) => result,
-                Err(error) => {
-                    // Restore pending state so a retry can succeed.
-                    self.pending_threads
-                        .lock()
-                        .await
-                        .insert(thread_id.to_string(), config);
-                    return Err(error);
-                }
-            };
-            // The worker emits `session_started` before the `start` response and
-            // the relay reads stdout strictly in order, so by the time this
-            // resolves the stable session's binding already names the real SDK id,
-            // which the worker hands back on the response thread. Record the first
-            // user message against that provider id NOW, so
-            // the very next snapshot already carries it instead of waiting on the
-            // worker's later async `user_message` replay (the projection window
-            // the remote surface had no repair path for).
-            let real_session_id =
-                string_at(&result, &["thread", "id"]).unwrap_or_else(|| thread_id.to_string());
-            self.record_local_user_message(
-                &real_session_id,
-                user_item_id,
-                transcript_text,
-                turn_id.clone(),
-            )
-            .await;
-            return Ok(Some(turn_id));
-        }
+        self.start_turn_impl(thread_id, text, model, effort, images, None, None)
+            .await
+    }
 
-        let turn_id = format!(
-            "claude-turn-{}",
-            self.next_request_id.fetch_add(1, Ordering::Relaxed)
-        );
-        // The user message's identity must be ONE value shared by both the live
-        // stream and any later history re-read. The worker stamps this uuid onto
-        // the SDK message, so `getSessionMessages` -> `mapSessionMessages` later
-        // reproduces exactly `user:{uuid}` — the same id we record live below.
-        //
-        // We used to use the relay turn_id (`user:claude-turn-N`) here, which
-        // diverged from the SDK's own message uuid. On a thread switch-away-and
-        // -back the per-thread runtime merged the live (`user:claude-turn-N`)
-        // copy with the fresh history read (`user:<sdk-uuid>`), so the same
-        // user message appeared twice. A real, unique uuid keeps the two paths in
-        // sync and is collision-safe across relay restarts (unlike the per-process
-        // turn counter, which resets to 1).
-        let user_message_uuid = new_user_message_uuid();
-        let user_item_id = format!("user:{user_message_uuid}");
-        let settings = {
-            let session_id = relay_session_for_claude_handle(&self.state, thread_id).await;
-            let relay = self.state.read().await;
-            relay.thread_settings(&session_id)
-        };
-        let permission_mode = settings
-            .as_ref()
-            .map(|settings| claude_permission_mode(&settings.approval_policy, &settings.sandbox))
-            .unwrap_or_else(|| claude_permission_mode("default", "workspace-write"));
-        let cwd = self.cwd_for_thread(thread_id).await;
-        let mut cmd = json!({
-            "type": "send",
-            "provider_session_id": thread_id,
-            "prompt": text,
-            "images": image_payloads,
-            "turn_id": turn_id,
-            "user_item_id": user_item_id,
-            "user_message_uuid": user_message_uuid,
-            "model": model,
-            "permissionMode": permission_mode,
-            "settingSources": self.setting_sources(cwd.as_deref()).await,
-        });
-        // The relay has already resolved and clamped this to something the model
-        // supports; an empty string means "no opinion", not "default effort", so
-        // send the key only when there is one. The worker treats a change here
-        // like a model change and rebuilds the session, since the SDK bakes it
-        // in at query() time.
-        insert_effort(&mut cmd, effort);
-        attach_orchestrator_session(&self.state, &self.worker_path, thread_id, &mut cmd).await;
-        if let Some(cwd) = cwd {
-            if let Some(object) = cmd.as_object_mut() {
-                object.insert("cwd".to_string(), Value::String(cwd));
-            }
+    async fn start_turn_with_skills(
+        &self,
+        thread_id: &str,
+        text: &str,
+        model: &str,
+        effort: &str,
+        images: &[ProviderImage],
+        skills: &[crate::provider::SkillInputRef],
+        selected_skill: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        if !skills.is_empty() {
+            return Err("Claude skills must be selected by their catalog name".to_string());
         }
-        self.send_command(cmd).await?;
-        self.record_local_user_message(thread_id, user_item_id, transcript_text, turn_id.clone())
-            .await;
-        Ok(Some(turn_id))
+        self.start_turn_impl(thread_id, text, model, effort, images, None, selected_skill)
+            .await
+    }
+
+    async fn start_native_turn(
+        &self,
+        thread: &str,
+        request_id: &str,
+        text: &str,
+        model: &str,
+        effort: &str,
+    ) -> Result<Option<String>, String> {
+        self.start_turn_impl(thread, text, model, effort, &[], Some(request_id), None)
+            .await
     }
 
     async fn request_turn_stop(
@@ -1439,6 +1608,7 @@ fn spawn_stdout_reader(
     stdin: Arc<Mutex<ChildStdin>>,
     pending_responses: PendingResponses,
     state: Arc<RwLock<RelayState>>,
+    native_events: tokio::sync::broadcast::Sender<Value>,
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -1446,6 +1616,12 @@ fn spawn_stdout_reader(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
+                    if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                        if value["type"] == "native_prompt_requested" {
+                            let _ = native_events.send(value);
+                            continue;
+                        }
+                    }
                     handle_worker_line(&line, &stdin, &pending_responses, &state).await;
                 }
                 Ok(None) => {
@@ -6274,6 +6450,19 @@ for await (const line of rl) {
     }
 
     #[test]
+    fn native_terminal_only_accepts_explicit_full_access() {
+        for sandbox in ["workspace-write", "danger-full-access"] {
+            assert!(native_terminal_permissions("bypass", sandbox).is_ok());
+        }
+        for approval in ["never", "on-request", "review_read_only"] {
+            assert!(native_terminal_permissions(approval, "workspace-write")
+                .unwrap_err()
+                .contains("Full access (YOLO)"));
+        }
+        assert!(native_terminal_permissions("bypass", "read-only").is_err());
+    }
+
+    #[test]
     fn never_policy_accepts_edits_instead_of_auto_denying() {
         assert_eq!(
             claude_permission_mode("never", "workspace-write"),
@@ -7978,7 +8167,13 @@ mod session_binding_boundary_tests {
         let stdin = Arc::new(Mutex::new(child.stdin.take().expect("child stdin")));
         let stdout = child.stdout.take().expect("child stdout");
         let state = bound_relay().await;
-        spawn_stdout_reader(stdout, stdin, Arc::new(Mutex::new(HashMap::new())), state);
+        spawn_stdout_reader(
+            stdout,
+            stdin,
+            Arc::new(Mutex::new(HashMap::new())),
+            state,
+            tokio::sync::broadcast::channel(16).0,
+        );
 
         let exited = timeout(Duration::from_secs(5), child.wait()).await;
         if exited.is_err() {
