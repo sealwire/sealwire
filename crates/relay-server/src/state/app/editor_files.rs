@@ -578,6 +578,11 @@ impl AppState {
         for path in &input.paths {
             validate_repo_relative_path(path)?;
         }
+        if let Some(operation) = operation_in_progress(&workspace).await {
+            return Err(format!(
+                "{operation} is in progress here; finish it with git before committing from the Editor"
+            ));
+        }
         // Each path must be one changed file: a folder name would take everything under it.
         let (git, changed) = match GitView::open(&workspace).await {
             GitProbe::Repo(git) => {
@@ -589,105 +594,15 @@ impl AppState {
             _ => return Err("this folder is not in a git repository".to_string()),
         };
         let plan = plan_commit(&changed, &input.paths)?;
-        // Built in an index of its own, from HEAD plus exactly the ticked changes, so nothing
-        // else staged rides along and a refused commit leaves the user's staging untouched.
-        let index = ScratchIndex::new();
-        let in_scratch = |args: &[&str]| {
-            let mut command = background_git(&workspace);
-            command
-                .env("GIT_INDEX_FILE", index.path())
-                .args(args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            command
-        };
-        let has_head = git_line(&workspace, &["rev-parse", "--verify", "--quiet", "HEAD"])
-            .await
-            .is_some();
-        let seed: &[&str] = if has_head {
-            &["read-tree", "HEAD"]
-        } else {
-            &["read-tree", "--empty"]
-        };
-        apply_changes(&plan, |args| in_scratch(args), Some(seed)).await?;
-        let diff = in_scratch(&[
-            "diff",
-            "--cached",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            "--no-ext-diff",
-            "--no-textconv",
-        ])
-        .output()
-        .await
-        .map_err(|error| format!("could not run git diff: {error}"))?;
-        if !diff.status.success() {
-            return Err(git_words(&diff));
-        }
-        let mut touched = 0;
-        for field in diff
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|field| !field.is_empty())
-        {
-            touched += 1;
-            let path = std::str::from_utf8(field)
-                .ok()
-                .and_then(|path| path.strip_prefix(&git.prefix))
-                .filter(|rel| plan.allowed.contains(*rel));
-            if path.is_none() {
-                return Err(format!(
-                    "committing these files would also change {}, which is not ticked",
-                    String::from_utf8_lossy(field)
-                ));
-            }
-        }
-        if touched == 0 {
-            return Err("the ticked files have nothing to commit".to_string());
-        }
-        let mut child = in_scratch(&["commit", "--file=-"])
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("could not run git commit: {error}"))?;
-        // Written while the output drains: hooks run before git reads the message, and a
-        // hook filling the output pipe would otherwise wait on us while we wait on git.
-        let stdin = child.stdin.take();
-        let body = message.as_bytes().to_vec();
-        let write = async move {
-            if let Some(mut stdin) = stdin {
-                stdin.write_all(&body).await?;
-            }
-            Ok::<(), std::io::Error>(())
-        };
-        let (written, output) = tokio::join!(write, child.wait_with_output());
-        let output = output.map_err(|error| format!("git commit did not finish: {error}"))?;
-        if let Err(error) = written {
-            tracing::warn!(%error, "editor commit: writing the message to git failed");
-        }
-        if !output.status.success() {
-            return Err(git_words(&output));
-        }
-        // The user's own index catches up with what was committed, as `git commit <paths>`
-        // would leave it; anything else they had staged stays staged.
-        let in_index = |args: &[&str]| {
-            let mut command = background_git(&workspace);
-            command
-                .args(args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            command
-        };
-        if let Err(error) = apply_changes(&plan, |args| in_index(args), None).await {
-            tracing::warn!(%error, "editor commit: committed, but the index did not catch up");
-        }
-        let commit = git_line(&workspace, &["rev-parse", "--short", "HEAD"])
-            .await
-            .unwrap_or_default();
+        refuse_hidden_entries(&workspace, &plan).await?;
+        let base = git_line(
+            &workspace,
+            &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        )
+        .await;
+        let commit = commit_from(&workspace, &git.prefix, &plan, message, base.as_deref()).await?;
         Ok(EditorCommitReceipt {
-            commit,
+            commit: commit.chars().take(7).collect(),
             subject: message.lines().next().unwrap_or_default().to_string(),
         })
     }
@@ -937,12 +852,279 @@ struct Change {
     renamed_from: Option<Option<String>>,
 }
 
+/// A merge, cherry-pick, revert or rebase under way: committing a snapshot from beside it
+/// would finish it with the wrong contents.
+async fn operation_in_progress(workspace: &TrustedWorkspace) -> Option<&'static str> {
+    for (name, label) in [
+        ("MERGE_HEAD", "a merge"),
+        ("CHERRY_PICK_HEAD", "a cherry-pick"),
+        ("REVERT_HEAD", "a revert"),
+    ] {
+        if git_line(workspace, &["rev-parse", "--verify", "--quiet", name])
+            .await
+            .is_some()
+        {
+            return Some(label);
+        }
+    }
+    for dir in ["rebase-merge", "rebase-apply"] {
+        if let Some(path) = git_line(workspace, &["rev-parse", "--git-path", dir]).await {
+            if Path::new(workspace.as_str()).join(path).exists() {
+                return Some("a rebase");
+            }
+        }
+    }
+    let unmerged = run_git_capture(workspace, &["ls-files", "--unmerged", "-z"]).await;
+    if unmerged.is_ok_and(|output| !output.stdout.is_empty()) {
+        return Some("a conflict resolution");
+    }
+    None
+}
+
+/// Files outside a sparse checkout, or marked assume-unchanged, are not what the disk
+/// shows: committing them from the disk would record a deletion or an old version.
+async fn refuse_hidden_entries(
+    workspace: &TrustedWorkspace,
+    plan: &CommitPlan,
+) -> Result<(), String> {
+    let mut args = vec!["--literal-pathspecs", "ls-files", "-v", "-z", "--"];
+    args.extend(plan.allowed.iter().map(String::as_str));
+    let output = run_git_capture(workspace, &args).await?;
+    for entry in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| entry.len() > 2)
+    {
+        let tag = entry[0] as char;
+        if tag == 'S' || tag.is_ascii_lowercase() {
+            return Err(format!(
+                "{} is kept out of this checkout or marked unchanged; commit it with git",
+                String::from_utf8_lossy(&entry[2..])
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Commit `plan` on top of `base`, the HEAD it was checked against. Built in an index of its
+/// own, from `base` plus exactly the ticked changes, so nothing else staged rides along and
+/// a refused commit leaves the user's staging untouched. Returns the new commit's id.
+async fn commit_from(
+    workspace: &TrustedWorkspace,
+    prefix: &str,
+    plan: &CommitPlan,
+    message: &str,
+    base: Option<&str>,
+) -> Result<String, String> {
+    let index = ScratchIndex::in_git_dir(workspace).await?;
+    let in_scratch = |args: &[&str]| {
+        let mut command = background_git(workspace);
+        command
+            .env("GIT_INDEX_FILE", index.path())
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    };
+    let seed: Vec<&str> = match base {
+        Some(base) => vec!["read-tree", base],
+        None => vec!["read-tree", "--empty"],
+    };
+    apply_changes(plan, in_scratch, Some(&seed)).await?;
+    // Against `base`, not whatever HEAD is now: the check and the commit's parent must be
+    // the same commit. Repository settings must not narrow what it sees.
+    let mut diff_args = vec![
+        "diff",
+        "--cached",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--no-relative",
+        "--ignore-submodules=none",
+        "--no-ext-diff",
+        "--no-textconv",
+    ];
+    diff_args.extend(base);
+    let diff = in_scratch(&diff_args)
+        .output()
+        .await
+        .map_err(|error| format!("could not run git diff: {error}"))?;
+    if !diff.status.success() {
+        return Err(git_words(&diff));
+    }
+    let mut touched = 0;
+    for field in diff
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+    {
+        touched += 1;
+        let path = std::str::from_utf8(field)
+            .ok()
+            .and_then(|path| path.strip_prefix(prefix))
+            .filter(|rel| plan.allowed.contains(*rel));
+        if path.is_none() {
+            return Err(format!(
+                "committing these files would also change {}, which is not ticked",
+                String::from_utf8_lossy(field)
+            ));
+        }
+    }
+    if touched == 0 {
+        return Err("the ticked files have nothing to commit".to_string());
+    }
+    let mut child = in_scratch(&["commit", "--file=-"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run git commit: {error}"))?;
+    // Written while the output drains: hooks run before git reads the message, and a
+    // hook filling the output pipe would otherwise wait on us while we wait on git.
+    let stdin = child.stdin.take();
+    let body = message.as_bytes().to_vec();
+    let write = async move {
+        if let Some(mut stdin) = stdin {
+            stdin.write_all(&body).await?;
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    let (written, output) = tokio::join!(write, child.wait_with_output());
+    let output = output.map_err(|error| format!("git commit did not finish: {error}"))?;
+    if let Err(error) = written {
+        tracing::warn!(%error, "editor commit: writing the message to git failed");
+    }
+    if !output.status.success() {
+        return Err(git_words(&output));
+    }
+    let commit = git_line(workspace, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .await
+        .ok_or_else(|| "the commit was made but HEAD could not be read".to_string())?;
+    // git takes the parent as HEAD stands when it starts; if someone else committed after
+    // this tree was built, that parent is theirs and this tree would undo their change.
+    let parent = git_line(
+        workspace,
+        &["rev-parse", "--verify", "--quiet", &format!("{commit}^1")],
+    )
+    .await;
+    if parent.as_deref() != base {
+        let undone = match parent.as_deref() {
+            Some(parent) => {
+                run_git_capture(
+                    workspace,
+                    &[
+                        "update-ref",
+                        "-m",
+                        "sealwire: undo a commit built on an older HEAD",
+                        "HEAD",
+                        parent,
+                        &commit,
+                    ],
+                )
+                .await
+            }
+            None => run_git_capture(workspace, &["update-ref", "-d", "HEAD", &commit]).await,
+        };
+        if !undone.is_ok_and(|output| output.status.success()) {
+            tracing::warn!(%commit, "editor commit: built on a moved HEAD and could not be undone");
+        }
+        return Err(
+            "someone else committed here while this commit was being made; nothing was committed, try again"
+                .to_string(),
+        );
+    }
+    catch_up_index(workspace, prefix, plan, &commit).await;
+    Ok(commit)
+}
+
+/// Bring the user's own index to what was committed, for the ticked paths only: entries are
+/// copied from the commit, not read from the disk again, and an untouched old name of a
+/// rename keeps whatever the user has there.
+async fn catch_up_index(
+    workspace: &TrustedWorkspace,
+    prefix: &str,
+    plan: &CommitPlan,
+    commit: &str,
+) {
+    let ticked: Vec<&str> = plan
+        .allowed
+        .iter()
+        .filter(|path| !plan.untouched_sources.contains(*path))
+        .map(String::as_str)
+        .collect();
+    if ticked.is_empty() {
+        return;
+    }
+    let mut args = vec!["ls-tree", "-z", "--full-name", commit, "--"];
+    args.extend(ticked.iter().copied());
+    let listing = match run_git_capture(workspace, &args).await {
+        Ok(output) if output.status.success() => output.stdout,
+        _ => {
+            tracing::warn!("editor commit: committed, but the index did not catch up");
+            return;
+        }
+    };
+    let mut committed: HashMap<String, String> = HashMap::new();
+    for entry in listing
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let text = String::from_utf8_lossy(entry);
+        let Some((meta, path)) = text.split_once('\t') else {
+            continue;
+        };
+        let fields: Vec<&str> = meta.split(' ').collect();
+        // A folder in the commit is not an index entry; its files are ticked on their own.
+        if let [mode, kind, id] = fields[..] {
+            if kind != "tree" {
+                committed.insert(path.to_string(), format!("{mode} {id} 0\t{path}\n"));
+            }
+        }
+    }
+    let zeros = "0".repeat(commit.len());
+    let mut removals = String::new();
+    let mut additions = String::new();
+    for path in ticked {
+        let full = format!("{prefix}{path}");
+        match committed.get(&full) {
+            Some(line) => additions.push_str(line),
+            None => removals.push_str(&format!("0 {zeros}\t{full}\n")),
+        }
+    }
+    let mut child = match background_git(workspace)
+        .args(["update-index", "--index-info"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(%error, "editor commit: committed, but the index did not catch up");
+            return;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin
+            .write_all(format!("{removals}{additions}").as_bytes())
+            .await;
+    }
+    if !child
+        .wait_with_output()
+        .await
+        .is_ok_and(|output| output.status.success())
+    {
+        tracing::warn!("editor commit: committed, but the index did not catch up");
+    }
+}
+
 /// The ticked changes, as git operations: names whose files are gone are removed, the rest
 /// added from the worktree. `allowed` is every root-relative path the commit may change.
 struct CommitPlan {
     removes: Vec<String>,
     adds: Vec<String>,
     allowed: HashSet<String>,
+    /// Old names of ticked renames that are not ticked themselves.
+    untouched_sources: HashSet<String>,
 }
 
 /// Refused when a ticked path would take a change the user did not tick. The final word is
@@ -953,6 +1135,7 @@ fn plan_commit(changed: &ChangedSet, picked: &[String]) -> Result<CommitPlan, St
         removes: Vec::new(),
         adds: Vec::new(),
         allowed: HashSet::new(),
+        untouched_sources: HashSet::new(),
     };
     for path in picked {
         let change = changed
@@ -992,6 +1175,7 @@ fn plan_commit(changed: &ChangedSet, picked: &[String]) -> Result<CommitPlan, St
                 plan.allowed.insert(source.clone());
                 if !picked.contains(source) {
                     plan.removes.push(source.clone());
+                    plan.untouched_sources.insert(source.clone());
                 }
             }
         }
@@ -1037,20 +1221,19 @@ async fn apply_changes(
 }
 
 /// A throwaway index file for one commit, removed (with git's lock beside it) when dropped.
+/// It lists every path in HEAD, so it lives in the repository's own git directory, never a
+/// shared temp folder.
 struct ScratchIndex(PathBuf);
 
 impl ScratchIndex {
-    fn new() -> Self {
+    async fn in_git_dir(workspace: &TrustedWorkspace) -> Result<Self, String> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        Self(std::env::temp_dir().join(format!(
-            "sealwire-commit-{}-{nanos}-{n}.index",
-            std::process::id()
-        )))
+        let name = format!("sealwire-commit-{}-{n}.index", std::process::id());
+        let path = git_line(workspace, &["rev-parse", "--git-path", &name])
+            .await
+            .ok_or_else(|| "could not find this repository's git directory".to_string())?;
+        Ok(Self(Path::new(workspace.as_str()).join(path)))
     }
 
     fn path(&self) -> &Path {
@@ -1069,7 +1252,13 @@ impl Drop for ScratchIndex {
 
 async fn read_status(workspace: &TrustedWorkspace) -> Option<Vec<u8>> {
     let mut child = background_git(workspace)
-        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
+        .args([
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .stdin(Stdio::null())
@@ -1360,6 +1549,54 @@ mod tests {
         let (path, _file) = create_staging_file(&target).await.unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn a_commit_built_on_an_older_head_is_undone_rather_than_reverting_a_newer_one() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let root = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@e.com"]);
+        git(&["config", "user.name", "T"]);
+        std::fs::write(format!("{root}/a.txt"), "a\n").unwrap();
+        std::fs::write(format!("{root}/outside.txt"), "ours\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "start"]);
+        let planned_on = git(&["rev-parse", "HEAD"]);
+        std::fs::write(format!("{root}/a.txt"), "mine\n").unwrap();
+        // Someone else commits after the Editor read HEAD and before its commit runs.
+        std::fs::write(format!("{root}/outside.txt"), "theirs\n").unwrap();
+        git(&["commit", "-q", "-m", "theirs", "--", "outside.txt"]);
+        let theirs = git(&["rev-parse", "HEAD"]);
+        let workspace = TrustedWorkspace::granted_for_test(&root).expect("workspace");
+        let plan = CommitPlan {
+            removes: Vec::new(),
+            adds: vec!["a.txt".to_string()],
+            allowed: HashSet::from(["a.txt".to_string()]),
+            untouched_sources: HashSet::new(),
+        };
+        let result = commit_from(&workspace, "", &plan, "mine", Some(&planned_on)).await;
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            git(&["rev-parse", "HEAD"]),
+            theirs,
+            "their commit is still the tip"
+        );
+        assert_eq!(git(&["show", "HEAD:outside.txt"]), "theirs");
     }
 
     #[test]

@@ -674,3 +674,198 @@ async fn a_rename_whose_old_name_is_a_hard_link_commits_both_ticked_files() {
     assert_eq!(status, StatusCode::OK, "body={body}");
     assert_eq!(tree_of(&root, "src"), ["src/core.rs", "src/lib.rs"]);
 }
+
+#[tokio::test]
+async fn a_commit_is_refused_while_a_merge_is_unfinished() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    std::fs::remove_file(format!("{root}/new.txt")).unwrap();
+    git(&root, &["switch", "-q", "-c", "other"]);
+    std::fs::write(format!("{root}/seed.txt"), "theirs\n").unwrap();
+    std::fs::write(format!("{root}/incoming.txt"), "incoming\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "other side"]);
+    git(&root, &["switch", "-q", "main"]);
+    std::fs::write(format!("{root}/seed.txt"), "ours\n").unwrap();
+    git(&root, &["commit", "-q", "-am", "our side"]);
+    let merge = std::process::Command::new("git")
+        .args(["merge", "-q", "other"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the merge stops on a conflict");
+    std::fs::write(format!("{root}/src/lib.rs"), "fn unrelated() {}\n").unwrap();
+    let before = head_subject(&root);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src/lib.rs"], "message": "Sneak", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(head_subject(&root), before);
+    assert!(
+        std::path::Path::new(&format!("{root}/.git/MERGE_HEAD")).exists(),
+        "the merge is still the user's to finish"
+    );
+}
+
+#[tokio::test]
+async fn repository_diff_settings_cannot_hide_a_change_from_the_commit_check() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    let module = format!("{root}/config/module");
+    std::fs::create_dir_all(&module).unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@e.com"],
+        vec!["config", "user.name", "T"],
+        vec!["commit", "-q", "--allow-empty", "-m", "one"],
+    ] {
+        git(&module, &args);
+    }
+    git(&root, &["add", "config/module"]);
+    git(&root, &["commit", "-q", "-m", "add module"]);
+    git(&root, &["config", "diff.ignoreSubmodules", "all"]);
+    git(&root, &["config", "diff.relative", "true"]);
+    std::fs::remove_dir_all(format!("{root}/config")).unwrap();
+    std::fs::write(format!("{root}/config"), "now a file\n").unwrap();
+    let before = head_subject(&root);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["config"], "message": "Config", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the submodule's removal is not ticked: {body}"
+    );
+    assert_eq!(head_subject(&root), before);
+
+    // `diff.relative` must not turn an ordinary commit from a subfolder into a refusal.
+    std::fs::write(format!("{root}/src/lib.rs"), "fn sub() {}\n").unwrap();
+    let src = format!("{root}/src");
+    let router = git_context_router(&src, vec![src.clone()], vec![src.clone()]).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": src, "paths": ["lib.rs"], "message": "Sub", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn after_a_commit_the_index_holds_what_was_committed_not_the_disk_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, root) = editor_repo().await;
+    // A formatter hook rewrites the staged copy of what is being committed.
+    let hook = format!("{root}/.git/hooks/pre-commit");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nblob=$(git show :seed.txt | tr a-z A-Z | git hash-object -w --stdin)\ngit update-index --cacheinfo 100644,$blob,seed.txt\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Format", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(
+        git_output(&root, &["show", "HEAD:seed.txt"]),
+        "LINE1\nLINE2"
+    );
+    assert_eq!(
+        git_output(&root, &["diff", "--cached", "--name-only"]),
+        "",
+        "nothing staged that would undo the formatted commit"
+    );
+}
+
+#[tokio::test]
+async fn a_file_kept_out_of_a_sparse_checkout_is_not_committed_as_a_deletion() {
+    let (_dir, root) = editor_repo().await;
+    std::fs::write(format!("{root}/seed.txt"), "staged\n").unwrap();
+    git(&root, &["add", "seed.txt"]);
+    git(&root, &["update-index", "--skip-worktree", "seed.txt"]);
+    std::fs::remove_file(format!("{root}/seed.txt")).unwrap();
+    let before = head_subject(&root);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Sparse", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(head_subject(&root), before);
+}
+
+#[tokio::test]
+async fn an_unticked_file_marked_at_a_renames_old_name_keeps_its_mark() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["mv", "src/lib.rs", "src/core.rs"]);
+    std::fs::write(format!("{root}/src/lib.rs"), "planned\n").unwrap();
+    git(&root, &["add", "-N", "src/lib.rs"]);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src/core.rs"], "message": "Rename", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(
+        git_output(&root, &["ls-files", "src/lib.rs"]),
+        "src/lib.rs",
+        "the user's intent-to-add entry is still in the index"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_commit_is_built_in_an_index_inside_the_repository() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, root) = editor_repo().await;
+    let seen = format!("{root}/.git/seen-index");
+    let hook = format!("{root}/.git/hooks/pre-commit");
+    std::fs::write(
+        &hook,
+        format!("#!/bin/sh\necho \"$GIT_INDEX_FILE\" > '{seen}'\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Where", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let index = std::fs::read_to_string(&seen).unwrap();
+    let git_dir = std::path::Path::new(&root)
+        .join(".git")
+        .canonicalize()
+        .unwrap();
+    let index = std::path::Path::new(index.trim());
+    assert!(
+        index
+            .parent()
+            .and_then(|dir| dir.canonicalize().ok())
+            .as_deref()
+            == Some(git_dir.as_path()),
+        "not in a shared temp folder: {}",
+        index.display()
+    );
+    assert!(!index.exists(), "and it is gone afterwards");
+}
