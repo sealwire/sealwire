@@ -37,7 +37,7 @@
 import React from "react";
 
 import { t } from "./i18n.js";
-import { SESSIONS_SVG, TASKS_SVG, USAGE_SVG } from "../svg.js";
+import { EDITOR_SVG, SESSIONS_SVG, TASKS_SVG, USAGE_SVG } from "../svg.js";
 
 const h = React.createElement;
 
@@ -53,6 +53,14 @@ export const SIDEBAR_NAV_DESTINATIONS = Object.freeze([
     label: t("Sessions"),
     title: t("Sessions — conversations with one agent"),
     svg: SESSIONS_SVG,
+  }),
+  // Beside Sessions because it is the same project from the other side: the files the
+  // agents are changing. Local only; remote passes no handler, so it never appears there.
+  Object.freeze({
+    key: "editor",
+    label: t("Editor"),
+    title: t("Editor — browse and edit the project's files"),
+    svg: EDITOR_SVG,
   }),
   Object.freeze({
     key: "tasks",
@@ -140,6 +148,7 @@ function useNavModel({
   current,
   tasksWaitingCount,
   onOpenSessions,
+  onOpenEditor,
   onOpenTasks,
   onOpenUsage,
   tasksBeta = false,
@@ -147,6 +156,7 @@ function useNavModel({
 }) {
   const handlers = {
     sessions: onOpenSessions,
+    editor: onOpenEditor,
     tasks: onOpenTasks,
     usage: onOpenUsage,
   };

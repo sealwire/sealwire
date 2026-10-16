@@ -33,8 +33,11 @@ const EMPTY_REVIEW = {
 // mobile sheet of one surface stay in sync. `reviewer` carries the injected
 // action callbacks + transcript fetch; `panelId` namespaces the request modal so
 // multiple mounts (rail + sheet) don't collide on a dialog id.
-export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "review-panel" }) {
+// `files` (local only): `{ strip, body, showing, onLeaveFile }` — open files as tabs after
+// Changes / Agents. While one is showing, neither segment is selected.
+export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "review-panel", files = null }) {
   const state = useStoreState(store);
+  const showingFile = Boolean(files?.showing);
   const review = state.review || EMPTY_REVIEW;
   const activeTab = state.activeTab === "reviewer" ? "reviewer" : "changes";
   const blocked = Boolean(review.blocked);
@@ -82,18 +85,24 @@ export function RightPanelTabs({ store, changes, reviewer = {}, panelId = "revie
     { className: "right-panel-tabs" },
     h(
       "div",
-      { className: "right-panel-tabs-header" },
+      { className: files ? "right-panel-tabs-header has-files" : "right-panel-tabs-header" },
       h(SegmentedControl, {
         id: `${panelId}-tabs`,
-        value: activeTab,
-        onChange: (value) => store.setActiveTab?.(value),
+        value: showingFile ? "" : activeTab,
+        onChange: (value) => {
+          files?.onLeaveFile?.();
+          store.setActiveTab?.(value);
+        },
         options: [
           { value: "changes", label: t("Changes") },
           { value: "reviewer", label: reviewerLabel },
         ],
-      })
+      }),
+      files ? files.strip : null
     ),
-    activeTab === "reviewer"
+    showingFile
+      ? files.body
+      : activeTab === "reviewer"
       ? h(ReviewerPanel, {
           panelId,
           reviewJobs: review.reviewJobs || [],

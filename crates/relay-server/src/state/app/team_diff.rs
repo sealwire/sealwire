@@ -284,7 +284,7 @@ fn canonical_path_within_root(candidate: &std::path::Path, root: &std::path::Pat
 ///
 /// Returns `Ok(None)` when the path is absent. Returns `Err` when the path exists
 /// but resolves outside the worktree (for example via a symlink).
-async fn resolve_worktree_file_path(
+pub(super) async fn resolve_worktree_file_path(
     workspace: &TrustedWorkspace,
     rel_path: &str,
 ) -> Result<Option<std::path::PathBuf>, String> {

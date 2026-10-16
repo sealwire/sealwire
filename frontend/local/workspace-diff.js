@@ -550,17 +550,17 @@ function countDiffLines(diff) {
   return { added, removed };
 }
 
-export function mountChangesPanel({ store, mount, reviewer = {}, panelId = "review-panel-rail" }) {
+// `wrap` lets the local app add the Editor's file tabs without this module knowing them.
+export function mountChangesPanel({ store, mount, reviewer = {}, panelId = "review-panel-rail", wrap = null }) {
   if (!mount) return null;
   const root = createRoot(mount);
-  root.render(
-    h(RightPanelTabs, {
-      store,
-      panelId,
-      reviewer,
-      changes: h(WorkspaceChangesPanel, { store }),
-    })
-  );
+  const props = {
+    store,
+    panelId,
+    reviewer,
+    changes: h(WorkspaceChangesPanel, { store }),
+  };
+  root.render(wrap ? wrap(props) : h(RightPanelTabs, props));
   return {
     destroy() {
       root.unmount();

@@ -74,6 +74,10 @@ export function normalizeSessionViewContext(context) {
   if (context?.kind === "usage") {
     return { kind: "usage" };
   }
+  // The folder and open files are the editor's own state, not part of the location.
+  if (context?.kind === "editor") {
+    return { kind: "editor" };
+  }
   // The full-screen merge review (15a). Unlike `tasks`, a null id is not a list
   // state — the screen reviews ONE branch. Falling back keeps a truncated history
   // entry from landing on a blank screen that reads as a failed load.
@@ -155,6 +159,7 @@ export function selectContextAfterProjectDelete({ context = null, deletedProject
 export const TASKS_KEY = "__tasks__";
 export const TEAMS_KEY = "__teams__";
 export const USAGE_KEY = "__usage__";
+export const EDITOR_KEY = "__editor__";
 // Its own key, not a suffix on TASKS_KEY: the review screen and a task's detail
 // are two destinations for the same run, and a shared key would make Back unable
 // to tell them apart.
@@ -177,7 +182,7 @@ export const TICKET_KEY = "__ticket__";
  * sites reintroduces that, invisibly. Adding another such screen should be one
  * entry here, not an audit.
  */
-const FULL_AREA_KINDS = new Set(["tasks", "teams", "usage", "review", "ticket"]);
+const FULL_AREA_KINDS = new Set(["tasks", "teams", "usage", "review", "ticket", "editor"]);
 
 export function isFullAreaContext(context) {
   return FULL_AREA_KINDS.has(context?.kind);
@@ -216,6 +221,7 @@ export function isFullAreaWorkspaceKey(key) {
     || isReviewWorkspaceKey(key)
     || isTicketWorkspaceKey(key)
     || key === USAGE_KEY
+    || key === EDITOR_KEY
   );
 }
 
@@ -232,6 +238,9 @@ export function sessionViewContextKey(context) {
   }
   if (normalized.kind === "usage") {
     return USAGE_KEY;
+  }
+  if (normalized.kind === "editor") {
+    return EDITOR_KEY;
   }
   if (normalized.kind === "review") {
     return `${REVIEW_KEY}:${normalized.teamRunId}`;

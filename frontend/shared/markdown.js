@@ -7,6 +7,9 @@ import { t } from "./i18n.js";
 
 const h = React.createElement;
 export const MarkdownEditorLinksContext = React.createContext(false);
+// `({ path, line, column, diff }) => boolean`: open a file the agent named inside Sealwire.
+// False means it could not (not in the session's worktree), and the link falls back.
+export const MarkdownFileOpenContext = React.createContext(null);
 
 /**
  * Render transcript text as markdown into React elements.
@@ -106,8 +109,37 @@ function editorFileHref(href) {
   return `vscode://file${path}${line ? `:${line}${column ? `:${column}` : ""}` : ""}`;
 }
 
+/** `path`, `path:12`, `path:12:3` or `path#L12C3` → its parts; null for anything else. */
+export function parseFileLocation(href) {
+  if (!href || CONTROL_CHAR_RE.test(href)) {
+    return null;
+  }
+  const hash = href.indexOf("#");
+  let file = hash < 0 ? href : href.slice(0, hash);
+  const fragment = hash < 0 ? null : /^L(\d+)(?:C(\d+))?(?:-L?\d+)?$/.exec(href.slice(hash + 1));
+  if (hash >= 0 && !fragment) {
+    return null;
+  }
+  const position = /:(\d+)(?::(\d+))?$/.exec(file);
+  if (position) {
+    file = file.slice(0, position.index);
+  }
+  try {
+    file = decodeURIComponent(file);
+  } catch {
+    // A literal percent sign in a filename need not be a URL escape.
+  }
+  if (!file || CONTROL_CHAR_RE.test(file)) {
+    return null;
+  }
+  const line = Number(fragment?.[1] || position?.[1]) || null;
+  const column = Number(fragment?.[2] || position?.[2]) || null;
+  return { path: file, line, column };
+}
+
 function SafeLink({ href, children, node, ...rest }) {
   const openFileLinksInEditor = React.useContext(MarkdownEditorLinksContext);
+  const openFile = React.useContext(MarkdownFileOpenContext);
   if (href && !/^(?:[#?]|\/\/)/.test(href)
     && (FILE_LOCATION_RE.test(href) || !/^[a-z][a-z\d+.-]*:/i.test(href))) {
     let path = href;
@@ -122,6 +154,42 @@ function SafeLink({ href, children, node, ...rest }) {
     }
     // The desktop WebView has no external protocol opener.
     const editorHref = openFileLinksInEditor && !isTauri() ? editorFileHref(href) : null;
+    const location = openFile ? parseFileLocation(href) : null;
+    if (location) {
+      // ⌘/Ctrl-click keeps the old behaviour: VS Code in a browser, copy on desktop.
+      const fallback = (target) => {
+        if (editorHref) {
+          globalThis.open?.(editorHref, "_blank", "noopener,noreferrer");
+        } else {
+          void copyTextToClipboard(path, target);
+        }
+      };
+      const activate = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.metaKey || event.ctrlKey || !openFile(location)) {
+          fallback(event.currentTarget);
+        }
+      };
+      return h(
+        "span",
+        {
+          ...rest,
+          role: "button",
+          tabIndex: 0,
+          className: "markdown-file-link",
+          title: t("Open {path}", { path }),
+          "aria-label": t("Open {path}", { path }),
+          onClick: activate,
+          onKeyDown: (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              activate(event);
+            }
+          },
+        },
+        children
+      );
+    }
     if (editorHref) {
       return h(
         "a",

@@ -48,6 +48,7 @@ export const teamsLibraryMount = document.querySelector("#teams-library");
 export const reviewScreenMount = document.querySelector("#review-screen");
 export const ticketScreenMount = document.querySelector("#ticket-screen");
 export const usageReportMount = document.querySelector("#usage-report");
+export const editorMount = document.querySelector("#editor-screen");
 // The sidebar's destinations, in both forms, are one shared prop-driven component
 // (shared/sidebar-nav.js) rendered into these two mounts. That replaced SIX handles —
 // a Sessions button, a Tasks button and a count badge in the sidebar, plus a Sessions

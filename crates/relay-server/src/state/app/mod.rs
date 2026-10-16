@@ -311,6 +311,7 @@ mod approvals;
 mod broker;
 mod checkpoint;
 mod delegation;
+mod editor_files;
 mod fork;
 #[cfg(test)]
 mod fork_card_tests;

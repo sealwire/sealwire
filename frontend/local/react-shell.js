@@ -573,6 +573,8 @@ function ChatShell() {
     h("section", { className: "ticket-screen-mount", id: "ticket-screen" }),
     // The Usage report. Same full-area pattern as Tasks.
     h("section", { className: "usage-report-mount", id: "usage-report" }),
+    // The Editor. Same full-area pattern; it brings its own file panel.
+    h("section", { className: "editor-mount", id: "editor-screen" }),
     h(ConsoleGrid),
     h("div", { className: "pending-action-banner", id: "pending-action-banner", hidden: true }),
     h(

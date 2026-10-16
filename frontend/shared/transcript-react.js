@@ -66,7 +66,12 @@ import {
 } from "./file-change-diff.js";
 import { transcriptRowKey } from "./transcript-row-key.js";
 import { isFailedTranscriptEntry, isPartialTranscriptEntry } from "./transcript-entry-details-state.js";
-import { MarkdownEditorLinksContext, renderMarkdown, renderStreamingMarkdown } from "./markdown.js";
+import {
+  MarkdownEditorLinksContext,
+  MarkdownFileOpenContext,
+  renderMarkdown,
+  renderStreamingMarkdown,
+} from "./markdown.js";
 import { didPrependOlderTranscript } from "./transcript-scroll.js";
 import { getTranscriptScrollController } from "./transcript-scroll-controller.js";
 import { t } from "./i18n.js";
@@ -1104,6 +1109,8 @@ function FileDiffSection({
 
   const glyph = changeGlyph(change.change_type);
   const [dir, base] = splitDisplayPath(displayPath);
+  const openFile = React.useContext(MarkdownFileOpenContext);
+  const deleted = String(change.change_type || "").toLowerCase().startsWith("del");
 
   // One compact row everywhere: status glyph, directory-first name, right-aligned
   // stats. The transcript used to carry a padded card with a chevron; that read as
@@ -1124,7 +1131,25 @@ function FileDiffSection({
       { className: "diff-file-stats" },
       added > 0 ? h("span", { className: "diff-file-stat-add" }, `+${added}`) : null,
       removed > 0 ? h("span", { className: "diff-file-stat-del" }, `−${removed}`) : null
-    )
+    ),
+    // Inside <summary>, so it must not also toggle the row it sits in.
+    openFile && change.path && !deleted
+      ? h(
+          "button",
+          {
+            type: "button",
+            className: "diff-file-open",
+            title: t("Open {path}", { path: change.path }),
+            "aria-label": t("Open {path}", { path: change.path }),
+            onClick: (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              openFile({ path: change.path, line: null, diff: true });
+            },
+          },
+          t("Open")
+        )
+      : null
   );
 
   return h(
@@ -3744,9 +3769,13 @@ export function TranscriptContent({
     MarkdownEditorLinksContext.Provider,
     { value: options?.openFileLinksInEditor === true },
     h(
-      CardBodyContext.Provider,
-      { value: cardBodies },
-      h(TranscriptViewport, { nodes, sentinel, askUserFooter, selectionToolbar })
+      MarkdownFileOpenContext.Provider,
+      { value: typeof options?.onOpenFile === "function" ? options.onOpenFile : null },
+      h(
+        CardBodyContext.Provider,
+        { value: cardBodies },
+        h(TranscriptViewport, { nodes, sentinel, askUserFooter, selectionToolbar })
+      )
     )
   );
 }

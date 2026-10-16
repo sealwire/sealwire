@@ -7,10 +7,11 @@ import { ProvidersPage } from "../shared/settings-providers.js";
 import { splitDeviceRecords } from "../shared/settings-model.js";
 import { t } from "../shared/i18n.js";
 import { AccessPage, DevicesPage } from "./settings-devices.js";
+import { EditorSettingsPage } from "./editor/editor-settings.js";
 
 const h = React.createElement;
 
-export const LOCAL_SETTINGS_TABS = ["providers", "devices", "access", "log"];
+export const LOCAL_SETTINGS_TABS = ["providers", "devices", "access", "editor", "log"];
 
 export function LocalSettings(props) {
   const { tab, onSelectTab, onClose, providers, devices, pairing, access, log, now } = props;
@@ -40,6 +41,7 @@ export function LocalSettings(props) {
           ? t("{count} roots", { count: access.roots.length })
           : t("Any folder"),
     },
+    { key: "editor", label: t("Editor") },
   ];
   return h(
     SettingsFrame,
@@ -72,6 +74,7 @@ export function LocalSettings(props) {
       shortId: props.shortId,
     }),
     h(AccessPage, { active: tab === "access", access, records: devices.records }),
+    h(EditorSettingsPage, { active: tab === "editor" }),
     h(LogPage, {
       active: tab === "log",
       entries: log.entries,

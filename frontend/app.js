@@ -304,7 +304,12 @@ import {
   openTasksDestination,
   openTeamsDestination,
   openUsageDestination,
+  openEditorDestination,
 } from "./shared/nav-destinations.js";
+import { createEditorStore } from "./local/editor/editor-store.js";
+import { createEditorApi } from "./local/editor/editor-api.js";
+import { EDITOR_PREFS_EVENT, loadEditorAutosave } from "./local/editor/editor-prefs.js";
+import { createEditorPanelHost, LocalRightPanel } from "./local/editor/editor-panel.js";
 import {
   browserSessionViewPersistence,
 } from "./shared/session-view-persistence.js";
@@ -678,6 +683,50 @@ state.sessionViewController = sessionViewController;
 
 const apiFetch = createApiFetch();
 
+function editorStorage() {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+const editorStore = createEditorStore({
+  api: createEditorApi({ apiFetch, getDeviceId: () => state.deviceId }),
+  storage: editorStorage(),
+  autosave: loadEditorAutosave(),
+});
+window.addEventListener(EDITOR_PREFS_EVENT, (event) => {
+  editorStore.setAutosave(event.detail?.autosave !== false);
+});
+
+function editorFallbackRoot() {
+  return state.session?.thread_workspace_cwd || state.session?.current_cwd || null;
+}
+
+const editorHost = {
+  store: editorStore,
+  isVisible: () => sessionViewStore.getState().location.context?.kind === "editor",
+  // Arriving by history (reload, Back) skips openEditorScreen, so the screen asks for this.
+  ensureLoaded() {
+    if (!editorStore.getState().dirs[""]) {
+      void editorStore.enter({ fallbackRoot: editorFallbackRoot() });
+    }
+  },
+  backToSession: () => openSessionsScreen(),
+  trustFolder: (root) => trustWorkspace(root),
+};
+
+// Leaving the Editor is a moment to save, like switching tabs inside it.
+sessionViewController.subscribe((change) => {
+  if (
+    change.previous?.location?.context?.kind === "editor"
+    && change.next?.location?.context?.kind !== "editor"
+  ) {
+    editorStore.flushSaves();
+  }
+});
+
 const reviewsCache = createReviewsCache();
 const workflowsCache = createWorkflowsCache();
 const teamsCache = createTeamsCache();
@@ -840,11 +889,26 @@ const workspaceDiffSheet = createWorkspaceDiffSheet({
   reviewer: reviewerActions,
   panelId: "review-panel-sheet",
 });
+// Files the session's agent named open here, in the session's own worktree. The rail
+// control is declared further down; these run only on a click, after it exists.
+const editorPanelHost = createEditorPanelHost({
+  editorStore,
+  getSessionRoot: () => workspaceDiffStore.getState().workspace?.cwd || null,
+  getThreadId: () => viewedThreadId(),
+  railControl: {
+    isOpen: () => rightPanelControl.isOpen(),
+    open: () => rightPanelControl.open(),
+    getWidth: () => rightPanelControl.getWidth(),
+    setWidth: (width, options) => rightPanelControl.setWidth(width, options),
+  },
+  openEditor: () => void openEditorDestination(sessionViewController),
+});
 mountChangesPanel({
   store: workspaceDiffStore,
   mount: workspaceChangesMount,
   reviewer: reviewerActions,
   panelId: "review-panel-rail",
+  wrap: (props) => React.createElement(LocalRightPanel, { ...props, host: editorPanelHost }),
 });
 setupHeaderBandSync({
   chatHeader: document.querySelector(".chat-shell > .chat-header"),
@@ -934,7 +998,8 @@ const rightPanelControl = createPanelControl({
   widthStorageKey: "agent-relay:local-rail-width",
   openWidthStorageKey: "agent-relay:local-rail-open-width",
   minOpenWidth: 260,
-  maxOpenWidth: 560,
+  // Wide enough to edit a file opened from the conversation.
+  maxOpenWidth: 900,
   defaultOpenWidth: 320,
   side: "right",
 });
@@ -1293,6 +1358,9 @@ const renderer = createSessionRenderer({
   onOpenSessionsScreen: () => openSessionsScreen(),
   onOpenTasksScreen: () => openTaskScreen(),
   onOpenUsageScreen: () => openUsageScreen(),
+  onOpenEditorScreen: () => openEditorScreen(),
+  editorHost,
+  onOpenFileInPanel: (target) => editorPanelHost.openInPanel(target),
   onOpenTeamsScreen: (teamId) => openTeamsScreen(teamId),
   // The narrowing controls. Each wraps a transport the shared components must not see:
   // the search field's debounce + HTTP query, and the bell's list re-render.
@@ -2528,6 +2596,14 @@ function openTaskScreen() {
 
 function openUsageScreen() {
   void openUsageDestination(sessionViewController);
+}
+
+// The editor follows the session on screen when the user leaves it for the Editor.
+function openEditorScreen() {
+  const location = sessionViewStore.getState().location;
+  const threadId = location.context?.kind === "editor" ? null : location.threadId || null;
+  void editorStore.enter({ threadId, fallbackRoot: editorFallbackRoot() });
+  void openEditorDestination(sessionViewController);
 }
 
 function openTeamsScreen(teamId = null) {

@@ -1,5 +1,7 @@
 use super::*;
 use axum::http::{header, header::HeaderName, Method, StatusCode};
+
+mod editor_files;
 use relay_http::{
     apply_standard_security_headers, build_content_security_policy, DEFAULT_CONNECT_SRC,
     PERMISSIONS_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,

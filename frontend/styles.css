@@ -150,6 +150,19 @@
   --diff-del-bg: rgba(217, 91, 86, 0.16);
   --diff-meta-bg: rgba(255, 255, 255, 0.035);
 
+  /* Editor syntax colours, from the Pierre theme the transcript's code blocks use. */
+  --code-keyword: #ff678d;
+  --code-string: #5ecc71;
+  --code-comment: #8a8a8a;
+  --code-function: #9d6afb;
+  --code-type: #d568ea;
+  --code-number: #68cdf2;
+  --code-property: #b8c4cf;
+  --code-tag: #ff855e;
+  --code-selection: rgba(0, 159, 255, 0.30);
+  --code-active-line: rgba(25, 40, 60, 0.55);
+  --code-search-match: rgba(255, 196, 0, 0.22);
+
   /* Semantic aliases — every "warning/attention", "success/added", and
      "error/deleted" reference in the app now resolves to the ONE canonical
      --warn-fg / --ok-fg / --err-fg per theme (the consolidation approved with
@@ -308,6 +321,18 @@
     --diff-add-bg: rgba(27, 106, 20, 0.12);
     --diff-del-bg: rgba(193, 48, 69, 0.12);
     --diff-meta-bg: rgba(0, 0, 0, 0.035);
+
+    --code-keyword: #d32a61;
+    --code-string: #19813a;
+    --code-comment: #737373;
+    --code-function: #693acf;
+    --code-type: #a631be;
+    --code-number: #157f9e;
+    --code-property: #4f5b66;
+    --code-tag: #c2451f;
+    --code-selection: rgba(0, 159, 255, 0.18);
+    --code-active-line: rgba(223, 235, 255, 0.55);
+    --code-search-match: rgba(255, 196, 0, 0.28);
 
     /* Provider brand accents — darker text for AA contrast on light */
     --provider-claude-fg: #c2410c;
@@ -12128,4 +12153,685 @@ button.usage-session-row:focus-visible .usage-session-go {
     filter: none;
     opacity: 0.25;
   }
+}
+
+
+/* ===== Editor — full-area (data-view="editor") =====
+ * The editor brings its own file panel, so on a desktop-width window the app sidebar
+ * gives up its column and the icon rail stands in for it, whatever the collapse
+ * setting: the code needs the width, and every destination stays one click away. */
+.app-shell[data-view="editor"],
+.app-shell-with-rail[data-view="editor"] {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+}
+.app-shell[data-view="editor"] .right-rail {
+  display: none;
+}
+.app-shell[data-view="editor"] .sidebar-task-list {
+  display: none;
+}
+@media (min-width: 960px) {
+  .local-frame:has(> .app-shell[data-view="editor"]) > .icon-rail {
+    display: flex;
+  }
+  body .local-frame > .app-shell[data-view="editor"] {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+  .app-shell[data-view="editor"] .sidebar {
+    visibility: hidden;
+    pointer-events: none;
+    overflow: hidden;
+  }
+}
+
+.chat-shell[data-view="editor"] {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.chat-shell[data-view="editor"] > * {
+  display: none;
+}
+.editor-mount {
+  display: none;
+}
+.chat-shell[data-view="editor"] > .editor-mount {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.editor-screen {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100dvh;
+  background: var(--surface-1);
+}
+
+.editor-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface-0);
+  border-right: 1px solid var(--border-faint);
+}
+.editor-panel-top {
+  padding: 12px 12px 8px;
+}
+.editor-location {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--text-ui);
+  cursor: pointer;
+  text-align: left;
+  justify-content: flex-start;
+}
+.editor-location:hover {
+  border-color: var(--border-firm);
+}
+.editor-location-name {
+  font-weight: var(--weight-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.editor-location-branch {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.editor-location-chevron,
+.editor-tree-chevron,
+.editor-back-chevron {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  color: var(--text-3);
+}
+.editor-location-chevron svg,
+.editor-tree-chevron svg,
+.editor-back-chevron svg {
+  width: 14px;
+  height: 14px;
+}
+
+.editor-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 6px 16px;
+}
+.editor-panel-title {
+  flex: 1 1 auto;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.editor-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.editor-switch-track {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  transition: background 120ms ease;
+}
+.editor-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface-1);
+  transition: transform 120ms ease;
+}
+.editor-switch[aria-checked="true"] .editor-switch-track {
+  background: var(--accent);
+}
+.editor-switch[aria-checked="true"] .editor-switch-track::after {
+  transform: translateX(12px);
+}
+.editor-switch:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--r-sm);
+}
+.editor-switch.is-settings .editor-switch-track {
+  width: 34px;
+  height: 20px;
+}
+.editor-switch.is-settings .editor-switch-track::after {
+  width: 16px;
+  height: 16px;
+}
+.editor-switch.is-settings[aria-checked="true"] .editor-switch-track::after {
+  transform: translateX(14px);
+}
+
+.editor-tree {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 8px 16px;
+}
+.editor-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  height: 26px;
+  padding-right: 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--text-ui);
+  text-align: left;
+  justify-content: flex-start;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.editor-tree-row:hover {
+  background: var(--surface-2);
+}
+.editor-tree-row.is-active {
+  background: var(--accent-soft-bg);
+}
+.editor-tree-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.editor-tree-twisty {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  flex: none;
+}
+.editor-tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.editor-tree-dir {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+.editor-tree-status {
+  margin-left: auto;
+  padding-left: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+  color: var(--text-3);
+}
+.editor-tree-row.is-status-modified .editor-tree-name,
+.editor-tree-row.is-status-modified .editor-tree-status,
+.editor-tree-row.is-status-renamed .editor-tree-name,
+.editor-tree-row.is-status-renamed .editor-tree-status {
+  color: var(--accent);
+}
+.editor-tree-row.is-status-added .editor-tree-name,
+.editor-tree-row.is-status-added .editor-tree-status {
+  color: var(--ok-fg);
+}
+.editor-tree-row.is-status-untracked .editor-tree-name,
+.editor-tree-row.is-status-untracked .editor-tree-status,
+.editor-tree-row.is-status-conflicted .editor-tree-name,
+.editor-tree-row.is-status-conflicted .editor-tree-status {
+  color: var(--warn-fg);
+}
+.editor-tree-row.is-status-deleted .editor-tree-name,
+.editor-tree-row.is-status-deleted .editor-tree-status {
+  color: var(--err-fg);
+  text-decoration: line-through;
+}
+.editor-tree-note {
+  padding: 6px 12px;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.editor-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.editor-tabbar {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  height: 38px;
+  background: var(--surface-0);
+  border-bottom: 1px solid var(--border-faint);
+}
+.editor-tabs {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.editor-tabs::-webkit-scrollbar {
+  display: none;
+}
+.editor-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  max-width: 220px;
+  padding: 0 8px 0 12px;
+  color: var(--tab-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.editor-tab:hover {
+  color: var(--text-1);
+}
+.editor-tab.is-active {
+  margin-bottom: -1px;
+  background: var(--surface-1);
+  color: var(--text-1);
+  box-shadow: inset 0 2px 0 var(--accent), 1px 0 0 var(--border-faint), -1px 0 0 var(--border-faint);
+}
+.editor-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.editor-tab-folder {
+  color: var(--text-3);
+}
+.editor-tab-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--text-2);
+}
+.editor-tab-dot.is-attention {
+  background: var(--warn-fg);
+}
+.editor-tab-close {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--text-ui);
+  line-height: var(--leading-none);
+  cursor: pointer;
+}
+.editor-tab-close:hover {
+  background: var(--surface-2);
+  color: var(--text-1);
+}
+.editor-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 0 14px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-ui);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.editor-back-chevron {
+  transform: rotate(180deg);
+  color: var(--accent);
+}
+
+.editor-path {
+  flex: none;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-faint);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.editor-path-sep {
+  padding: 0 6px;
+}
+.editor-path-leaf {
+  color: var(--text-1);
+}
+
+.editor-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+  padding: 8px 16px;
+  font-size: var(--text-ui);
+  color: var(--text-1);
+  border-bottom: 1px solid var(--border-soft);
+}
+.editor-banner.is-warn {
+  background: var(--warn-bg);
+}
+.editor-banner.is-info {
+  background: var(--surface-0);
+  color: var(--text-2);
+}
+.editor-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.editor-banner-text strong {
+  font-weight: var(--weight-strong);
+}
+.editor-banner-actions {
+  display: inline-flex;
+  gap: 8px;
+  flex: none;
+}
+.editor-button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-firm);
+  border-radius: var(--r-sm);
+  background: var(--surface-1);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.editor-button:hover {
+  background: var(--surface-2);
+}
+.editor-button.is-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+}
+.editor-button.is-primary:hover {
+  background: var(--accent-hover-color);
+}
+
+.editor-code {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.editor-code[hidden] {
+  display: none;
+}
+.editor-placeholder {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px;
+  color: var(--text-2);
+  font-size: var(--text-body);
+  text-align: center;
+}
+.editor-placeholder p {
+  margin: 0;
+  max-width: 420px;
+}
+
+.editor-compare {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+.editor-compare-head {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border-faint);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.editor-compare-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+.editor-compare-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.editor-status {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: none;
+  height: 26px;
+  padding: 0 14px;
+  border-top: 1px solid var(--border-faint);
+  background: var(--surface-0);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.editor-status-grow {
+  flex: 1 1 auto;
+}
+
+.editor-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: var(--modal-backdrop);
+}
+.editor-confirm-card {
+  width: min(440px, calc(100% - 48px));
+  padding: 18px 18px 14px;
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-lg);
+}
+.editor-confirm-title {
+  margin: 0 0 10px;
+  font-size: var(--text-md);
+  font-weight: var(--weight-strong);
+}
+.editor-confirm-list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.editor-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* ===== Files opened in the session's right panel =====
+ * Changes / Agents keep their segmented control; open files follow as tabs and scroll
+ * sideways when they do not fit. While a file shows, the panel stops scrolling and the
+ * editor fills it. */
+.right-panel-tabs-header.has-files {
+  gap: 8px;
+  padding: 8px 0 0 12px;
+  align-items: stretch;
+}
+.right-panel-tabs-header.has-files .settings-segmented {
+  width: auto;
+  flex: none;
+  align-self: center;
+  margin-bottom: 8px;
+}
+.right-panel-tabs-header.has-files .settings-segmented-option {
+  flex: none;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+.editor-tabbar.is-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: auto;
+  background: transparent;
+  border-bottom: none;
+}
+.right-panel-tabs:has(> .editor-panel-body) {
+  height: 100%;
+  min-height: 0;
+}
+.editor-panel-body {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface-1);
+  border-top: 1px solid var(--border-faint);
+}
+.editor-panel-file {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+.editor-panel-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-faint);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.editor-panel-where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  color: var(--text-3);
+}
+.editor-panel-save {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+.editor-mode {
+  display: inline-flex;
+  flex: none;
+  padding: 2px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+.editor-mode-option {
+  padding: 2px 10px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.editor-mode-option.is-selected {
+  background: var(--surface-1);
+  color: var(--text-1);
+  box-shadow: var(--shadow-1);
+}
+.editor-panel-diff-note {
+  flex: none;
+  padding: 4px 12px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  border-bottom: 1px solid var(--border-faint);
+}
+.editor-panel-diff {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* "Open" on a changed-file row, in the conversation and in Changes. */
+.diff-file-open {
+  flex: none;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--surface-1);
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.diff-file-open:hover {
+  border-color: var(--accent);
+}
+.diff-file-section.is-rail > .diff-file-section-header:has(> .diff-file-open) {
+  grid-template-columns: 13px minmax(0, 1fr) auto auto;
+}
+.workspace-diff-sheet-body .diff-file-section.is-rail > .diff-file-section-header:has(> .diff-file-open) {
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
 }

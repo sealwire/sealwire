@@ -369,4 +369,12 @@ export default {
   "{name} ({count} session)": "{name}（{count} 个会话）",
   "{name} ({count} sessions)": "{name}（{count} 个会话）",
   "Allowed root": "允许访问的文件夹",
+
+  // Editor destination
+  "Editor": "编辑器",
+  "Editor — browse and edit the project's files": "编辑器 — 浏览和编辑项目里的文件",
+
+  // Opening a file the agent named
+  "Open {path}": "打开 {path}",
+  "Open": "打开",
 };

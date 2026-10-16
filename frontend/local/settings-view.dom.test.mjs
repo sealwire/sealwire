@@ -103,12 +103,12 @@ function typeInto(input, value) {
   });
 }
 
-test("the nav lists Providers, Devices and Access; Log is only a footer link", () => {
+test("the nav lists Providers, Devices, Access and Editor; Log is only a footer link", () => {
   const { props, calls } = baseProps();
   const view = render(props);
   try {
     const tabs = [...view.host.querySelectorAll(".settings-nav-item")].map((el) => el.dataset.settingsTab);
-    assert.deepEqual(tabs, ["providers", "devices", "access"]);
+    assert.deepEqual(tabs, ["providers", "devices", "access", "editor"]);
     click(view.host.querySelector("#settings-tab-log"));
     assert.deepEqual(calls.selected, ["log"]);
   } finally {

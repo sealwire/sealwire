@@ -12,7 +12,7 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const { MarkdownEditorLinksContext, renderMarkdown, renderStreamingMarkdown } = await import("./shared/markdown.js");
+const { MarkdownEditorLinksContext, MarkdownFileOpenContext, renderMarkdown, renderStreamingMarkdown } = await import("./shared/markdown.js");
 
 for (const render of [renderMarkdown, renderStreamingMarkdown]) {
   test(`${render.name}: file anchors open in the editor without copying or parent actions`, async () => {
@@ -94,3 +94,54 @@ for (const render of [renderMarkdown, renderStreamingMarkdown]) {
     }
   });
 }
+
+test("with a file opener, a file link opens in Sealwire at its line and falls back when it cannot", async () => {
+  const copied = [];
+  const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text) => copied.push(text) },
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const asked = [];
+  let parentClicks = 0;
+  const openFile = (target) => {
+    asked.push(target);
+    return target.path.startsWith("/repo/");
+  };
+  try {
+    await act(async () => root.render(React.createElement(
+      "div",
+      { onClick: () => parentClicks++ },
+      React.createElement(MarkdownFileOpenContext.Provider, { value: openFile },
+        renderMarkdown("[a](</repo/src/a.rs:12>) [b](src/b.rs#L7C3) [c](</elsewhere/c.rs:3>) [web](https://example.com)")
+      )
+    )));
+    const links = [...container.querySelectorAll(".markdown-file-link")];
+    assert.equal(links.length, 3, "the web link is not a file link");
+    for (const link of links) {
+      await act(async () => link.click());
+    }
+    assert.deepEqual(asked, [
+      { path: "/repo/src/a.rs", line: 12, column: null },
+      { path: "src/b.rs", line: 7, column: 3 },
+      { path: "/elsewhere/c.rs", line: 3, column: null },
+    ]);
+    assert.deepEqual(copied, ["src/b.rs#L7C3", "/elsewhere/c.rs:3"], "what could not open falls back to copying");
+    assert.equal(parentClicks, 0, "the click stays on the link");
+
+    asked.length = 0;
+    await act(async () => links[0].dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, metaKey: true })));
+    assert.equal(asked.length, 0, "a modifier click keeps the old behaviour");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    if (previousClipboard) {
+      Object.defineProperty(navigator, "clipboard", previousClipboard);
+    } else {
+      delete navigator.clipboard;
+    }
+  }
+});

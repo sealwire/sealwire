@@ -1912,6 +1912,111 @@ pub struct ThreadWorkspaceInput {
     pub device_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorEntryKind {
+    File,
+    Dir,
+}
+
+/// One child of a folder in the editor's file tree. `path` is relative to the editor root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorDirEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: EditorEntryKind,
+    /// One-letter git state of a file (`M`, `A`, `D`, `R`, `U`, `?`); absent when unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// A folder holding at least one changed file.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorDirListing {
+    pub root: String,
+    pub dir: String,
+    pub entries: Vec<EditorDirEntry>,
+    pub truncated: bool,
+    /// False when git state could not be read in time, so a missing `status` means
+    /// "unknown", not "unchanged".
+    pub statuses_known: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorFileView {
+    pub root: String,
+    pub path: String,
+    /// `None` for a binary or oversized file, which the editor shows but does not open.
+    pub content: Option<String>,
+    /// Hash of the bytes on disk; a save must quote it back.
+    pub revision: Option<String>,
+    pub size: u64,
+    pub mtime_ms: Option<u64>,
+    pub binary: bool,
+    pub too_large: bool,
+    pub readonly: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EditorWriteInput {
+    pub root: String,
+    pub path: String,
+    pub content: String,
+    /// The revision the editor loaded; the write is refused if the file has moved on.
+    pub expected_revision: String,
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum EditorWriteOutcome {
+    Saved {
+        revision: String,
+        mtime_ms: Option<u64>,
+    },
+    /// The file changed on disk since the editor read it; nothing was written.
+    Conflict { current_revision: Option<String> },
+    /// The file is gone; nothing was written, so a deletion is never silently undone.
+    Missing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorFileStat {
+    pub path: String,
+    pub revision: Option<String>,
+    pub missing: bool,
+    pub too_large: bool,
+}
+
+/// A file as of the last commit, for the editor's "compared with last commit" view.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorBaseView {
+    pub path: String,
+    /// False when HEAD has no such file (new, untracked, or no commit yet).
+    pub tracked: bool,
+    pub content: Option<String>,
+    pub binary: bool,
+    pub too_large: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorChangeEntry {
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorChangesView {
+    pub root: String,
+    pub is_repo: bool,
+    /// False when the scan ran out of time or output budget; `entries` is then empty.
+    pub complete: bool,
+    pub entries: Vec<EditorChangeEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceDiffResponse {
     pub cwd: String,

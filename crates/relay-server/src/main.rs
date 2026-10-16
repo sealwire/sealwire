@@ -50,24 +50,25 @@ use protocol::{
     ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AskDetailResponse,
     AskUserAnswerReceipt, BulkRevokeDevicesReceipt, ClientErrorCode, CommentHandBackInput,
     CommentMutationReceipt, CommentResolveInput, CreateCommentInput, DeleteThreadInput,
-    DevicesResponse, ForkSessionInput, HealthResponse, HeartbeatInput, ListCommentsQuery,
-    ListCommentsResponse, ListReviewTicksQuery, ListReviewTicksResponse, LocalTranscriptEvent,
-    ModelOptionView, PairingDecisionInput, PairingDecisionReceipt, PairingStartInput,
-    PairingTicketView, ProjectActionInput, ProjectActionReceipt, ProjectsResponse,
-    ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput,
-    RequestReviewInput, RequestReviewReceipt, ResolvedWorkspace, ResumeSessionInput,
-    ReviewAcceptReceipt, ReviewActionInput, ReviewDeleteReceipt, ReviewsResponse,
-    RevokeDeviceReceipt, SendMessageInput, SessionSnapshot, SessionSnapshotCompactProfile,
-    SetThreadFlagInput, SkillInvocationInput, StartSessionInput, StartTeamInput, StartTeamReceipt,
-    StartWorkflowInput, StartWorkflowReceipt, StopTurnInput, SubmitAskUserAnswerInput,
-    TeamActionInput, TeamActionReceipt, TeamFileResponse, TeamMarkInput, TeamsResponse,
-    ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse, ThreadFlagReceipt,
-    ThreadRenameReceipt, ThreadSettingsView, ThreadSkillsView, ThreadTranscriptResponse,
-    ThreadWorkspaceInput, ThreadsQuery, ThreadsResponse, TickReviewFileInput,
-    TranscriptCursorToken, TranscriptDeltaEvent, TranscriptResyncEvent, UpdateSessionSettingsInput,
-    WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt, WorkflowsResponse,
-    WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput, WorkspaceTrustReceipt,
-    TRANSCRIPT_RESYNC_EVENT_KIND, TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
+    DevicesResponse, EditorBaseView, EditorChangesView, EditorDirListing, EditorFileStat,
+    EditorFileView, EditorWriteInput, EditorWriteOutcome, ForkSessionInput, HealthResponse,
+    HeartbeatInput, ListCommentsQuery, ListCommentsResponse, ListReviewTicksQuery,
+    ListReviewTicksResponse, LocalTranscriptEvent, ModelOptionView, PairingDecisionInput,
+    PairingDecisionReceipt, PairingStartInput, PairingTicketView, ProjectActionInput,
+    ProjectActionReceipt, ProjectsResponse, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
+    RenameThreadInput, RepairWorkspaceInput, RequestReviewInput, RequestReviewReceipt,
+    ResolvedWorkspace, ResumeSessionInput, ReviewAcceptReceipt, ReviewActionInput,
+    ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
+    SessionSnapshotCompactProfile, SetThreadFlagInput, SkillInvocationInput, StartSessionInput,
+    StartTeamInput, StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt, StopTurnInput,
+    SubmitAskUserAnswerInput, TeamActionInput, TeamActionReceipt, TeamFileResponse, TeamMarkInput,
+    TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
+    ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView, ThreadSkillsView,
+    ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery, ThreadsResponse,
+    TickReviewFileInput, TranscriptCursorToken, TranscriptDeltaEvent, TranscriptResyncEvent,
+    UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt,
+    WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput,
+    WorkspaceTrustReceipt, TRANSCRIPT_RESYNC_EVENT_KIND, TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
 };
 use provider::ProviderImage;
 use relay_http::{
@@ -439,6 +440,16 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session", get(session_snapshot))
         .route("/api/workspace/diff", get(workspace_diff))
         .route("/api/workspace/git-context", get(workspace_git_context))
+        .route("/api/editor/dir", get(editor_dir))
+        .route(
+            "/api/editor/file",
+            get(editor_file)
+                .post(editor_write)
+                .layer(DefaultBodyLimit::max(EDITOR_WRITE_BODY_BYTES)),
+        )
+        .route("/api/editor/stat", get(editor_stat))
+        .route("/api/editor/base", get(editor_base))
+        .route("/api/editor/changes", get(editor_changes))
         .route(
             "/api/thread/workspace",
             get(thread_workspace).post(pin_thread_workspace),
@@ -1155,6 +1166,126 @@ async fn workspace_diff(
         .await
         .map(|response| Json(ApiEnvelope::ok(response)))
         .map_err(|error| classify_session_error(error))
+}
+
+/// A file of up to 2 MiB can double in size once escaped into JSON.
+const EDITOR_WRITE_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+struct EditorDirQuery {
+    root: String,
+    #[serde(default)]
+    dir: String,
+    #[serde(default)]
+    device_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EditorFileQuery {
+    root: String,
+    path: String,
+    #[serde(default)]
+    device_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EditorStatQuery {
+    root: String,
+    /// A JSON array of root-relative paths: the query decoder has no repeated-key lists.
+    paths: String,
+    #[serde(default)]
+    device_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EditorChangesQuery {
+    root: String,
+    #[serde(default)]
+    device_id: Option<String>,
+}
+
+async fn editor_dir(
+    State(context): State<AppContext>,
+    Query(query): Query<EditorDirQuery>,
+) -> Result<Json<ApiEnvelope<EditorDirListing>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_list_dir(query.device_id.as_deref(), &query.root, &query.dir)
+        .await
+        .map(|listing| Json(ApiEnvelope::ok(listing)))
+        .map_err(bad_request)
+}
+
+async fn editor_file(
+    State(context): State<AppContext>,
+    Query(query): Query<EditorFileQuery>,
+) -> Result<Json<ApiEnvelope<EditorFileView>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_read_file(query.device_id.as_deref(), &query.root, &query.path)
+        .await
+        .map(|file| Json(ApiEnvelope::ok(file)))
+        .map_err(bad_request)
+}
+
+async fn editor_write(
+    State(context): State<AppContext>,
+    Json(input): Json<EditorWriteInput>,
+) -> Result<Json<ApiEnvelope<EditorWriteOutcome>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_write_file(input)
+        .await
+        .map(|outcome| Json(ApiEnvelope::ok(outcome)))
+        .map_err(|message| {
+            // A failed disk write is not the caller's mistake; every other refusal here is.
+            if message.starts_with("could not save") {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError::new("editor_write_failed", message)),
+                )
+            } else {
+                bad_request(message)
+            }
+        })
+}
+
+async fn editor_base(
+    State(context): State<AppContext>,
+    Query(query): Query<EditorFileQuery>,
+) -> Result<Json<ApiEnvelope<EditorBaseView>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_base_file(query.device_id.as_deref(), &query.root, &query.path)
+        .await
+        .map(|base| Json(ApiEnvelope::ok(base)))
+        .map_err(bad_request)
+}
+
+async fn editor_stat(
+    State(context): State<AppContext>,
+    Query(query): Query<EditorStatQuery>,
+) -> Result<Json<ApiEnvelope<Vec<EditorFileStat>>>, (StatusCode, Json<ApiError>)> {
+    let paths: Vec<String> = serde_json::from_str(&query.paths)
+        .map_err(|_| bad_request("paths must be a JSON array of strings".to_string()))?;
+    context
+        .app
+        .editor_stat_files(query.device_id.as_deref(), &query.root, paths)
+        .await
+        .map(|stats| Json(ApiEnvelope::ok(stats)))
+        .map_err(bad_request)
+}
+
+async fn editor_changes(
+    State(context): State<AppContext>,
+    Query(query): Query<EditorChangesQuery>,
+) -> Result<Json<ApiEnvelope<EditorChangesView>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_changes(query.device_id.as_deref(), &query.root)
+        .await
+        .map(|changes| Json(ApiEnvelope::ok(changes)))
+        .map_err(bad_request)
 }
 
 /// `cwd` is required and caller-supplied: no fallback to the relay's active cwd,

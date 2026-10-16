@@ -15,7 +15,7 @@ import { SIDEBAR_NAV_DESTINATIONS, SidebarNav, SidebarNavRail } from "./sidebar-
 const h = React.createElement;
 const noop = () => {};
 
-const BOTH = { onOpenSessions: noop, onOpenTasks: noop, onOpenUsage: noop };
+const BOTH = { onOpenSessions: noop, onOpenEditor: noop, onOpenTasks: noop, onOpenUsage: noop };
 
 function markup(Component, props = {}) {
   return renderToStaticMarkup(h(Component, { ...BOTH, ...props }));
@@ -28,7 +28,7 @@ function markup(Component, props = {}) {
 // gap unrepresentable — so the list itself is the thing to pin.
 test("both forms offer exactly the same destinations", () => {
   const keys = SIDEBAR_NAV_DESTINATIONS.map((destination) => destination.key);
-  assert.deepEqual(keys, ["sessions", "tasks", "usage"]);
+  assert.deepEqual(keys, ["sessions", "editor", "tasks", "usage"]);
 
   for (const Component of [SidebarNav, SidebarNavRail]) {
     const html = markup(Component);

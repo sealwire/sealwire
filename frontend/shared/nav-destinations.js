@@ -43,6 +43,11 @@ export function openTasksDestination(controller) {
   return controller.showOverview({ kind: "tasks", teamRunId: null });
 }
 
+/** Go to the Editor — the project's files. The folder is the editor store's business. */
+export function openEditorDestination(controller) {
+  return controller.showOverview({ kind: "editor" });
+}
+
 /** Go to the Usage surface — the token report, no thread selected. */
 export function openUsageDestination(controller) {
   return controller.showOverview({ kind: "usage" });

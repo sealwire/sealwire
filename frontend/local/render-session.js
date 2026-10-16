@@ -35,6 +35,7 @@ import {
   reviewScreenMount,
   ticketScreenMount,
   usageReportMount,
+  editorMount,
   sidebarTaskListMount,
   sidebarTeamsListMount,
   sidebarNavMount,
@@ -154,6 +155,7 @@ import {
 } from "../shared/teams-library-react.js";
 import { teamsFromCatalog } from "../shared/teams-library-model.js";
 import { UsageReportScreen } from "../shared/usage-report-react.js";
+import { EditorScreen } from "./editor/editor-screen.js";
 import { windowForBucket } from "../shared/usage-windows.js";
 import { SidebarNav, SidebarNavRail } from "../shared/sidebar-nav.js";
 import {
@@ -368,6 +370,12 @@ export function createSessionRenderer({
   onOpenSessionsScreen = () => {},
   onOpenTasksScreen = () => {},
   onOpenUsageScreen = () => {},
+  onOpenEditorScreen = null,
+  // Created once in app.js: the editor store plus the navigation it needs. Passing the
+  // same object every render is what lets the screen skip snapshot re-renders.
+  editorHost = null,
+  // `({ path, line, diff }) => boolean`: a file the agent named, opened in the right panel.
+  onOpenFileInPanel = null,
   onOpenTeamsScreen = () => {},
   // Reached from a task's changes summary rather than from the sidebar, so it
   // carries the run id the other destinations do not need.
@@ -570,7 +578,10 @@ export function createSessionRenderer({
     const onUsageScreen = viewKind === "usage";
     const onReviewScreen = viewKind === "review";
     const onTicketScreen = viewKind === "ticket";
-    const mainView = onUsageScreen
+    const onEditorScreen = viewKind === "editor" && Boolean(editorHost);
+    const mainView = onEditorScreen
+      ? "editor"
+      : onUsageScreen
       ? "usage"
       : onTeamsScreen
         ? "teams"
@@ -716,6 +727,9 @@ export function createSessionRenderer({
     }
     if (onTicketScreen) {
       renderTicketScreen();
+    }
+    if (onEditorScreen && editorMount) {
+      renderReactContent(editorMount, h(EditorScreen, { host: editorHost }));
     }
     if (onUsageScreen) {
       if (!state.usageReport && !state.usageLoading && !state.usageError) {
@@ -1323,6 +1337,7 @@ export function createSessionRenderer({
     return {
       currentCwd: session?.current_cwd || state.selectedCwd || "",
       openFileLinksInEditor: true,
+      onOpenFile: onOpenFileInPanel,
       detailEntries: buildExpandedTranscriptDetailEntries(state, {
         expandedItemIds: localUi.transcriptExpandedItemIds,
         threadId: activeThreadId,
@@ -1788,7 +1803,9 @@ export function createSessionRenderer({
           ? "tasks"
           : context.kind === "usage"
             ? "usage"
-            : "sessions",
+            : context.kind === "editor"
+              ? "editor"
+              : "sessions",
       // Locked means nothing can be waiting on you.
       tasksWaitingCount: teamsNeedingYou(
         locked ? [] : teamsCache.current().teams,
@@ -1797,6 +1814,7 @@ export function createSessionRenderer({
       tasksBeta: locked,
       usageBeta: usageLocked(state.session),
       onOpenSessions: onOpenSessionsScreen,
+      onOpenEditor: editorHost ? onOpenEditorScreen : undefined,
       onOpenTasks: onOpenTasksScreen,
       onOpenUsage: onOpenUsageScreen,
     };
