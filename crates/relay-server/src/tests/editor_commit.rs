@@ -1161,3 +1161,125 @@ async fn the_repositorys_message_cleanup_setting_is_applied() {
     );
     assert_eq!(head_subject(&root), before);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hook_cannot_put_back_a_file_at_a_renames_old_name() {
+    let (_dir, root) = editor_repo().await;
+    std::fs::remove_file(format!("{root}/new.txt")).unwrap();
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    git(&root, &["mv", "src/lib.rs", "src/core.rs"]);
+    std::fs::write(format!("{root}/src/lib.rs"), "private work\n").unwrap();
+    hook(&root, "pre-commit", "git add -A src/lib.rs");
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src/core.rs"], "message": "Rename", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the old name may only be deleted: {body}"
+    );
+    assert_eq!(git_output(&root, &["show", "HEAD:src/lib.rs"]), "fn a() {}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn after_a_post_commit_hook_amends_the_index_matches_what_it_left() {
+    let (_dir, root) = editor_repo().await;
+    hook(
+        &root,
+        "post-commit",
+        "[ -n \"$AMENDING\" ] && exit 0\necho formatted > seed.txt\ngit add seed.txt\nAMENDING=1 git commit -q --amend --no-edit",
+    );
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Seed", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(git_output(&root, &["show", "HEAD:seed.txt"]), "formatted");
+    assert_eq!(
+        git_output(&root, &["diff", "--cached", "--name-only"]),
+        "",
+        "nothing staged that would undo the hook's amend"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_message_in_the_repositorys_own_encoding_keeps_its_bytes() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["config", "i18n.commitEncoding", "ISO-8859-1"]);
+    git(&root, &["config", "commit.cleanup", "verbatim"]);
+    hook(&root, "commit-msg", "printf 'caf\\351\\n' > \"$1\"");
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Latin", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let raw = std::process::Command::new("git")
+        .args(["cat-file", "commit", "HEAD"])
+        .current_dir(&root)
+        .output()
+        .unwrap()
+        .stdout;
+    assert!(
+        raw.windows(4).any(|window| window == b"caf\xe9"),
+        "{:?}",
+        String::from_utf8_lossy(&raw)
+    );
+}
+
+#[tokio::test]
+async fn an_automatic_comment_character_keeps_message_lines_that_start_with_hash() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["config", "commit.cleanup", "strip"]);
+    git(&root, &["config", "core.commentChar", "auto"]);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Subject\n\n# Heading\nBody", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(
+        git_output(&root, &["log", "-1", "--format=%B"]),
+        "Subject\n\n# Heading\nBody"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hook_refusal_that_happens_to_say_but_expected_still_reaches_the_user() {
+    let (_dir, root) = editor_repo().await;
+    hook(
+        &root,
+        "reference-transaction",
+        "if [ \"$1\" = prepared ]; then echo 'Policy: branch is main but expected release; choose the release branch' >&2; exit 1; fi",
+    );
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Locked", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("choose the release branch"),
+        "{body}"
+    );
+}

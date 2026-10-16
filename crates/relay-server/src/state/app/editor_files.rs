@@ -968,7 +968,7 @@ async fn commit_from(
         }
     };
     let flags = [
-        "--name-only",
+        "--name-status",
         "-z",
         "--no-renames",
         "--no-relative",
@@ -1026,7 +1026,11 @@ async fn commit_from(
     tokio::fs::write(message_file.path(), &cleaned)
         .await
         .map_err(|error| format!("could not write the commit message: {error}"))?;
-    let subject = cleaned.lines().next().unwrap_or_default().to_string();
+    let first_line = cleaned
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    let subject = String::from_utf8_lossy(first_line).to_string();
 
     let mut commit_args = vec!["commit-tree".to_string(), tree];
     if let Some(base) = base {
@@ -1068,13 +1072,11 @@ async fn commit_from(
     if !published.status.success() {
         let words = git_words(&published);
         return Err(if words.contains("but expected") {
-            "someone else committed here while this commit was being made; nothing was committed, try again"
-                .to_string()
+            format!("nothing was committed; someone else may have committed here meanwhile, so try again. git said: {words}")
         } else {
             format!("nothing was committed: {words}")
         });
     }
-    catch_up_index(workspace, prefix, plan, &commit).await;
     // Against the scratch index, like the other hooks: the user's own staging is not this
     // commit's, and a hook that amends must not take it in.
     let after = hook("post-commit", &[])
@@ -1085,21 +1087,35 @@ async fn commit_from(
     if !after.is_ok_and(|status| status.success()) {
         tracing::warn!(%commit, "editor commit: the post-commit hook failed");
     }
+    // After post-commit, which may have amended: the index follows what the branch holds.
+    let landed = git_line(
+        workspace,
+        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+    )
+    .await
+    .unwrap_or_else(|| commit.clone());
+    catch_up_index(workspace, prefix, plan, &landed).await;
     Ok((commit, subject))
 }
 
-/// Every path in a `--name-only -z` listing must be a ticked one, inside the editor root.
+/// Every path in a `--name-status -z` listing must be a ticked one, inside the editor root;
+/// the old name of a rename that is not ticked itself may only be deleted.
 fn check_only_ticked(listing: &[u8], prefix: &str, plan: &CommitPlan) -> Result<(), String> {
-    let mut touched = 0;
-    for field in listing
+    let mut fields = listing
         .split(|byte| *byte == 0)
-        .filter(|field| !field.is_empty())
-    {
+        .filter(|field| !field.is_empty());
+    let mut touched = 0;
+    while let Some(status) = fields.next() {
+        let Some(field) = fields.next() else {
+            break;
+        };
         touched += 1;
-        let ticked = std::str::from_utf8(field)
+        let rel = std::str::from_utf8(field)
             .ok()
-            .and_then(|path| path.strip_prefix(prefix))
-            .is_some_and(|rel| plan.allowed.contains(rel));
+            .and_then(|path| path.strip_prefix(prefix));
+        let ticked = rel.is_some_and(|rel| {
+            plan.allowed.contains(rel) && (!plan.untouched_sources.contains(rel) || status == b"D")
+        });
         if !ticked {
             return Err(format!(
                 "committing these files would also change {}, which is not ticked",
@@ -1114,14 +1130,12 @@ fn check_only_ticked(listing: &[u8], prefix: &str, plan: &CommitPlan) -> Result<
 }
 
 /// The message as `git commit -F` would record it, by the repository's `commit.cleanup`
-/// (a message not opened in an editor defaults to whitespace cleanup).
-async fn clean_message(workspace: &TrustedWorkspace, file: &Path) -> Result<String, String> {
-    let mode = run_git_capture(workspace, &["config", "--get", "commit.cleanup"]).await?;
-    let mode = match mode.status.code() {
-        Some(0) => String::from_utf8_lossy(&mode.stdout).trim().to_string(),
-        Some(1) => String::new(),
-        _ => return Err(git_words(&mode)),
-    };
+/// (a message not opened in an editor defaults to whitespace cleanup). Kept as bytes: the
+/// repository may record messages in another encoding than UTF-8.
+async fn clean_message(workspace: &TrustedWorkspace, file: &Path) -> Result<Vec<u8>, String> {
+    let mode = config_value(workspace, "commit.cleanup")
+        .await?
+        .unwrap_or_default();
     let written = tokio::fs::read(file)
         .await
         .map_err(|error| format!("could not read the commit message back: {error}"))?;
@@ -1129,9 +1143,23 @@ async fn clean_message(workspace: &TrustedWorkspace, file: &Path) -> Result<Stri
         "verbatim" => written,
         "strip" | "whitespace" | "scissors" | "default" | "" => {
             let mut stripspace = background_git(workspace);
-            stripspace.arg("stripspace");
             if mode == "strip" {
-                stripspace.arg("--strip-comments");
+                // `auto` picks a character no line starts with, as `git commit` does;
+                // stripspace on its own would take `#` and drop real lines.
+                if config_value(workspace, "core.commentChar")
+                    .await?
+                    .as_deref()
+                    == Some("auto")
+                {
+                    let comment = auto_comment_char(&written).ok_or_else(|| {
+                        "every comment character git could pick starts a line of this message"
+                            .to_string()
+                    })?;
+                    stripspace.args(["-c", &format!("core.commentChar={comment}")]);
+                }
+                stripspace.args(["stripspace", "--strip-comments"]);
+            } else {
+                stripspace.arg("stripspace");
             }
             let mut child = stripspace
                 .stdin(Stdio::piped())
@@ -1159,11 +1187,33 @@ async fn clean_message(workspace: &TrustedWorkspace, file: &Path) -> Result<Stri
             ))
         }
     };
-    let cleaned = String::from_utf8_lossy(&cleaned).to_string();
-    if cleaned.trim().is_empty() {
+    if cleaned.iter().all(u8::is_ascii_whitespace) {
         return Err("the commit message is empty".to_string());
     }
     Ok(cleaned)
+}
+
+/// Git's choice for `core.commentChar=auto`: the first of its candidates no line starts with.
+fn auto_comment_char(message: &[u8]) -> Option<char> {
+    let starts: HashSet<u8> = message
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| line.first().copied())
+        .collect();
+    "#;@!$%^&|:"
+        .chars()
+        .find(|candidate| !starts.contains(&(*candidate as u8)))
+}
+
+/// A config value, `None` when it is not set; a config git cannot read is an error.
+async fn config_value(workspace: &TrustedWorkspace, key: &str) -> Result<Option<String>, String> {
+    let output = run_git_capture(workspace, &["config", "--get", key]).await?;
+    match output.status.code() {
+        Some(0) => Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        )),
+        Some(1) => Ok(None),
+        _ => Err(git_words(&output)),
+    }
 }
 
 /// `commit.gpgSign`, as `git commit` reads it: a value git cannot read stops the commit
