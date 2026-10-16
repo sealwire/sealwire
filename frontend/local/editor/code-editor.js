@@ -5,12 +5,14 @@
 // module uses constructed stylesheets, which the CSP allows. Colours come from CSS
 // variables, which cross the shadow boundary, so the theme follows the app's.
 
-import { Compartment, EditorSelection, EditorState, StateEffect } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, Prec, RangeSet, StateEffect, StateField, Text } from "@codemirror/state";
 import {
   crosshairCursor,
   drawSelection,
   dropCursor,
   EditorView,
+  gutter,
+  GutterMarker,
   highlightActiveLine,
   highlightActiveLineGutter,
   highlightSpecialChars,
@@ -30,8 +32,10 @@ import {
 } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
-import { MergeView, unifiedMergeView } from "@codemirror/merge";
+import { Chunk, MergeView, unifiedMergeView } from "@codemirror/merge";
 import { tags } from "@lezer/highlight";
+
+import { t } from "../../shared/i18n.js";
 
 const highlight = HighlightStyle.define([
   { tag: [tags.keyword, tags.modifier, tags.controlKeyword, tags.operatorKeyword, tags.definitionKeyword, tags.moduleKeyword], color: "var(--code-keyword)" },
@@ -106,16 +110,143 @@ const theme = EditorView.theme({
     color: "var(--text-1)",
     border: "1px solid var(--border-soft)",
   },
-  // The merge view used to settle a save conflict.
+  // Diffs: line backgrounds and a "+" / "−" beside the line say what changed, so colour is
+  // never the only sign. The merge package's own word underlines are switched off: on a new
+  // file they underline every word. Its rules carry the light/dark scope, hence !important.
   ".cm-changedLine": { backgroundColor: "var(--diff-add-bg)" },
   ".cm-deletedChunk": { backgroundColor: "var(--diff-del-bg)" },
-  ".cm-changedText": { background: "none", backgroundColor: "var(--diff-add-bg)" },
+  "&.cm-merge-a .cm-changedText, &.cm-merge-b .cm-changedText, .cm-changedText": {
+    background: "color-mix(in srgb, var(--diff-add-fg) 22%, transparent) !important",
+  },
+  "&.cm-merge-a .cm-changedText, .cm-deletedChunk .cm-deletedText, &.cm-merge-b .cm-deletedText": {
+    background: "color-mix(in srgb, var(--diff-del-fg) 22%, transparent) !important",
+  },
   ".cm-merge-revert": { backgroundColor: "var(--surface-0)" },
   ".cm-insertedLine": { backgroundColor: "var(--diff-add-bg)" },
   ".cm-deletedLine, .cm-deletedChunk .cm-deletedLine": { backgroundColor: "var(--diff-del-bg)" },
-  ".cm-deletedText": { backgroundColor: "var(--diff-del-bg)" },
   ".cm-insertedText": { backgroundColor: "var(--diff-add-bg)" },
+  ".cm-changeGutter": { width: "14px", paddingLeft: "0" },
+  ".cm-changeGutter .cm-gutterElement": { textAlign: "center" },
+  ".cm-changedLineGutter, .cm-deletedLineGutter, .cm-inlineChangedLineGutter": { background: "none !important" },
+  ".cm-changedLineGutter::before, .cm-inlineChangedLineGutter::before": { content: '"+"', color: "var(--diff-add-fg)" },
+  "&.cm-merge-a .cm-changedLineGutter::before, .cm-deletedLineGutter::before": { content: '"−"', color: "var(--diff-del-fg)" },
+  // Folded unchanged lines: the package paints a light grey band, white on a dark theme.
+  ".cm-collapsedLines": {
+    background: "var(--surface-2) !important",
+    color: "var(--text-3) !important",
+    fontFamily: "var(--font-sans)",
+    fontSize: "var(--text-xs)",
+  },
+  // The marks beside lines changed since the last commit, while editing.
+  ".cm-change-marks .cm-gutterElement": { padding: "0 2px 0 4px" },
+  ".editor-line-mark": { width: "3px", height: "100%", borderRadius: "1px" },
+  ".editor-line-mark.is-added": { backgroundColor: "var(--diff-add-fg)" },
+  ".editor-line-mark.is-changed": { backgroundColor: "var(--accent)" },
+  ".editor-line-mark.is-deleted": { height: "3px", width: "7px", backgroundColor: "var(--diff-del-fg)" },
 });
+
+// Settling a conflict compares two versions, neither of them a removal: both sides get a
+// plain bar where they differ, never a "−" that reads as "this will be deleted".
+const conflictTheme = Prec.highest(
+  EditorView.theme({
+    ".cm-changedLineGutter::before, .cm-deletedLineGutter::before": { content: "none" },
+    ".cm-changedLineGutter, .cm-deletedLineGutter": { background: "var(--accent) !important" },
+    ".cm-changeGutter": { width: "3px" },
+  })
+);
+
+// CodeMirror's own words (folded lines, search, merge), in the interface's language.
+function phrases() {
+  return EditorState.phrases.of({
+    "$ unchanged lines": t("cm\u0004$ unchanged lines"),
+    Find: t("cm\u0004Find"),
+    Replace: t("cm\u0004Replace"),
+    next: t("cm\u0004next"),
+    previous: t("cm\u0004previous"),
+    all: t("cm\u0004all"),
+    "match case": t("cm\u0004match case"),
+    regexp: t("cm\u0004regexp"),
+    "by word": t("cm\u0004by word"),
+    replace: t("cm\u0004replace"),
+    "replace all": t("cm\u0004replace all"),
+    close: t("cm\u0004close"),
+    "Go to line": t("cm\u0004Go to line"),
+    go: t("cm\u0004go"),
+    "Folded lines": t("cm\u0004Folded lines"),
+    "Unfolded lines": t("cm\u0004Unfolded lines"),
+    "Fold line": t("cm\u0004Fold line"),
+    "Unfold line": t("cm\u0004Unfold line"),
+  });
+}
+
+class LineMark extends GutterMarker {
+  constructor(kind) {
+    super();
+    this.kind = kind;
+  }
+
+  eq(other) {
+    return other.kind === this.kind;
+  }
+
+  toDOM() {
+    const mark = document.createElement("div");
+    mark.className = `editor-line-mark is-${this.kind}`;
+    return mark;
+  }
+}
+
+const LINE_MARKS = { added: new LineMark("added"), changed: new LineMark("changed"), deleted: new LineMark("deleted") };
+const setBaseEffect = StateEffect.define();
+
+/** One mark per line changed since `base`: added, changed, or where lines were taken out. */
+function lineMarks(base, doc) {
+  if (!base) {
+    return RangeSet.empty;
+  }
+  const ranges = [];
+  const marked = new Set();
+  const mark = (line, kind) => {
+    if (!marked.has(line.from)) {
+      marked.add(line.from);
+      ranges.push(LINE_MARKS[kind].range(line.from));
+    }
+  };
+  for (const chunk of Chunk.build(base, doc)) {
+    if (chunk.fromB >= chunk.toB) {
+      mark(doc.lineAt(Math.min(chunk.fromB, doc.length)), "deleted");
+      continue;
+    }
+    const kind = chunk.fromA >= chunk.toA ? "added" : "changed";
+    const first = doc.lineAt(Math.min(chunk.fromB, doc.length)).number;
+    const last = doc.lineAt(Math.min(Math.max(chunk.fromB, chunk.toB - 1), doc.length)).number;
+    for (let number = first; number <= last; number += 1) {
+      mark(doc.line(number), kind);
+    }
+  }
+  return RangeSet.of(ranges, true);
+}
+
+const baseField = StateField.define({
+  create: () => ({ base: null, marks: RangeSet.empty }),
+  update(value, transaction) {
+    let { base } = value;
+    for (const effect of transaction.effects) {
+      if (effect.is(setBaseEffect)) {
+        base = effect.value === null ? null : Text.of(effect.value.split("\n"));
+      }
+    }
+    if (base === value.base && !transaction.docChanged) {
+      return value;
+    }
+    return { base, marks: lineMarks(base, transaction.state.doc) };
+  },
+});
+
+const changeMarks = [
+  baseField,
+  gutter({ class: "cm-change-marks", markers: (view) => view.state.field(baseField).marks }),
+];
 
 function legacy(load) {
   return () => load().then((mode) => StreamLanguage.define(mode));
@@ -190,6 +321,7 @@ export function createCodeEditor(host, { onChange, onSave, onCursor, onCompositi
     readonlyFlags.set(key, readonlyFlag);
     return [
       lineNumbers(),
+      changeMarks,
       highlightActiveLineGutter(),
       highlightSpecialChars(),
       history(),
@@ -224,6 +356,7 @@ export function createCodeEditor(host, { onChange, onSave, onCursor, onCompositi
       ]),
       language.of([]),
       theme,
+      phrases(),
       EditorView.updateListener.of((update) => {
         if (update.docChanged && !applyingExternal) {
           onChange?.(key, update.state.doc.toString());
@@ -345,6 +478,22 @@ export function createCodeEditor(host, { onChange, onSave, onCursor, onCompositi
     }
   }
 
+  const bases = new Map();
+
+  /** The last commit's text for `key`, or null when there is none to mark against. */
+  function setBase(key, text) {
+    if (bases.get(key) === text) {
+      return;
+    }
+    bases.set(key, text);
+    const effect = setBaseEffect.of(text);
+    if (key === currentKey) {
+      view.dispatch({ effects: effect });
+    } else if (states.has(key)) {
+      states.set(key, states.get(key).update({ effects: effect }).state);
+    }
+  }
+
   function revealLine(key, lineNumber) {
     if (key !== currentKey) {
       return;
@@ -360,8 +509,10 @@ export function createCodeEditor(host, { onChange, onSave, onCursor, onCompositi
     show,
     replaceText,
     setReadonly,
+    setBase,
     revealLine,
     forget(key) {
+      bases.delete(key);
       states.delete(key);
       paths.delete(key);
       languages.delete(key);
@@ -379,7 +530,7 @@ export function createCodeEditor(host, { onChange, onSave, onCursor, onCompositi
 /** Side by side: the user's text (editable) and the disk's, for settling a refused save. */
 export function createConflictView(host, { mine, theirs, path }) {
   const { shadow, mount } = shadowMount(host);
-  const shared = [lineNumbers(), syntaxHighlighting(highlight), theme, EditorView.lineWrapping];
+  const shared = [lineNumbers(), syntaxHighlighting(highlight), theme, conflictTheme, phrases(), EditorView.lineWrapping];
   const merge = new MergeView({
     a: { doc: mine, extensions: [...shared, history(), keymap.of([...defaultKeymap, ...historyKeymap])] },
     b: { doc: theirs, extensions: [...shared, EditorState.readOnly.of(true)] },
@@ -417,13 +568,15 @@ export function createDiffView(host, { original, text, path }) {
         lineNumbers(),
         syntaxHighlighting(highlight),
         theme,
+        phrases(),
         EditorState.readOnly.of(true),
         EditorView.editable.of(false),
         language.of([]),
         unifiedMergeView({
           original,
           mergeControls: false,
-          highlightChanges: true,
+          // Whole lines are marked by background and "+"/"−"; words within them are not.
+          highlightChanges: false,
           gutter: true,
           syntaxHighlightDeletions: true,
           collapseUnchanged: { margin: 3, minSize: 8 },

@@ -24,3 +24,11 @@ test("an untranslated string stays English, and params fill either one", () => {
   assert.equal(translate("Not translated yet", null, "zh-CN", dictionaries), "Not translated yet");
   assert.equal(translate("Keep {unknown}", {}, "en", dictionaries), "Keep {unknown}");
 });
+
+test("a key can carry a context, so one English word can read two ways in Chinese", () => {
+  const dictionaries = { "zh-CN": { "editor-view\u0004Diff": "对比", Diff: "改动" } };
+  assert.equal(translate("editor-view\u0004Diff", null, "zh-CN", dictionaries), "对比");
+  assert.equal(translate("editor-view\u0004Diff", null, "en", dictionaries), "Diff");
+  assert.equal(translate("Diff", null, "zh-CN", dictionaries), "改动");
+  assert.equal(translate("view\u0004Seen {n}", { n: 2 }, "en", dictionaries), "Seen 2");
+});

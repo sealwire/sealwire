@@ -45,3 +45,47 @@ test("search narrows every list; a long list is cut until asked", () => {
   assert.equal(short.hidden, 18);
   assert.equal(branchMenuModel({ data: many, showAll: true }).local.length, 30);
 });
+
+const backups = ["20261013-131652", "20261012-211723", "20261009-225849", "20261006-082327"].map((stamp) => ({
+  name: `backup/main-before-daytime-rewrite-${stamp}`,
+  remote: false,
+  worktree: null,
+}));
+
+test("branches sharing a prefix fold into one row that opens to show them by what tells them apart", () => {
+  const model = branchMenuModel({ data: { ...data, branches: [...data.branches, ...backups] } });
+  const group = model.local.find((row) => row.kind === "group");
+  assert.equal(group.prefix, "backup/");
+  assert.equal(group.count, 4);
+  assert.equal(group.open, false);
+  assert.ok(!model.local.some((row) => row.name?.startsWith("backup/")), "folded rows are not listed");
+  const opened = branchMenuModel({ data: { ...data, branches: [...data.branches, ...backups] }, openGroups: ["backup/"] });
+  const rows = opened.local.filter((row) => row.name?.startsWith("backup/"));
+  assert.equal(rows.length, 4);
+  assert.equal(rows[0].label, "main-before-daytime-rewrite-20261013-131652", "the shared prefix is not repeated");
+  const searched = branchMenuModel({ data: { ...data, branches: [...data.branches, ...backups] }, query: "131652" });
+  assert.deepEqual(searched.local.map((row) => row.name), ["backup/main-before-daytime-rewrite-20261013-131652"]);
+});
+
+test("a long worktree list is cut until asked, and two folders with one name are told apart", () => {
+  const trees = Array.from({ length: 9 }, (_, i) => ({ path: `/w/t${i}`, branch: `b${i}`, is_main: false }));
+  const twins = [
+    { path: "/Users/me/git/agent-relay", branch: "main", is_main: true },
+    { path: "/Users/me/git/voice-lookup/agent-relay", branch: null, is_main: false },
+  ];
+  const model = branchMenuModel({ data: { ...data, worktrees: [...twins, ...trees] } });
+  assert.equal(model.worktrees.length, 5);
+  assert.equal(model.hiddenWorktrees, 6);
+  assert.equal(branchMenuModel({ data: { ...data, worktrees: [...twins, ...trees] }, showAllWorktrees: true }).worktrees.length, 11);
+  assert.deepEqual(
+    model.worktrees.slice(0, 2).map((tree) => tree.label),
+    ["agent-relay (git)", "agent-relay (voice-lookup)"]
+  );
+});
+
+test("the folder on screen stays in a cut worktree list", () => {
+  const trees = Array.from({ length: 9 }, (_, i) => ({ path: `/w/t${i}`, branch: `b${i}`, is_main: false }));
+  const model = branchMenuModel({ data: { ...data, worktrees: trees }, root: "/w/t8" });
+  assert.ok(model.worktrees.some((tree) => tree.path === "/w/t8"));
+  assert.equal(model.worktrees.length, 5);
+});

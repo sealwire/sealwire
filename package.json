@@ -86,6 +86,7 @@
     "preview": "vite preview",
     "smoke:pairing": "node scripts/pairing-smoke.mjs",
     "test:browser:smoke": "npm run build && node scripts/browser-page-smoke-e2e.mjs",
+    "test:browser:editor-ux": "npm run build && node scripts/browser-editor-ux-e2e.mjs",
     "test:browser:composer-commands": "npm run build && node scripts/browser-composer-commands-e2e.mjs",
     "test:browser:desktop-startup": "npm run build && node scripts/browser-desktop-startup-e2e.mjs",
     "test:browser:highlighting": "node scripts/browser-highlighter-license-e2e.mjs",

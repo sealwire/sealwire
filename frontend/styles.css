@@ -13385,3 +13385,340 @@ button.usage-session-row:focus-visible .usage-session-go {
 .editor-tab.is-history .editor-tab-label {
   font-weight: var(--weight-strong);
 }
+
+/* ===== Editor: fixes from walking it as a user ===== */
+
+/* The session panel's tab row never gives up its height: a long file's content height used
+   to shrink it to a sliver (flex-shrink weighs by size), hiding every file tab. */
+.right-panel-tabs-header {
+  flex: none;
+}
+/* With files the row still stops short of the panel's hide toggle, like it does without. */
+.right-rail .right-panel-tabs-header.has-files {
+  padding-right: 48px;
+}
+/* Changes / Agents read as tabs beside the file tabs, not a separate pill. */
+.right-panel-tabs-header.has-files .settings-segmented {
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+.right-panel-tabs-header.has-files .settings-segmented-option.is-selected {
+  background: var(--surface-1);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.right-panel-tabs-header.has-files .editor-tabbar.is-panel {
+  border-left: 1px solid var(--border-faint);
+}
+
+/* Name and folder stay on one line: the name first and whole if it can be, the folder after. */
+.editor-change-open {
+  justify-content: flex-start;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.editor-tree-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+}
+.editor-tree-dir {
+  flex: 1 1 0;
+  white-space: nowrap;
+}
+
+/* Tabs that run past the strip fade at that edge; a list beside it names every open file. */
+.editor-tabs.has-more-start {
+  mask-image: linear-gradient(to right, transparent, black 28px);
+}
+.editor-tabs.has-more-end {
+  mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
+}
+.editor-tabs.has-more-start.has-more-end {
+  mask-image: linear-gradient(to right, transparent, black 28px, black calc(100% - 28px), transparent);
+}
+.editor-tabs-all {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  border: none;
+  border-left: 1px solid var(--border-faint);
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.editor-tabs-all:hover {
+  background: var(--surface-2);
+  color: var(--text-1);
+}
+.editor-tabs-all svg {
+  width: 14px;
+  height: 14px;
+}
+.editor-tab-pin {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  color: var(--text-3);
+}
+.editor-tab.is-pinned {
+  padding-right: 12px;
+}
+
+/* Diff / Edit read like the app's other switches, not like code. */
+.editor-mode-option {
+  font-family: var(--font-sans);
+}
+
+/* The session behind a file or a group is a way back to it. */
+button.editor-path-by,
+button.editor-change-group-title {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.editor-path-by {
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+button.editor-change-group-title {
+  display: block;
+  color: var(--text-2);
+  font-weight: var(--weight-medium);
+}
+button.editor-path-by:hover,
+button.editor-change-group-title:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* The compare view: what to do on one line, then a label over each side. */
+.editor-compare-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border-faint);
+}
+.editor-compare-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.editor-compare-head {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  padding: 4px 0;
+}
+.editor-compare-label {
+  padding-left: 16px;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-2);
+}
+
+/* A diff with nothing in it says so instead of showing an empty fold. */
+.editor-diff-same {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px;
+  color: var(--text-2);
+  font-size: var(--text-body);
+}
+.editor-diff-same p {
+  margin: 0;
+}
+
+/* Status that needs a look reads as such. */
+.editor-status-save.is-warn,
+.editor-panel-save.is-warn {
+  color: var(--warn-fg);
+}
+
+.editor-placeholder-detail {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+.editor-panel-blocked {
+  padding: 10px 16px;
+}
+
+/* The commit box: what happened, in words that stand out from the rest of the panel. */
+.editor-commit-done.is-ok {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--ok-fg) 12%, transparent);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+}
+.editor-commit-error {
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  background: var(--err-bg);
+  font-family: var(--font-sans);
+  white-space: normal;
+}
+.editor-commit-error-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-1);
+}
+.editor-commit-error-text {
+  max-height: 140px;
+  margin: 4px 0 0;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-1);
+  white-space: pre-wrap;
+}
+.editor-commit-hint {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+.editor-link-button {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.editor-link-button:hover {
+  text-decoration: underline;
+}
+
+/* What the last switch or new worktree did, under the location. */
+.editor-notice {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft-bg);
+  color: var(--text-1);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The location menu: a refusal says what happened first, git's words after. */
+.editor-menu-error {
+  white-space: normal;
+}
+.editor-menu-error-title {
+  margin-bottom: 6px;
+  color: var(--text-1);
+  font-weight: var(--weight-medium);
+}
+.editor-menu-error-details summary {
+  margin-top: 6px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.editor-menu-error-details pre {
+  margin: 4px 0 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+}
+/* A branch row's buttons show on the row being pointed at, so names get the width. */
+@media (hover: hover) {
+  .editor-branch-row .editor-branch-button {
+    display: none;
+  }
+  .editor-branch-row:hover .editor-branch-button,
+  .editor-branch-row:focus-within .editor-branch-button {
+    display: inline-block;
+  }
+}
+.editor-branch-row.is-in-group {
+  padding-left: 22px;
+}
+.editor-branch-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--text-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.editor-branch-group:hover {
+  background: var(--surface-2);
+}
+.editor-history-branch.is-in-group {
+  padding-left: 18px;
+}
+.editor-history-branch.is-group .editor-tree-dir {
+  flex: none;
+  margin-left: auto;
+}
+/* Chinese has no capitals: upper-casing only spaces out the English words mixed into it. */
+:lang(zh) .context-menu-heading,
+:lang(zh) .editor-panel-title {
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* History: a row draws a couple of branch labels and counts the rest; the message keeps room. */
+.editor-history-title {
+  overflow: hidden;
+}
+.editor-history-refs {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
+}
+.editor-history-ref {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.editor-history-ref.is-more {
+  flex: none;
+  color: var(--text-3);
+}
+.editor-history-text {
+  flex: 1 1 auto;
+  min-width: 6em;
+}
+.editor-history-body.is-clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.editor-history-info .editor-link-button {
+  align-self: flex-start;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+}
+/* The commit details scroll as one column; a cut-short message must not shrink to nothing
+   when the file list below is long. */
+.editor-history-info > * {
+  flex: none;
+}

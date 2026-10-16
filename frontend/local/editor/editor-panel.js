@@ -16,6 +16,7 @@ import {
   DocBanners,
   DiffView,
   Placeholder,
+  saveStatus,
   TabStrip,
   useStore,
   ViewModeSwitch,
@@ -180,6 +181,7 @@ export function createEditorPanelHost({
     }
   }
 
+  // The panel is left as it is: Back to session returns to the same file at the same width.
   async function openInEditor(key) {
     const root = getSessionRoot();
     const path = key ? key.slice(key.indexOf("\n") + 1) : null;
@@ -187,7 +189,6 @@ export function createEditorPanelHost({
       return;
     }
     editorStore.flushSaves();
-    showFile(false);
     await editorStore.showInEditor({ root, path, threadId: getThreadId() });
     openEditor();
   }
@@ -210,11 +211,12 @@ function PanelFile({ host, root, docKey: key, doc, mode, autosave }) {
   const { editorStore: store } = host;
   const [comparing, setComparing] = useState(false);
   useEffect(() => setComparing(false), [key]);
+  // The last commit's text serves the diff and the change marks beside the lines alike.
   useEffect(() => {
-    if (mode === "diff" && doc && !doc.loading && !doc.base?.loading) {
+    if (doc && !doc.loading && !doc.binary && !doc.tooLarge && !doc.base) {
       void store.loadBase(key);
     }
-  }, [mode, key, doc?.loading, doc?.revision]);
+  }, [key, doc?.loading, doc?.base]);
 
   let body = null;
   if (!doc || doc.loading) {
@@ -228,13 +230,7 @@ function PanelFile({ host, root, docKey: key, doc, mode, autosave }) {
   }
   const compareDoc = comparing && doc && (doc.conflict || doc.overwritten) ? doc : null;
   const showDiff = !body && !compareDoc && mode === "diff";
-  const saveState = doc?.saving
-    ? t("Saving…")
-    : doc?.dirty && !autosave
-      ? t("Unsaved · ⌘S to save")
-      : doc && !doc.dirty && autosave && !doc.loading
-        ? t("Saved")
-        : "";
+  const save = saveStatus({ doc, autosave, mode });
 
   return h(
     "div",
@@ -248,8 +244,8 @@ function PanelFile({ host, root, docKey: key, doc, mode, autosave }) {
         doc?.path || ""
       ),
       h("span", { className: "editor-status-grow" }),
-      saveState ? h("span", { className: "editor-panel-save" }, saveState) : null,
-      !body ? h(ViewModeSwitch, { mode, onChange: (value) => host.setMode(key, value) }) : null,
+      save.text ? h("span", { className: save.tone ? `editor-panel-save is-${save.tone}` : "editor-panel-save" }, save.text) : null,
+      !body && !doc?.deleted ? h(ViewModeSwitch, { mode, onChange: (value) => host.setMode(key, value) }) : null,
       button(t("Open in Editor"), () => void host.openInEditor(key))
     ),
     !compareDoc ? h(DocBanners, { store, docKey: key, doc, onCompare: () => setComparing(true) }) : null,
@@ -276,7 +272,7 @@ function PanelFile({ host, root, docKey: key, doc, mode, autosave }) {
         })
       : null,
     body,
-    showDiff ? h(DiffView, { doc, base: doc.base, path: doc.path }) : null,
+    showDiff ? h(DiffView, { doc, base: doc.base, path: doc.path, onEdit: () => host.setMode(key, "edit") }) : null,
     h(CodeHost, { store, docKey: key, doc, cursor: null, hidden: Boolean(body || compareDoc || showDiff) })
   );
 }
@@ -310,6 +306,24 @@ export function LocalRightPanel({ host, ...tabProps }) {
       panel.setState({ confirm: null });
     }
   }, [root, confirm]);
+
+  // ⌘S saves the file showing here wherever the focus is; inside the code it is already handled.
+  useEffect(() => {
+    if (!showing || !key) {
+      return undefined;
+    }
+    const onKey = (event) => {
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "s" && !event.defaultPrevented) {
+        if (document.querySelector(".chat-shell")?.dataset.view === "editor") {
+          return;
+        }
+        event.preventDefault();
+        void store.saveKey(key);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showing, key]);
 
   // A file open here is watched like one open in the Editor.
   useEffect(() => {

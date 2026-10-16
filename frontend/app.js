@@ -697,6 +697,8 @@ const editorStore = createEditorStore({
   api: editorApi,
   storage: editorStorage(),
   autosave: loadEditorAutosave(),
+  // A switch, a new worktree or a commit in the Editor shows in the session's panel at once.
+  onGitChange: () => void workspaceDiffStore.refresh(),
 });
 window.addEventListener(EDITOR_PREFS_EVENT, (event) => {
   editorStore.setAutosave(event.detail?.autosave !== false);
@@ -718,6 +720,11 @@ const editorHost = {
   },
   backToSession: () => openSessionsScreen(),
   trustFolder: (root) => trustWorkspace(root),
+  // The session behind a changed file, from the Editor's breadcrumb and its Changes groups.
+  openThread: (threadId) =>
+    void sessionViewController.openThread(threadId, {
+      context: selectOwningContext({ threadId, threadProjectId: state.threadProjectId || {} }),
+    }),
 };
 
 // Leaving the Editor is a moment to save, like switching tabs inside it.

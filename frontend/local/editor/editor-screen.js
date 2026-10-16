@@ -6,15 +6,19 @@
 
 import React from "react";
 import { createStore } from "zustand/vanilla";
+import { isTauri } from "@tauri-apps/api/core";
 
 import { t } from "../../shared/i18n.js";
 import { ContextMenu, MenuFilter, MenuHeading, MenuItem, MenuSeparator } from "../../shared/context-menu-react.js";
 import { branchMenuModel } from "./branch-menu-model.js";
 import { groupChanges } from "./changes-model.js";
 import { CHEVRON_DOWN_SVG, CHEVRON_RIGHT_SVG } from "../../svg.js";
+import { PinGlyph } from "../../shared/session-tab-strip.js";
 import { docKey } from "./editor-store.js";
 import { baseName, dirName, svg, useStore } from "./editor-ui.js";
 import { HistoryPanel, HistoryTab, HistoryView } from "./history-view.js";
+import { NO_FILTERS } from "./history-store.js";
+import { SwitchRefusal } from "./switch-refusal.js";
 
 const h = React.createElement;
 const { useEffect, useMemo, useRef, useState } = React;
@@ -39,26 +43,38 @@ export function tabLabels(paths) {
   });
 }
 
-/** Which tabs a close action takes, given the tab it was opened on. */
-export function closeTargets(paths, path, action) {
+/** Which tabs a close action takes, given the tab it was opened on. Pinned ones stay. */
+export function closeTargets(paths, path, action, pinned = []) {
   const index = paths.indexOf(path);
+  const loose = (entry) => !pinned.includes(entry);
   if (action === "close") {
     return [path];
   }
   if (action === "others") {
-    return paths.filter((entry) => entry !== path);
+    return paths.filter((entry) => entry !== path && loose(entry));
   }
   if (action === "right") {
-    return index < 0 ? [] : paths.slice(index + 1);
+    return index < 0 ? [] : paths.slice(index + 1).filter(loose);
   }
-  return [...paths];
+  return paths.filter(loose);
+}
+
+// The two reasons the relay gives for refusing a switch (editor_switch_blocker), in the UI's language.
+function busyReason(reason) {
+  if (reason === "a task team is working in this folder") {
+    return t("A task team is working in this folder.");
+  }
+  if (reason === "an agent is working in this folder right now; switching would change files under it") {
+    return t("An agent is working in this folder right now, and switching would change files under it.");
+  }
+  return reason;
 }
 
 function BranchRow({ row, acting, onSwitch, onNewWorktree, onOpen }) {
   return h(
     "div",
-    { className: "editor-branch-row", "data-branch": row.name },
-    h("span", { className: "editor-branch-name", title: row.name }, row.name),
+    { className: row.group ? "editor-branch-row is-in-group" : "editor-branch-row", "data-branch": row.name },
+    h("span", { className: "editor-branch-name", title: row.name }, row.label || row.name),
     row.action === "current"
       ? h("span", { className: "editor-branch-note" }, t("Current"))
       : row.action === "open"
@@ -77,7 +93,7 @@ function BranchRow({ row, acting, onSwitch, onNewWorktree, onOpen }) {
                 type: "button",
                 className: "editor-branch-button",
                 disabled: acting || Boolean(row.switchBlocked),
-                title: row.switchBlocked || t("Check this branch out in this folder"),
+                title: row.switchBlocked ? busyReason(row.switchBlocked) : t("Check this branch out in this folder"),
                 onClick: onSwitch,
               },
               t("Switch")
@@ -97,17 +113,38 @@ function BranchRow({ row, acting, onSwitch, onNewWorktree, onOpen }) {
   );
 }
 
+/** A branch group's row: the shared prefix and how many branches it holds. */
+function BranchGroupRow({ row, onToggle }) {
+  return h(
+    "button",
+    {
+      type: "button",
+      className: "editor-branch-group",
+      "aria-expanded": row.open,
+      "data-group": row.prefix,
+      onClick: onToggle,
+    },
+    svg(row.open ? CHEVRON_DOWN_SVG : CHEVRON_RIGHT_SVG, "editor-tree-chevron"),
+    h("span", { className: "editor-branch-name" }, row.prefix),
+    h("span", { className: "editor-branch-note" }, String(row.count))
+  );
+}
+
 function LocationMenu({ store, anchor, buttonRef, onClose }) {
   const root = useStore(store, (state) => state.root);
   const branches = useStore(store, (state) => state.branches);
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
+  const [showAllTrees, setShowAllTrees] = useState(false);
+  const [openGroups, setOpenGroups] = useState([]);
   const [newName, setNewName] = useState("");
   useEffect(() => {
     void store.loadBranches();
   }, [store, root]);
   const data = branches.data;
-  const model = branchMenuModel({ data, query, showAll });
+  const model = branchMenuModel({ data, query, showAll, openGroups, root, showAllWorktrees: showAllTrees });
+  const toggleGroup = (prefix) =>
+    setOpenGroups((open) => (open.includes(prefix) ? open.filter((entry) => entry !== prefix) : [...open, prefix]));
   const acting = branches.acting === true;
   const finish = (ok) => {
     if (ok) {
@@ -121,32 +158,47 @@ function LocationMenu({ store, anchor, buttonRef, onClose }) {
     void store.setRoot(path);
   };
   const branchRow = (row, remote) =>
-    h(BranchRow, {
-      key: row.name,
-      row,
-      acting,
-      onSwitch: () => switchTo({ branch: row.name, remote }),
-      onNewWorktree: () => newTree({ branch: row.name, remote }),
-      onOpen: () => openTree(row.worktree),
-    });
+    row.kind === "group"
+      ? h(BranchGroupRow, { key: `group:${row.prefix}`, row, onToggle: () => toggleGroup(row.prefix) })
+      : h(BranchRow, {
+          key: row.name,
+          row,
+          acting,
+          onSwitch: () => switchTo({ branch: row.name, remote }),
+          onNewWorktree: () => newTree({ branch: row.name, remote }),
+          onOpen: () => openTree(row.worktree),
+        });
 
   return h(
     ContextMenu,
     { anchor, ariaLabel: t("Worktrees and branches"), ignoreRef: buttonRef, onClose, className: "editor-location-menu" },
     h(MenuFilter, { value: query, onChange: setQuery, placeholder: t("Search worktrees and branches") }),
     branches.loading && !data ? h("div", { className: "editor-menu-note" }, t("Loading…")) : null,
-    branches.error ? h("div", { className: "editor-menu-error", role: "alert" }, branches.error) : null,
+    branches.error
+      ? h(SwitchRefusal, {
+          branches,
+          onNewWorktree: () => branches.failed && newTree({ branch: branches.failed.branch, remote: branches.failed.remote }),
+        })
+      : null,
     h(MenuHeading, null, t("Worktrees")),
     ...model.worktrees.map((tree) =>
       h(MenuItem, {
         key: tree.path,
         checked: tree.path === root,
-        label: tree.branch ? `${baseName(tree.path)} · ${tree.branch}` : baseName(tree.path),
+        title: tree.path,
+        label: tree.branch && tree.branch !== tree.label ? `${tree.label} · ${tree.branch}` : tree.label,
         onSelect: () => openTree(tree.path),
       })
     ),
+    model.hiddenWorktrees > 0
+      ? h(
+          "button",
+          { type: "button", className: "editor-menu-more", onClick: () => setShowAllTrees(true) },
+          t("Show {count} more worktrees", { count: model.hiddenWorktrees })
+        )
+      : null,
     data ? h(MenuHeading, null, t("Branches")) : null,
-    data?.busy ? h("div", { className: "editor-menu-note is-warn" }, t("Switching is off: {reason}.", { reason: data.busy })) : null,
+    data?.busy ? h("div", { className: "editor-menu-note is-warn" }, t("Switching is off here. {reason}", { reason: busyReason(data.busy) })) : null,
     ...model.local.map((row) => branchRow(row, false)),
     model.hidden > 0
       ? h(
@@ -209,9 +261,11 @@ function LocationChip({ store }) {
   if (!root) {
     return null;
   }
-  const branch = branchData?.root === root && branchData.current
+  const known = branchData?.root === root && branchData.current
     ? branchData.current
     : roots.find((entry) => entry.path === root)?.branch;
+  // A worktree made for a branch is usually named after it; saying it twice says nothing.
+  const branch = known && known !== baseName(root) ? known : null;
   const open = () => {
     const box = buttonRef.current?.getBoundingClientRect();
     setMenu(box ? { x: box.left, y: box.bottom + 4 } : { x: 0, y: 0 });
@@ -320,8 +374,7 @@ function ChangedList({ store, activePath }) {
           ].filter(Boolean).join(" "),
           type: "button",
           title: entry.path,
-          disabled: entry.status === "D",
-          onClick: () => store.openFile(entry.path),
+          onClick: () => (entry.status === "D" ? store.openDeleted(entry.path) : store.openFile(entry.path)),
         },
         h("span", { className: "editor-tree-twisty" }),
         h("span", { className: "editor-tree-name" }, baseName(entry.path)),
@@ -356,9 +409,16 @@ function baseState(base) {
 }
 
 /** Read-only, one column: the text now, with what changed since the last commit marked. */
-export function DiffView({ doc, base, path }) {
+export function DiffView({ doc, base, path, onEdit = null }) {
   const hostRef = useRef(null);
-  const { note, original } = baseState(base);
+  let { note, original } = baseState(base);
+  if (doc.deleted && original !== null) {
+    note = t("Deleted. This is how it was in the last commit.");
+  }
+  const same = original !== null && !doc.deleted && base?.tracked && original === doc.text;
+  if (same) {
+    original = null;
+  }
   useEffect(() => {
     if (original === null) {
       return undefined;
@@ -375,6 +435,14 @@ export function DiffView({ doc, base, path }) {
       view?.destroy();
     };
   }, [original, doc.text, path]);
+  if (same) {
+    return h(
+      "div",
+      { className: "editor-diff-same" },
+      h("p", null, t("No changes since the last commit.")),
+      onEdit ? button(t("Edit"), onEdit) : null
+    );
+  }
   return h(
     React.Fragment,
     null,
@@ -389,7 +457,7 @@ export function ViewModeSwitch({ mode, onChange }) {
     "span",
     { className: "editor-mode", role: "radiogroup", "aria-label": t("View") },
     ...[
-      ["diff", t("Diff")],
+      ["diff", t("editor-view\u0004Diff")],
       ["edit", t("Edit")],
     ].map(([value, label]) =>
       h(
@@ -425,12 +493,12 @@ function Checkbox({ checked, mixed = false, label, onChange }) {
   });
 }
 
-function ChangesPanel({ store, activePath }) {
+function ChangesPanel({ store, activePath, host }) {
   const root = useStore(store, (state) => state.root);
   const changes = useStore(store, (state) => state.changes);
   const commitState = useStore(store, (state) => state.commit);
   const selection = useStore(store, (state) => state.selection);
-  const [message, setMessage] = useState("");
+  const message = commitState.message || "";
   useEffect(() => {
     void store.refreshTree();
   }, [store, root]);
@@ -443,11 +511,41 @@ function ChangesPanel({ store, activePath }) {
   const chosen = current ? changes.entries.filter((entry) => selected.has(entry.path)).map((entry) => entry.path) : [];
   const open = (entry) => {
     if (entry.status === "D") {
+      store.openDeleted(entry.path);
       return;
     }
     const key = store.openFile(entry.path, { preview: true });
     if (key) {
       store.setViewMode(key, "diff");
+    }
+  };
+  const showCommit = async (commit) => {
+    store.setPanelView("history");
+    const history = host?.history;
+    if (!history) {
+      return;
+    }
+    // A filter left on from before could hide the commit the user asked to see.
+    await history.setFilters(NO_FILTERS, root);
+    // The History tab reads the log again as it opens, and a load drops a pick it cannot
+    // find in it; so the pick waits for the log that lists the new commit.
+    const find = () => history.getState().log.commits.find((entry) => entry.id.startsWith(commit))?.id || null;
+    const full = find() || (await new Promise((resolve) => {
+      const stop = history.subscribe(() => {
+        const id = find();
+        if (id && !history.getState().log.loading) {
+          stop();
+          clearTimeout(timer);
+          resolve(id);
+        }
+      });
+      const timer = setTimeout(() => {
+        stop();
+        resolve(null);
+      }, 5000);
+    }));
+    if (full) {
+      void history.select(full);
     }
   };
 
@@ -462,6 +560,7 @@ function ChangesPanel({ store, activePath }) {
     body = groups.map((group) => {
       const paths = group.entries.map((entry) => entry.path);
       const ticked = paths.filter((path) => selected.has(path)).length;
+      const title = group.id ? group.title || t("Session") : t("Not from a session");
       return h(
         "div",
         { key: group.id || "none", className: "editor-change-group" },
@@ -471,14 +570,21 @@ function ChangesPanel({ store, activePath }) {
           h(Checkbox, {
             checked: ticked === paths.length,
             mixed: ticked > 0 && ticked < paths.length,
-            label: group.id ? group.title || t("Session") : t("Not from a session"),
+            label: title,
             onChange: (on) => toggle(paths, on),
           }),
-          h(
-            "span",
-            { className: "editor-change-group-title", title: group.title || "" },
-            group.id ? group.title || t("Session") : t("Not from a session")
-          ),
+          group.id && host?.openThread
+            ? h(
+                "button",
+                {
+                  type: "button",
+                  className: "editor-change-group-title is-link",
+                  title: t("Go to {session}", { session: title }),
+                  onClick: () => host.openThread(group.id),
+                },
+                title
+              )
+            : h("span", { className: "editor-change-group-title", title }, title),
           h("span", { className: "editor-change-group-count" }, String(paths.length))
         ),
         ...group.entries.map((entry) =>
@@ -504,7 +610,6 @@ function ChangesPanel({ store, activePath }) {
               {
                 type: "button",
                 className: "editor-change-open",
-                disabled: entry.status === "D",
                 onClick: () => open(entry),
               },
               h("span", { className: "editor-tree-name" }, baseName(entry.path)),
@@ -517,6 +622,26 @@ function ChangesPanel({ store, activePath }) {
     });
   }
 
+  let failure = null;
+  if (commitState.error) {
+    failure = commitState.unsaved?.length
+      ? h(
+          "div",
+          { className: "editor-commit-error", role: "alert" },
+          h(
+            "div",
+            { className: "editor-commit-error-title" },
+            t("Nothing was committed: {paths} could not be saved.", { paths: commitState.unsaved.join(", ") })
+          )
+        )
+      : h(
+          "div",
+          { className: "editor-commit-error", role: "alert" },
+          h("div", { className: "editor-commit-error-title" }, t("Nothing was committed: a hook or git refused it.")),
+          h("pre", { className: "editor-commit-error-text" }, commitState.error)
+        );
+  }
+
   return h(
     React.Fragment,
     null,
@@ -525,12 +650,9 @@ function ChangesPanel({ store, activePath }) {
       "form",
       {
         className: "editor-commit",
-        onSubmit: async (event) => {
+        onSubmit: (event) => {
           event.preventDefault();
-          const receipt = await store.commit({ paths: chosen, message });
-          if (receipt) {
-            setMessage("");
-          }
+          void store.commit({ paths: chosen, message });
         },
       },
       h("textarea", {
@@ -539,15 +661,27 @@ function ChangesPanel({ store, activePath }) {
         rows: 3,
         placeholder: t("Commit message"),
         "aria-label": t("Commit message"),
-        onChange: (event) => setMessage(event.target.value),
+        onChange: (event) => store.setCommitMessage(event.target.value),
       }),
-      commitState.error ? h("pre", { className: "editor-commit-error", role: "alert" }, commitState.error) : null,
+      failure,
       commitState.last && !commitState.error
         ? h(
             "div",
-            { className: "editor-commit-done" },
-            t("Committed {commit}: {subject}", { commit: commitState.last.commit, subject: commitState.last.subject })
+            { className: "editor-commit-done is-ok", role: "status" },
+            h(
+              "span",
+              { className: "editor-commit-done-text" },
+              t("Committed {commit}: {subject}", { commit: commitState.last.commit, subject: commitState.last.subject })
+            ),
+            h(
+              "button",
+              { type: "button", className: "editor-link-button", onClick: () => void showCommit(commitState.last.commit) },
+              t("Show in History")
+            )
           )
+        : null,
+      chosen.length && !message.trim() && !commitState.committing
+        ? h("div", { className: "editor-commit-hint" }, t("Write a commit message to commit."))
         : null,
       h(
         "button",
@@ -555,25 +689,57 @@ function ChangesPanel({ store, activePath }) {
           type: "submit",
           className: "editor-button is-primary editor-commit-button",
           disabled: commitState.committing || !chosen.length || !message.trim(),
+          title: !chosen.length ? t("Tick the files to commit, or a group to take all of its files.") : "",
         },
         commitState.committing
           ? t("Committing…")
-          : chosen.length === 1
-            ? t("Commit 1 file")
-            : t("Commit {count} files", { count: chosen.length })
+          : !chosen.length
+            ? t("Tick the files to commit")
+            : chosen.length === 1
+              ? t("Commit 1 file")
+              : t("Commit {count} files", { count: chosen.length })
       )
     )
   );
 }
 
-function FilePanel({ store, activePath, history = null }) {
+/** What the last switch or new worktree did, under the location, until the next action. */
+function LocationNotice({ store }) {
+  const notice = useStore(store, (state) => state.notice);
+  const root = useStore(store, (state) => state.root);
+  useEffect(() => {
+    if (!notice) {
+      return undefined;
+    }
+    const timer = setTimeout(() => store.clearNotice(), 6000);
+    return () => clearTimeout(timer);
+  }, [notice, store]);
+  if (!notice || notice.root !== root) {
+    return null;
+  }
+  const where = notice.from && notice.path?.startsWith(`${notice.from}/`) ? notice.path.slice(notice.from.length + 1) : notice.path;
+  const text = notice.kind === "worktree"
+    ? t("New worktree for {branch} at {path}", { branch: notice.branch, path: where })
+    : t("Switched this folder to {branch}", { branch: notice.branch });
+  return h("div", { className: "editor-notice", role: "status", title: notice.path || "" }, text);
+}
+
+function FilePanel({ store, activePath, history = null, host = null }) {
+  const root = useStore(store, (state) => state.root);
+  const rootError = useStore(store, (state) => state.rootError);
   const changedOnly = useStore(store, (state) => state.changedOnly);
   const panelView = useStore(store, (state) => state.panelView);
   const changeCount = useStore(store, (state) => state.changes.entries.length);
+  const treeRef = useRef(null);
+  // The file on screen is kept in sight in the tree, as it opens and as folders load above it.
+  useEffect(() => {
+    treeRef.current?.querySelector?.(".editor-tree-row.is-active")?.scrollIntoView?.({ block: "nearest" });
+  });
+  const untrusted = Boolean(rootError) && /not trusted/i.test(rootError);
   return h(
     "aside",
     { className: "editor-panel", "aria-label": t("Files") },
-    h("div", { className: "editor-panel-top" }, h(LocationChip, { store })),
+    h("div", { className: "editor-panel-top" }, h(LocationChip, { store }), h(LocationNotice, { store })),
     h(
       "div",
       { className: "editor-panel-views", role: "tablist" },
@@ -597,16 +763,19 @@ function FilePanel({ store, activePath, history = null }) {
         )
       )
     ),
-    panelView === "changes"
-      ? h(ChangesPanel, { store, activePath })
+    rootError
+      ? h("div", { className: "editor-tree-note editor-panel-blocked" }, untrusted ? t("This folder is not trusted yet.") : rootError)
       : null,
-    panelView === "history" && history
+    !rootError && panelView === "changes"
+      ? h(ChangesPanel, { store, activePath, host })
+      : null,
+    !rootError && panelView === "history" && history
       ? h(HistoryPanel, { store, history })
       : null,
-    panelView === "changes" || (panelView === "history" && history) ? null : h(
+    rootError || panelView === "changes" || (panelView === "history" && history) ? null : h(
       "div",
       { className: "editor-panel-head" },
-      h("span", { className: "editor-panel-title" }, t("Files")),
+      h("span", { className: "editor-panel-title", title: root || "" }, baseName(root)),
       h(
         "button",
         {
@@ -620,9 +789,9 @@ function FilePanel({ store, activePath, history = null }) {
         h("span", { className: "editor-switch-track", "aria-hidden": "true" })
       )
     ),
-    panelView === "changes" || (panelView === "history" && history) ? null : h(
+    rootError || panelView === "changes" || (panelView === "history" && history) ? null : h(
       "div",
-      { className: "editor-tree", role: "tree" },
+      { className: "editor-tree", role: "tree", ref: treeRef },
       changedOnly
         ? h(ChangedList, { store, activePath })
         : h(TreeRows, { store, dir: "", depth: 0, activePath })
@@ -634,12 +803,50 @@ function docAttention(doc) {
   return Boolean(doc && (doc.conflict || doc.missing || doc.saveError || doc.overwritten));
 }
 
+/** Whether the strip runs past either edge, for the fade that says there are more tabs. */
+function useOverflow(ref, deps) {
+  const [edges, setEdges] = useState({ start: false, end: false, overflow: false });
+  useEffect(() => {
+    const strip = ref.current;
+    if (!strip) {
+      return undefined;
+    }
+    const measure = () => {
+      const overflow = strip.scrollWidth > strip.clientWidth + 1;
+      const next = {
+        overflow,
+        start: overflow && strip.scrollLeft > 1,
+        end: overflow && strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1,
+      };
+      setEdges((current) =>
+        current.start === next.start && current.end === next.end && current.overflow === next.overflow ? current : next
+      );
+    };
+    measure();
+    strip.addEventListener("scroll", measure, { passive: true });
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+    observer?.observe(strip);
+    return () => {
+      strip.removeEventListener("scroll", measure);
+      observer?.disconnect();
+    };
+  }, deps);
+  return edges;
+}
+
 export function TabStrip({ store, root, paths, active, autosave, onBack = null, onCloseRequest, onFocus = null, className = "", lead = null }) {
   const docs = useStore(store, (state) => state.docs);
   const preview = useStore(store, (state) => state.tabsByRoot[root]?.preview || null);
+  const pinnedList = useStore(store, (state) => state.tabsByRoot[root]?.pinned);
+  const pinned = Array.isArray(pinnedList) ? pinnedList.filter((path) => paths.includes(path)) : [];
   const [menu, setMenu] = useState(null);
+  const [listing, setListing] = useState(null);
   const stripRef = useRef(null);
   const labels = tabLabels(paths);
+  const edges = useOverflow(stripRef, [paths.length, active]);
+  const focus = (path) => (onFocus ? onFocus(path) : store.focusTab(path, root));
+  // A browser keeps ⌘W for closing its own tab; only the desktop app can take it.
+  const closeHint = isTauri() ? "⌘W" : null;
 
   useEffect(() => {
     const strip = stripRef.current;
@@ -659,17 +866,28 @@ export function TabStrip({ store, root, paths, active, autosave, onBack = null, 
     { className: ["editor-tabbar", className].filter(Boolean).join(" ") },
     h(
       "div",
-      { className: "editor-tabs", role: "tablist", ref: stripRef, onWheel },
+      {
+        className: ["editor-tabs", edges.start ? "has-more-start" : "", edges.end ? "has-more-end" : ""].filter(Boolean).join(" "),
+        role: "tablist",
+        ref: stripRef,
+        onWheel,
+      },
       lead,
       ...paths.map((path, index) => {
         const doc = docs[docKey(root, path)];
         const attention = docAttention(doc);
         const unsaved = !autosave && doc?.dirty;
+        const isPinned = pinned.includes(path);
         return h(
           "div",
           {
             key: path,
-            className: ["editor-tab", path === active ? "is-active" : "", path === preview ? "is-preview" : ""]
+            className: [
+              "editor-tab",
+              path === active ? "is-active" : "",
+              path === preview ? "is-preview" : "",
+              isPinned ? "is-pinned" : "",
+            ]
               .filter(Boolean)
               .join(" "),
             onDoubleClick: () => store.pinTab(path, root),
@@ -683,12 +901,13 @@ export function TabStrip({ store, root, paths, active, autosave, onBack = null, 
                 onCloseRequest([path]);
               }
             },
-            onClick: () => (onFocus ? onFocus(path) : store.focusTab(path, root)),
+            onClick: () => focus(path),
             onContextMenu: (event) => {
               event.preventDefault();
               setMenu({ path, x: event.clientX, y: event.clientY });
             },
           },
+          isPinned ? h("span", { className: "editor-tab-pin", "aria-hidden": "true" }, h(PinGlyph, { filled: true })) : null,
           h(
             "span",
             { className: "editor-tab-label" },
@@ -700,22 +919,41 @@ export function TabStrip({ store, root, paths, active, autosave, onBack = null, 
             : unsaved
               ? h("span", { className: "editor-tab-dot", title: t("Unsaved") })
               : null,
-          h(
-            "button",
-            {
-              className: "editor-tab-close",
-              type: "button",
-              "aria-label": t("Close {title}", { title: labels[index].name }),
-              onClick: (event) => {
-                event.stopPropagation();
-                onCloseRequest([path]);
-              },
-            },
-            "×"
-          )
+          isPinned
+            ? null
+            : h(
+                "button",
+                {
+                  className: "editor-tab-close",
+                  type: "button",
+                  "aria-label": t("Close {title}", { title: labels[index].name }),
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    onCloseRequest([path]);
+                  },
+                },
+                "×"
+              )
         );
       })
     ),
+    edges.overflow
+      ? h(
+          "button",
+          {
+            type: "button",
+            className: "editor-tabs-all",
+            title: t("All open files"),
+            "aria-label": t("All open files"),
+            "aria-haspopup": "menu",
+            onClick: (event) => {
+              const box = event.currentTarget.getBoundingClientRect();
+              setListing({ x: box.right, y: box.bottom + 2 });
+            },
+          },
+          svg(CHEVRON_DOWN_SVG, "editor-tabs-all-chevron")
+        )
+      : null,
     onBack
       ? h(
           "button",
@@ -724,17 +962,44 @@ export function TabStrip({ store, root, paths, active, autosave, onBack = null, 
           t("Back to session")
         )
       : null,
+    listing
+      ? h(
+          ContextMenu,
+          { anchor: listing, ariaLabel: t("All open files"), onClose: () => setListing(null), className: "editor-tabs-list" },
+          ...paths.map((path, index) =>
+            h(MenuItem, {
+              key: path,
+              checked: path === active,
+              title: path,
+              label: labels[index].folder ? `${labels[index].name} · ${labels[index].folder}` : labels[index].name,
+              onSelect: () => {
+                setListing(null);
+                focus(path);
+              },
+            })
+          )
+        )
+      : null,
     menu
       ? h(
           ContextMenu,
           { anchor: menu, ariaLabel: t("Tab {title}", { title: baseName(menu.path) }), onClose: () => setMenu(null) },
+          h(MenuItem, {
+            key: "pin",
+            label: pinned.includes(menu.path) ? t("Unpin tab") : t("Pin tab"),
+            onSelect: () => {
+              setMenu(null);
+              store.setTabPinned(menu.path, !pinned.includes(menu.path), root);
+            },
+          }),
+          h(MenuSeparator, { key: "sep-pin" }),
           ...[
-            ["close", t("Close"), "⌘W"],
+            ["close", t("Close"), closeHint],
             ["others", t("Close other tabs")],
             ["right", t("Close tabs to the right")],
             ["all", t("Close all tabs")],
           ].map(([action, label, hint]) => {
-            const targets = closeTargets(paths, menu.path, action);
+            const targets = closeTargets(paths, menu.path, action, pinned);
             return h(
               React.Fragment,
               { key: action },
@@ -780,7 +1045,7 @@ export function button(label, onClick, { primary = false } = {}) {
   );
 }
 
-export function DocBanners({ store, docKey: key, doc, onCompare }) {
+export function DocBanners({ store, docKey: key, doc, onCompare, changedBy = null }) {
   // Asked in place rather than with window.confirm, which a desktop WebView may not show.
   const [confirmingMine, setConfirmingMine] = useState(false);
   useEffect(() => setConfirmingMine(false), [doc?.path, doc?.conflict?.diskRevision]);
@@ -804,12 +1069,18 @@ export function DocBanners({ store, docKey: key, doc, onCompare }) {
       Banner,
       {
         actions: [
-          h(React.Fragment, { key: "a" }, button(t("Compare"), onCompare)),
+          h(React.Fragment, { key: "a" }, button(t("Compare"), onCompare, { primary: true })),
           h(React.Fragment, { key: "b" }, button(t("Use the version on disk"), () => void store.resolveConflictKey(key, "theirs"))),
           h(React.Fragment, { key: "c" }, button(t("Keep mine"), () => setConfirmingMine(true))),
         ],
       },
-      h("strong", null, t("This file changed on disk while you were editing.")),
+      h(
+        "strong",
+        null,
+        changedBy
+          ? t("This file changed on disk while you were editing; {session} last wrote it.", { session: changedBy })
+          : t("This file changed on disk while you were editing.")
+      ),
       " ",
       t("Your last edits are not saved yet.")
     );
@@ -839,7 +1110,7 @@ export function DocBanners({ store, docKey: key, doc, onCompare }) {
       t("Could not save: {reason}", { reason: doc.saveError })
     );
   }
-  if (doc.readonly) {
+  if (doc.readonly && !doc.deleted) {
     return h(Banner, { tone: "info" }, t("This file is read-only."));
   }
   return null;
@@ -869,9 +1140,8 @@ export function CompareView({ doc, onUseMine, onUseTheirs, onClose }) {
     { className: "editor-compare" },
     h(
       "div",
-      { className: "editor-compare-head" },
-      h("span", null, t("Yours")),
-      h("span", null, t("On disk")),
+      { className: "editor-compare-bar" },
+      h("span", { className: "editor-compare-hint" }, t("Edit your side to keep what you want, then save it.")),
       h(
         "span",
         { className: "editor-compare-actions" },
@@ -879,6 +1149,13 @@ export function CompareView({ doc, onUseMine, onUseTheirs, onClose }) {
         button(t("Use the version on disk"), onUseTheirs),
         button(t("Save mine"), () => onUseMine(viewRef.current?.mineText() ?? mine), { primary: true })
       )
+    ),
+    // Two columns like the panes below, so each label sits over its own side.
+    h(
+      "div",
+      { className: "editor-compare-head" },
+      h("span", { className: "editor-compare-label" }, t("Yours")),
+      h("span", { className: "editor-compare-label" }, t("On disk"))
     ),
     h("div", { className: "editor-compare-body", ref: hostRef })
   );
@@ -950,6 +1227,16 @@ export function CodeHost({ store, docKey: activeKey, doc, cursor, hidden }) {
     }
   }, [ready, activeKey, doc?.revealLine?.at]);
 
+  // The last commit's text, for the marks beside lines changed since it.
+  const baseText = doc?.base && !doc.base.loading && !doc.base.error && !doc.base.binary && !doc.base.tooLarge
+    ? doc.base.tracked ? doc.base.content ?? "" : ""
+    : null;
+  useEffect(() => {
+    if (ready && showable) {
+      editorRef.current.setBase?.(activeKey, baseText);
+    }
+  }, [ready, activeKey, showable, baseText]);
+
   useEffect(() => {
     if (!ready) {
       return;
@@ -965,18 +1252,42 @@ export function CodeHost({ store, docKey: activeKey, doc, cursor, hidden }) {
   return h("div", { className: "editor-code", ref: hostRef, hidden: hidden || !showable });
 }
 
-export function StatusLine({ doc, cursor, autosave, language }) {
-  const position = useStore(cursor);
-  let saveState = "";
-  if (doc && !doc.loading && !doc.binary && !doc.tooLarge) {
-    if (doc.saving) {
-      saveState = t("Saving…");
-    } else if (doc.dirty && !autosave) {
-      saveState = t("Unsaved · ⌘S to save");
-    } else if (!doc.dirty) {
-      saveState = autosave ? t("Saved") : "";
-    }
+/**
+ * What the status line says about saving. Quiet while all is well; "Saved" only once the
+ * editor has saved this file; a problem in words when the tab carries a yellow dot.
+ */
+export function saveStatus({ doc, autosave, mode = "edit" }) {
+  const quiet = { text: "", tone: "" };
+  if (!doc || doc.loading || doc.binary || doc.tooLarge || doc.deleted || mode === "diff") {
+    return quiet;
   }
+  if (doc.conflict) {
+    return { text: t("Not saved: the file changed on disk. See the note above."), tone: "warn" };
+  }
+  if (doc.overwritten) {
+    return { text: t("Some of your saved lines were replaced on disk. See the note above."), tone: "warn" };
+  }
+  if (doc.missing) {
+    return { text: t("Not saved: the file was deleted on disk."), tone: "warn" };
+  }
+  if (doc.saveError) {
+    return { text: t("Not saved: {reason}", { reason: doc.saveError }), tone: "warn" };
+  }
+  if (doc.saving) {
+    return { text: t("Saving…"), tone: "" };
+  }
+  if (doc.dirty && !autosave) {
+    return { text: t("Unsaved · ⌘S to save"), tone: "" };
+  }
+  if (!doc.dirty && autosave && doc.lastSavedAt) {
+    return { text: t("Saved"), tone: "" };
+  }
+  return quiet;
+}
+
+export function StatusLine({ doc, cursor, autosave, language, mode = "edit" }) {
+  const position = useStore(cursor);
+  const save = saveStatus({ doc, autosave, mode });
   return h(
     "div",
     { className: "editor-status" },
@@ -984,18 +1295,20 @@ export function StatusLine({ doc, cursor, autosave, language }) {
       ? h(
           React.Fragment,
           null,
-          h(
-            "span",
-            null,
-            position.selected
-              ? t("Ln {line}, Col {column} · {count} selected", { line: position.line, column: position.column, count: position.selected })
-              : t("Ln {line}, Col {column}", { line: position.line, column: position.column })
-          ),
+          mode === "diff"
+            ? null
+            : h(
+                "span",
+                null,
+                position.selected
+                  ? t("Ln {line}, Col {column} · {count} selected", { line: position.line, column: position.column, count: position.selected })
+                  : t("Ln {line}, Col {column}", { line: position.line, column: position.column })
+              ),
           language ? h("span", null, language) : null
         )
       : null,
     h("span", { className: "editor-status-grow" }),
-    saveState ? h("span", { className: "editor-status-save" }, saveState) : null
+    save.text ? h("span", { className: save.tone ? `editor-status-save is-${save.tone}` : "editor-status-save" }, save.text) : null
   );
 }
 
@@ -1027,7 +1340,7 @@ export function CloseConfirm({ paths, onCancel, onDiscard, onSave }) {
   );
 }
 
-function Breadcrumb({ path, changedBy = null, mode = null, onMode = null }) {
+function Breadcrumb({ path, changedBy = null, onChangedBy = null, mode = null, onMode = null }) {
   if (!path) {
     return null;
   }
@@ -1047,16 +1360,25 @@ function Breadcrumb({ path, changedBy = null, mode = null, onMode = null }) {
         )
       )
     ),
-    changedBy ? h("span", { className: "editor-path-by", title: changedBy }, t("Changed by {session}", { session: changedBy })) : null,
+    changedBy && onChangedBy
+      ? h(
+          "button",
+          { type: "button", className: "editor-path-by", title: t("Go to {session}", { session: changedBy }), onClick: onChangedBy },
+          t("Changed by {session}", { session: changedBy })
+        )
+      : changedBy
+        ? h("span", { className: "editor-path-by", title: changedBy }, t("Changed by {session}", { session: changedBy }))
+        : null,
     mode && onMode ? h(ViewModeSwitch, { mode, onChange: onMode }) : null
   );
 }
 
-export function Placeholder({ children, action }) {
+export function Placeholder({ children, action, detail = null }) {
   return h(
     "div",
     { className: "editor-placeholder" },
     h("p", null, children),
+    detail ? h("p", { className: "editor-placeholder-detail" }, detail) : null,
     action || null
   );
 }
@@ -1085,15 +1407,16 @@ function EditorScreenImpl({ host }) {
   const activeKey = root && active ? docKey(root, active) : null;
   const doc = activeKey ? docs[activeKey] : null;
   const mode = activeKey && viewModes[activeKey] === "diff" ? "diff" : "edit";
+  const panelView = useStore(store, (state) => state.panelView);
   const change = active ? changes.entries.find((entry) => entry.path === active) : null;
-  const changedBy = change?.session
-    ? changes.sessions.find((session) => session.id === change.session)?.title || null
-    : null;
+  const changedById = change?.session && changes.sessions.some((session) => session.id === change.session) ? change.session : null;
+  const changedBy = changedById ? changes.sessions.find((session) => session.id === changedById)?.title || null : null;
+  // The last commit's text serves the diff and the change marks beside the lines alike.
   useEffect(() => {
-    if (mode === "diff" && activeKey && doc && !doc.loading && !doc.base?.loading) {
+    if (activeKey && doc && !doc.loading && !doc.binary && !doc.tooLarge && !doc.base) {
       void store.loadBase(activeKey);
     }
-  }, [mode, activeKey, doc?.loading, doc?.revision]);
+  }, [activeKey, doc?.loading, doc?.base]);
 
   useEffect(() => {
     host.ensureLoaded?.();
@@ -1176,6 +1499,14 @@ function EditorScreenImpl({ host }) {
       if (!host.isVisible?.()) {
         return;
       }
+      // Inside the code the editor's own keymap has saved and claimed the key already.
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "s" && !event.defaultPrevented) {
+        event.preventDefault();
+        if (activeKey && !showingHistory) {
+          void store.saveKey(activeKey);
+        }
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "w") {
         if (showingHistory) {
           event.preventDefault();
@@ -1209,6 +1540,7 @@ function EditorScreenImpl({ host }) {
               }
             }, { primary: true })
           : null,
+        detail: untrusted ? t("Once trusted, you and the agents can change files in this folder from here.") : null,
       },
       untrusted
         ? t("This folder is not trusted yet. Sealwire only opens files in folders you have trusted.")
@@ -1217,7 +1549,9 @@ function EditorScreenImpl({ host }) {
   } else if (showingHistory) {
     body = h(HistoryView, { store, history });
   } else if (!active) {
-    body = h(Placeholder, null, t("Pick a file on the left to open it."));
+    body = panelView === "files"
+      ? h(Placeholder, null, t("Pick a file on the left to open it."))
+      : h(Placeholder, { action: button(t("Show files"), () => store.setPanelView("files")) }, t("No file is open."));
   } else if (doc?.loading) {
     body = h(Placeholder, null, t("Loading…"));
   } else if (doc?.error) {
@@ -1235,19 +1569,20 @@ function EditorScreenImpl({ host }) {
   return h(
     "div",
     { className: "editor-screen" },
-    h(FilePanel, { store, activePath: showingHistory ? null : active, history }),
+    h(FilePanel, { store, activePath: showingHistory ? null : active, history, host }),
     h(
       "section",
       { className: "editor-main" },
       h(TabStrip, {
         store,
         root,
-        paths,
+        // Nothing in an untrusted folder can be shown, so none of its tabs are offered.
+        paths: rootError ? [] : paths,
         autosave,
         onBack: returnThreadId && host.backToSession ? () => host.backToSession(returnThreadId) : null,
         onCloseRequest: (targets) => void requestClose(targets),
         active: showingHistory ? null : active,
-        lead: historyOpen
+        lead: historyOpen && !rootError
           ? h(HistoryTab, {
               key: "history",
               active: showingHistory,
@@ -1260,12 +1595,13 @@ function EditorScreenImpl({ host }) {
         ? h(Breadcrumb, {
             path: active,
             changedBy,
-            mode: doc && !doc.loading && !doc.binary && !doc.tooLarge && !doc.error ? mode : null,
+            onChangedBy: changedById && host.openThread ? () => host.openThread(changedById) : null,
+            mode: doc && !doc.loading && !doc.binary && !doc.tooLarge && !doc.error && !doc.deleted ? mode : null,
             onMode: (next) => store.setViewMode(activeKey, next),
           })
         : null,
       !rootError && !showingHistory && !(comparing && doc && (doc.conflict || doc.overwritten))
-        ? h(DocBanners, { store, docKey: activeKey, doc, onCompare: () => setComparing(activeKey) })
+        ? h(DocBanners, { store, docKey: activeKey, doc, changedBy, onCompare: () => setComparing(activeKey) })
         : null,
       compareDoc
         ? h(CompareView, {
@@ -1290,9 +1626,11 @@ function EditorScreenImpl({ host }) {
           })
         : null,
       body,
-      !body && !compareDoc && mode === "diff" && doc ? h(DiffView, { doc, base: doc.base, path: doc.path }) : null,
+      !body && !compareDoc && mode === "diff" && doc
+        ? h(DiffView, { doc, base: doc.base, path: doc.path, onEdit: () => store.setViewMode(activeKey, "edit") })
+        : null,
       h(CodeHost, { store, docKey: activeKey, doc, cursor, hidden: Boolean(body || compareDoc || mode === "diff") }),
-      showingHistory ? null : h(StatusLine, { doc, cursor, autosave, language }),
+      showingHistory || rootError ? null : h(StatusLine, { doc, cursor, autosave, language, mode }),
       confirm
         ? h(CloseConfirm, {
             paths: confirm.unsaved,

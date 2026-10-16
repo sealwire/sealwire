@@ -114,12 +114,16 @@ function writeJson(storage, key, value) {
   }
 }
 
+const EMPTY_COMMIT = { committing: false, error: null, last: null, message: "" };
+
 export function createEditorStore({
   api,
   storage = null,
   autosave = true,
   timers = { setTimeout: globalThis.setTimeout.bind(globalThis), clearTimeout: globalThis.clearTimeout.bind(globalThis) },
   now = () => Date.now(),
+  // Told the folder after a switch, a new worktree or a commit, for views that show its git state.
+  onGitChange = null,
 } = {}) {
   const persisted = readJson(storage, SESSION_KEY, {});
   const store = createStore(() => ({
@@ -142,9 +146,12 @@ export function createEditorStore({
     showingHistory: false,
     // "diff" or "edit" per document; edit when absent.
     viewModes: {},
-    commit: { committing: false, error: null, last: null },
-    // The folder's branches and worktrees, read when the location menu opens.
-    branches: { loading: false, error: null, data: null, acting: false },
+    // The commit box of the folder on screen: its draft message and how the last try went.
+    commit: EMPTY_COMMIT,
+    // The folder's branches and worktrees. `failed` is the branch a refused switch was for.
+    branches: { loading: false, error: null, data: null, acting: false, failed: null },
+    // What the last switch or new worktree did, said once under the location.
+    notice: null,
     tabsByRoot: persisted.tabsByRoot && typeof persisted.tabsByRoot === "object" ? persisted.tabsByRoot : {},
     docs: {},
     autosave,
@@ -159,6 +166,8 @@ export function createEditorStore({
   const selections = new Map();
   // Where the cursor was in each document, so another view of it opens at the same place.
   const cursors = new Map();
+  // Each folder's commit box, so a message or a hook's refusal stays with its folder.
+  const commits = new Map();
 
   const get = () => store.getState();
   const set = (patch) => store.setState(patch);
@@ -191,14 +200,92 @@ export function createEditorStore({
     const entry = get().tabsByRoot[root];
     const paths = Array.isArray(entry?.paths) ? entry.paths : [];
     const preview = entry?.preview && paths.includes(entry.preview) ? entry.preview : null;
-    return { paths, active: entry?.active || null, preview };
+    const pinned = Array.isArray(entry?.pinned) ? entry.pinned.filter((path) => paths.includes(path)) : [];
+    // Tabs showing a file the working tree deleted: there is nothing on disk to load for them.
+    const deleted = Array.isArray(entry?.deleted) ? entry.deleted.filter((path) => paths.includes(path)) : [];
+    return { paths, active: entry?.active || null, preview, pinned, deleted };
   }
 
   // `preview` is the one tab a click in Changes reuses; it is kept unless told otherwise.
-  function setTabs(paths, active, root = get().root, preview = tabsOf(root).preview) {
+  function setTabs(
+    paths,
+    active,
+    root = get().root,
+    preview = tabsOf(root).preview,
+    pinned = tabsOf(root).pinned,
+    deleted = tabsOf(root).deleted
+  ) {
     const kept = preview && paths.includes(preview) ? preview : null;
-    set({ tabsByRoot: { ...get().tabsByRoot, [root]: { paths, active, preview: kept } } });
+    const stays = pinned.filter((path) => paths.includes(path));
+    const gone = deleted.filter((path) => paths.includes(path));
+    set({ tabsByRoot: { ...get().tabsByRoot, [root]: { paths, active, preview: kept, pinned: stays, deleted: gone } } });
     persistSession();
+  }
+
+  function deletedDoc(root, path) {
+    const key = docKey(root, path);
+    set({ docs: { ...get().docs, [key]: { ...newDoc(path), loading: false, deleted: true, readonly: true } } });
+    set({ viewModes: { ...get().viewModes, [key]: "diff" } });
+    return key;
+  }
+
+  /** A deletion view whose file is back (a switch, an agent's write) becomes the file again. */
+  function restoreDeleted(root, path) {
+    const key = docKey(root, path);
+    const docs = { ...get().docs };
+    delete docs[key];
+    set({ docs });
+    const { paths, active, preview, pinned, deleted } = tabsOf(root);
+    setTabs(paths, active, root, preview, pinned, deleted.filter((entry) => entry !== path));
+    return ensureDoc(root, path);
+  }
+
+  /** Pinned tabs sit first and outlast "close others / to the right / all". */
+  function setTabPinned(path, on, root = get().root) {
+    const { paths, active, preview, pinned } = tabsOf(root);
+    if (!paths.includes(path)) {
+      return;
+    }
+    const rest = pinned.filter((entry) => entry !== path);
+    const nextPinned = on ? [...rest, path] : rest;
+    const others = paths.filter((entry) => !nextPinned.includes(entry));
+    setTabs([...nextPinned, ...others], active, root, preview === path ? null : preview, nextPinned);
+  }
+
+  function setCommit(root, patch) {
+    const next = { ...(commits.get(root) || EMPTY_COMMIT), ...patch };
+    commits.set(root, next);
+    if (get().root === root) {
+      set({ commit: next });
+    }
+  }
+
+  function setCommitMessage(message) {
+    const { root } = get();
+    if (root) {
+      setCommit(root, { message: String(message ?? "") });
+    }
+  }
+
+  /** Open the folders down to `path` in the file tree, so the file is in sight there. */
+  function revealPath(path, root = get().root) {
+    if (!path || root !== get().root) {
+      return;
+    }
+    const parts = path.split("/");
+    const expanded = { ...get().expanded };
+    for (let index = 1; index < parts.length; index += 1) {
+      const dir = parts.slice(0, index).join("/");
+      expanded[dir] = true;
+      if (!get().dirs[dir]) {
+        void loadDir(dir);
+      }
+    }
+    set({ expanded });
+  }
+
+  function clearNotice() {
+    set({ notice: null });
   }
 
   async function loadDir(dir) {
@@ -291,22 +378,38 @@ export function createEditorStore({
         ? {
             dirs: {},
             expanded: { "": true },
-            branches: { loading: false, error: null, data: null, acting: false },
+            branches: { loading: false, error: null, data: null, acting: false, failed: null },
             changes: { root: null, entries: [], sessions: [], loading: true, complete: true, isRepo: true },
+            commit: commits.get(root) || EMPTY_COMMIT,
+            notice: null,
           }
         : {}),
     });
     persistSession();
-    if (changed || !get().dirs[""]) {
+    if (changed || !get().branches.data) {
+      // The location names the branch as soon as the folder shows, not once the menu opens.
+      void loadBranches({ quiet: true });
+    }
+    const firstLook = changed || !get().dirs[""];
+    if (firstLook) {
       await loadDir("");
     }
     void loadChanges();
-    const { paths, active } = tabsOf(root);
+    const { paths, active, deleted } = tabsOf(root);
     for (const path of paths) {
-      ensureDoc(root, path);
+      if (get().docs[docKey(root, path)]) {
+        continue;
+      }
+      if (deleted.includes(path)) {
+        deletedDoc(root, path);
+      } else {
+        ensureDoc(root, path);
+      }
     }
     if (active && !paths.includes(active)) {
       setTabs(paths, paths[0] || null, root);
+    } else if (active && firstLook) {
+      revealPath(active, root);
     }
   }
 
@@ -419,7 +522,7 @@ export function createEditorStore({
     if (!root || !path) {
       return null;
     }
-    const { paths, active, preview: previewPath } = tabsOf(root);
+    const { paths, active, preview: previewPath, pinned } = tabsOf(root);
     let next = paths;
     let nextPreview = previewPath;
     if (!paths.includes(path)) {
@@ -427,7 +530,8 @@ export function createEditorStore({
         next = paths.map((entry) => (entry === previewPath ? path : entry));
         dropIfClean(root, previewPath);
       } else {
-        const at = active ? paths.indexOf(active) + 1 : paths.length;
+        // Beside the current tab, but never inside the pinned ones.
+        const at = Math.max(active ? paths.indexOf(active) + 1 : paths.length, pinned.length);
         next = [...paths.slice(0, at), path, ...paths.slice(at)];
       }
       nextPreview = preview ? path : previewPath;
@@ -436,10 +540,42 @@ export function createEditorStore({
     }
     setTabs(next, path, root, nextPreview);
     leaveHistory(root);
-    const key = ensureDoc(root, path);
+    const key = get().docs[docKey(root, path)]?.deleted ? restoreDeleted(root, path) : ensureDoc(root, path);
     if (line) {
       setDoc(key, { revealLine: { line, at: now() } });
     }
+    return key;
+  }
+
+  /**
+   * A file the working tree deleted: nothing on disk to load or save, so it opens read-only
+   * in the preview tab, compared with the last commit to show what went.
+   */
+  function openDeleted(path, root = get().root) {
+    if (!root || !path) {
+      return null;
+    }
+    const key = docKey(root, path);
+    const existing = get().docs[key];
+    // Unsaved text for a file deleted on disk stays in its own tab, with its own notice.
+    if (existing?.dirty || existing?.conflict) {
+      focusTab(path, root);
+      return key;
+    }
+    deletedDoc(root, path);
+    const { paths, active, preview: previewPath, pinned, deleted } = tabsOf(root);
+    const gone = deleted.includes(path) ? deleted : [...deleted, path];
+    if (paths.includes(path)) {
+      // An open tab, pinned or kept, stays what it was; it only shows the deletion now.
+      setTabs(paths, path, root, previewPath, pinned, gone);
+    } else if (previewPath && !pinned.includes(previewPath)) {
+      dropIfClean(root, previewPath);
+      setTabs(paths.map((entry) => (entry === previewPath ? path : entry)), path, root, path, pinned, gone);
+    } else {
+      const at = Math.max(active ? paths.indexOf(active) + 1 : paths.length, pinned.length);
+      setTabs([...paths.slice(0, at), path, ...paths.slice(at)], path, root, path, pinned, gone);
+    }
+    leaveHistory(root);
     return key;
   }
 
@@ -506,39 +642,44 @@ export function createEditorStore({
     if (changes.root !== root) {
       return null;
     }
-    set({ commit: { committing: true, error: null, last: get().commit.last } });
+    setCommit(root, { committing: true, error: null, unsaved: null });
     const files = new Set(paths.map((path) => `${root}/${path}`));
     const unsaved = await settleSaves((key) => files.has(`${keyRoot(key)}/${keyPath(key)}`), { force: true });
-    if (get().root !== root) {
-      set({ commit: { committing: false, error: null, last: null } });
-      return null;
-    }
     if (unsaved.length) {
-      set({
-        commit: {
-          committing: false,
-          error: `${unsaved.join(", ")} could not be saved, so nothing was committed.`,
-          last: get().commit.last,
-        },
+      setCommit(root, {
+        committing: false,
+        error: `${unsaved.join(", ")} could not be saved, so nothing was committed.`,
+        unsaved,
       });
       return null;
     }
     try {
       const receipt = await api.commit({ root, paths, message });
-      if (get().root !== root) {
-        set({ commit: { committing: false, error: null, last: null } });
-        return receipt;
+      setCommit(root, { committing: false, error: null, last: receipt, message: "" });
+      forgetBases(root);
+      if (get().root === root) {
+        refreshTree();
       }
-      set({ commit: { committing: false, error: null, last: receipt } });
-      refreshTree();
+      onGitChange?.(root);
       return receipt;
     } catch (error) {
-      if (get().root === root) {
-        set({ commit: { committing: false, error: error.message, last: get().commit.last } });
-      } else {
-        set({ commit: { committing: false, error: null, last: null } });
-      }
+      setCommit(root, { committing: false, error: error.message });
       return null;
+    }
+  }
+
+  /** The last commit moved: diffs and change marks read it again. */
+  function forgetBases(root) {
+    const docs = { ...get().docs };
+    let touched = false;
+    for (const [key, doc] of Object.entries(docs)) {
+      if (keyRoot(key) === root && doc.base) {
+        docs[key] = { ...doc, base: null };
+        touched = true;
+      }
+    }
+    if (touched) {
+      set({ docs });
     }
   }
 
@@ -565,11 +706,19 @@ export function createEditorStore({
   }
 
   function focusTab(path, root = get().root) {
-    const { paths } = tabsOf(root);
+    const { paths, deleted } = tabsOf(root);
     if (paths.includes(path)) {
       flushSaves();
       setTabs(paths, path, root);
       leaveHistory(root);
+      // After a reload the session panel shows tabs of a folder the Editor never opened.
+      if (!get().docs[docKey(root, path)]) {
+        if (deleted.includes(path)) {
+          deletedDoc(root, path);
+        } else {
+          ensureDoc(root, path);
+        }
+      }
     }
   }
 
@@ -735,6 +884,7 @@ export function createEditorStore({
         setDoc(key, (current) => ({
           saving: false,
           saveError: null,
+          lastSavedAt: now(),
           revision: outcome.revision,
           savedText: sent,
           dirty: current.text !== sent,
@@ -879,6 +1029,12 @@ export function createEditorStore({
       if (!doc || doc.saving) {
         continue;
       }
+      if (doc.deleted) {
+        if (!stat.missing) {
+          restoreDeleted(root, stat.path);
+        }
+        continue;
+      }
       if (stat.missing) {
         if (!doc.missing) {
           setDoc(key, { missing: true });
@@ -1017,21 +1173,25 @@ export function createEditorStore({
     setDoc(key, { overwritten: null });
   }
 
-  async function loadBranches() {
+  /** `quiet`: a read the user did not ask for keeps its failure to itself. */
+  async function loadBranches({ quiet = false } = {}) {
     const { root } = get();
     if (!root) {
       return;
     }
-    set({ branches: { ...get().branches, loading: true, error: null } });
+    set({ branches: { ...get().branches, loading: true, ...(quiet ? {} : { error: null }) } });
     try {
       const data = await api.branches(root);
       if (get().root === root) {
-        set({ branches: { loading: false, error: null, data, acting: false }, roots: data.worktrees || get().roots });
+        set({
+          branches: { ...get().branches, loading: false, ...(quiet ? {} : { error: null }), data, acting: false },
+          roots: data.worktrees || get().roots,
+        });
         persistSession();
       }
     } catch (error) {
       if (get().root === root) {
-        set({ branches: { ...get().branches, loading: false, error: error.message } });
+        set({ branches: { ...get().branches, loading: false, ...(quiet ? {} : { error: error.message }) } });
       }
     }
   }
@@ -1045,22 +1205,36 @@ export function createEditorStore({
     if (!root || !branch || get().branches.acting || (askedFor && askedFor !== root)) {
       return false;
     }
-    set({ branches: { ...get().branches, acting: true, error: null } });
+    set({ branches: { ...get().branches, acting: true, error: null, failed: null, unsaved: null }, notice: null });
     // The switch must see the user's last edits on disk, not race them there.
-    const unsaved = await settleSaves(inSwitchedTree(root));
+    const switched = inSwitchedTree(root);
+    const unsaved = await settleSaves(switched);
     if (get().root !== root) {
       return false;
     }
     if (unsaved.length) {
-      set({ branches: { ...get().branches, acting: false, error: unsavedReason(unsaved) } });
+      set({ branches: { ...get().branches, acting: false, error: unsavedReason(unsaved), unsaved } });
       return false;
     }
     try {
       await api.switchBranch({ root, branch, create, remote });
+      // The files now are the other branch's, not a rewrite of what the user saved: what
+      // they saved before the switch is no longer the thing to protect.
+      const docs = { ...get().docs };
+      for (const [key, doc] of Object.entries(docs)) {
+        if (switched(key)) {
+          docs[key] = { ...doc, lastWrite: null, overwritten: null, base: null, lastSavedAt: null };
+        }
+      }
+      set({ docs });
+      onGitChange?.(root);
       if (get().root !== root) {
         return true;
       }
-      set({ branches: { ...get().branches, acting: false } });
+      set({
+        branches: { ...get().branches, acting: false },
+        notice: { kind: "switched", root, branch: remote ? branch.slice(branch.indexOf("/") + 1) : branch, at: now() },
+      });
       refreshTree();
       await checkDisk(root);
       if (get().root === root) {
@@ -1069,7 +1243,7 @@ export function createEditorStore({
       return true;
     } catch (error) {
       if (get().root === root) {
-        set({ branches: { ...get().branches, acting: false, error: error.message } });
+        set({ branches: { ...get().branches, acting: false, error: error.message, failed: { branch, remote } } });
       }
       return false;
     }
@@ -1081,15 +1255,17 @@ export function createEditorStore({
     if (!root || !branch || get().branches.acting || (askedFor && askedFor !== root)) {
       return null;
     }
-    set({ branches: { ...get().branches, acting: true, error: null } });
+    set({ branches: { ...get().branches, acting: true, error: null, failed: null, unsaved: null }, notice: null });
     try {
       const { path } = await api.addWorktree({ root, branch, create, remote });
+      onGitChange?.(root);
       // The user may have gone to another folder meanwhile; that choice stands.
       if (get().root !== root) {
         return path;
       }
       set({ branches: { ...get().branches, acting: false } });
       await setRoot(path);
+      set({ notice: { kind: "worktree", root: path, path, from: root, branch, at: now() } });
       await loadBranches();
       return path;
     } catch (error) {
@@ -1145,6 +1321,9 @@ export function createEditorStore({
     await setRoot(root);
     if (path) {
       openFile(path, { root });
+      // The file arrives in sight in the tree too, whatever the panel showed before.
+      set({ panelView: "files" });
+      revealPath(path, root);
     }
   }
 
@@ -1200,6 +1379,11 @@ export function createEditorStore({
     switchBranch,
     addWorktree,
     pinTab,
+    setTabPinned,
+    revealPath,
+    openDeleted,
+    setCommitMessage,
+    clearNotice,
     setPanelView,
     setTicked,
     showHistory,

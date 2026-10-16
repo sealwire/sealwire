@@ -4,13 +4,16 @@
 
 import React from "react";
 
-import { t } from "../../shared/i18n.js";
+import { currentLanguage, t } from "../../shared/i18n.js";
 import { relativeTime } from "../../shared/settings-model.js";
 import { ContextMenu, MenuItem, MenuSeparator } from "../../shared/context-menu-react.js";
 import { branchMenuModel } from "./branch-menu-model.js";
-import { baseName, dirName, useStore } from "./editor-ui.js";
+import { baseName, dirName, svg, useStore } from "./editor-ui.js";
 import { layoutGraph } from "./history-graph.js";
 import { graphApplies } from "./history-store.js";
+import { formatCommitTime, reflowMessage, visibleRefs } from "./history-message.js";
+import { SwitchRefusal } from "./switch-refusal.js";
+import { CHEVRON_DOWN_SVG, CHEVRON_RIGHT_SVG } from "../../svg.js";
 
 const h = React.createElement;
 const { useEffect, useMemo, useRef, useState } = React;
@@ -20,6 +23,8 @@ const LANE_WIDTH = 12;
 const MAX_LANES = 12;
 const LANE_COLORS = 6;
 const FILTER_DELAY_MS = 300;
+// Labels a log row draws before counting the rest; past this they push the message out.
+const ROW_REFS = 2;
 
 function shortId(id) {
   return String(id || "").slice(0, 8);
@@ -59,12 +64,12 @@ export function HistoryTab({ active, onFocus, onClose }) {
   );
 }
 
-function BranchTreeRow({ label, note = null, selected, onClick, onContextMenu, title, dataName }) {
+function BranchTreeRow({ label, note = null, selected, onClick, onContextMenu, title, dataName, indent = false }) {
   return h(
     "button",
     {
       type: "button",
-      className: ["editor-tree-row", "editor-history-branch", selected ? "is-active" : ""].filter(Boolean).join(" "),
+      className: ["editor-tree-row", "editor-history-branch", selected ? "is-active" : "", indent ? "is-in-group" : ""].filter(Boolean).join(" "),
       title: title || label,
       "data-branch": dataName,
       onClick,
@@ -82,11 +87,12 @@ export function HistoryPanel({ store, history }) {
   const branches = useStore(store, (state) => state.branches);
   const filters = useStore(history, (state) => state.filters);
   const [menu, setMenu] = useState(null);
+  const [openGroups, setOpenGroups] = useState([]);
   useEffect(() => {
     void store.loadBranches();
   }, [store, root]);
   const data = branches.data?.root === root ? branches.data : null;
-  const model = branchMenuModel({ data, showAll: true });
+  const model = branchMenuModel({ data, showAll: true, openGroups, root, showAllWorktrees: true });
   const acting = branches.acting === true;
 
   // A menu belongs to the folder it was opened in; it goes when the folder changes.
@@ -101,9 +107,27 @@ export function HistoryPanel({ store, history }) {
   };
   const branchRows = (rows, remote) =>
     rows.map((row) =>
-      h(BranchTreeRow, {
+      row.kind === "group"
+        ? h(
+            "button",
+            {
+              key: `group:${row.prefix}`,
+              type: "button",
+              className: "editor-tree-row editor-history-branch is-group",
+              "aria-expanded": row.open,
+              "data-group": row.prefix,
+              onClick: () =>
+                setOpenGroups((open) => (open.includes(row.prefix) ? open.filter((entry) => entry !== row.prefix) : [...open, row.prefix])),
+            },
+            h("span", { className: "editor-tree-twisty" }, svg(row.open ? CHEVRON_DOWN_SVG : CHEVRON_RIGHT_SVG, "editor-tree-chevron")),
+            h("span", { className: "editor-tree-name" }, row.prefix),
+            h("span", { className: "editor-tree-dir" }, String(row.count))
+          )
+        : h(BranchTreeRow, {
         key: row.name,
-        label: row.name,
+        label: row.label || row.name,
+        title: row.name,
+        indent: Boolean(row.group),
         dataName: row.name,
         note: row.action === "current" ? t("Current") : row.worktree ? t("in {name}", { name: baseName(row.worktree) }) : null,
         selected: filters.branch === row.name && filters.remote === remote,
@@ -115,7 +139,14 @@ export function HistoryPanel({ store, history }) {
   return h(
     "div",
     { className: "editor-tree editor-history-tree" },
-    branches.error ? h("div", { className: "editor-menu-error", role: "alert" }, branches.error) : null,
+    branches.error
+      ? h(SwitchRefusal, {
+          branches,
+          onNewWorktree: branches.failed
+            ? () => void store.addWorktree({ branch: branches.failed.branch, remote: branches.failed.remote, root })
+            : null,
+        })
+      : null,
     h(BranchTreeRow, {
       label: t("All branches"),
       selected: !filters.branch,
@@ -133,7 +164,7 @@ export function HistoryPanel({ store, history }) {
     ...model.worktrees.map((tree) =>
       h(BranchTreeRow, {
         key: tree.path,
-        label: tree.branch ? `${baseName(tree.path)} · ${tree.branch}` : baseName(tree.path),
+        label: tree.branch && tree.branch !== tree.label ? `${tree.label} · ${tree.branch}` : tree.label,
         title: tree.path,
         selected: tree.path === root,
         onClick: () => {
@@ -204,16 +235,28 @@ function RefBadges({ refs }) {
   if (!refs?.length) {
     return null;
   }
+  const { shown, hidden } = visibleRefs(refs, ROW_REFS);
   return h(
     "span",
     { className: "editor-history-refs" },
-    ...refs.map((name) =>
+    ...shown.map((name) =>
       h(
         "span",
-        { key: name, className: name.startsWith("HEAD") ? "editor-history-ref is-head" : "editor-history-ref" },
+        {
+          key: name,
+          className: name.startsWith("HEAD") ? "editor-history-ref is-head" : "editor-history-ref",
+          title: name.replace(/^HEAD -> /, ""),
+        },
         name.replace(/^HEAD -> /, "")
       )
-    )
+    ),
+    hidden.length
+      ? h(
+          "span",
+          { key: "more", className: "editor-history-ref is-more", title: hidden.map((name) => name.replace(/^HEAD -> /, "")).join("\n") },
+          `+${hidden.length}`
+        )
+      : null
   );
 }
 
@@ -295,7 +338,11 @@ function CommitDetail({ store, history }) {
   const detail = useStore(history, (state) => state.detail);
   const file = useStore(history, (state) => state.file);
   const [copied, setCopied] = useState(false);
-  useEffect(() => setCopied(false), [detail.id]);
+  const [wholeMessage, setWholeMessage] = useState(false);
+  useEffect(() => {
+    setCopied(false);
+    setWholeMessage(false);
+  }, [detail.id]);
   if (detail.loading) {
     return h("div", { className: "editor-history-detail" }, h("div", { className: "editor-tree-note" }, t("Loading…")));
   }
@@ -307,7 +354,10 @@ function CommitDetail({ store, history }) {
     );
   }
   const commit = detail.data;
-  const [subject, ...body] = String(commit.message || "").replace(/\s+$/, "").split("\n");
+  const [subject, ...rest] = String(commit.message || "").replace(/\s+$/, "").split("\n");
+  const body = reflowMessage(rest.join("\n").trim());
+  // A long message is cut to a few lines so the files below stay in sight.
+  const longBody = body.split("\n").length > 4 || body.length > 320;
   return h(
     "div",
     { className: "editor-history-detail" },
@@ -315,12 +365,25 @@ function CommitDetail({ store, history }) {
       "div",
       { className: "editor-history-info" },
       h("div", { className: "editor-history-subject" }, subject),
-      body.join("\n").trim() ? h("pre", { className: "editor-history-body" }, body.join("\n").trim()) : null,
+      body
+        ? h(
+            "pre",
+            { className: longBody && !wholeMessage ? "editor-history-body is-clamped" : "editor-history-body" },
+            body
+          )
+        : null,
+      body && longBody
+        ? h(
+            "button",
+            { type: "button", className: "editor-link-button", onClick: () => setWholeMessage(!wholeMessage) },
+            wholeMessage ? t("Show less") : t("Show the whole message")
+          )
+        : null,
       h(
         "div",
         { className: "editor-history-meta" },
         h("span", { title: commit.email }, commit.author),
-        h("span", null, commit.time ? new Date(commit.time * 1000).toLocaleString() : ""),
+        h("span", null, formatCommitTime(commit.time, currentLanguage())),
         h(
           "button",
           {
@@ -435,7 +498,7 @@ export function HistoryView({ store, history }) {
             h("span", { className: "editor-history-text" }, commit.subject)
           ),
           h("span", { className: "editor-history-author" }, commit.author),
-          h("span", { className: "editor-history-when", title: new Date(commit.time * 1000).toLocaleString() }, relativeTime(commit.time)),
+          h("span", { className: "editor-history-when", title: formatCommitTime(commit.time, currentLanguage()) }, relativeTime(commit.time)),
           h("span", { className: "editor-history-short" }, shortId(commit.id))
         )
       ),

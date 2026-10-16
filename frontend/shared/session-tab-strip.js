@@ -87,7 +87,7 @@ function CloseGlyph() {
   );
 }
 
-function PinGlyph({ filled }) {
+export function PinGlyph({ filled }) {
   return h(
     "svg",
     {

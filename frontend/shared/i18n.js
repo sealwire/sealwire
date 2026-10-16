@@ -41,8 +41,11 @@ export function resolveLanguage(choice, languages) {
   return "en";
 }
 
+// A key may start with "context\u0004", gettext-style: one English word that two places need
+// to read differently in Chinese. English shows the part after the separator.
 export function translate(text, params, language, dictionaries = DICTIONARIES) {
-  const template = dictionaries[language]?.[text] || text;
+  const context = text.indexOf("\u0004");
+  const template = dictionaries[language]?.[text] || (context >= 0 ? text.slice(context + 1) : text);
   if (!params) {
     return template;
   }

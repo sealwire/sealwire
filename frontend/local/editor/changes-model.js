@@ -31,13 +31,14 @@ export function groupChanges(entries = [], sessions = []) {
 }
 
 /**
- * The ticked files after the list was read again. A folder's first list comes ticked;
- * after that a file new to the list waits for the user to tick it, so nothing an agent
- * writes meanwhile rides along in a commit unseen. Files gone from the list drop out.
+ * The ticked files after the list was read again. Nothing is ticked until the user ticks it
+ * (a group's box takes a session's files in one go): a folder's changes can include files
+ * nobody meant to commit, like a dev setup's swapped-in sources or an untracked scratch file.
+ * Files gone from the list drop out.
  */
 export function nextSelection(previous, root, paths) {
   if (!previous || previous.root !== root) {
-    return { root, ticked: [...paths] };
+    return { root, ticked: [] };
   }
   const ticked = new Set(previous.ticked);
   return { root, ticked: paths.filter((path) => ticked.has(path)) };

@@ -109,3 +109,24 @@ test("Open on a change shown for another worktree is not offered in the session'
   assert.equal(changesOpener(open, "/repo", "/repo"), open);
   assert.equal(changesOpener(open, "/repo", "/repo/.sealwire/worktrees/b"), null);
 });
+
+test("going to the Editor from a file in the panel leaves the panel as it was, for when the user comes back", async () => {
+  const editorStore = { ...fakeEditorStore(), showInEditor: async () => {} };
+  const rail = fakeRail(320);
+  let opened = 0;
+  const host = createEditorPanelHost({
+    editorStore,
+    getSessionRoot: () => "/repo",
+    railControl: rail,
+    viewportWidth: () => 1600,
+    openEditor: () => {
+      opened += 1;
+    },
+  });
+  host.openInPanel({ path: "src/a.rs" });
+  const widened = rail.getWidth();
+  await host.openInEditor("/repo\nsrc/a.rs");
+  assert.equal(opened, 1);
+  assert.equal(host.panel.getState().showingFile, true, "the file is still the one showing");
+  assert.equal(rail.getWidth(), widened, "the panel keeps the width it had");
+});

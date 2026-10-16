@@ -23,12 +23,12 @@ test("files group under the session that wrote them; the rest come last", () => 
   );
 });
 
-test("a folder's first list comes ticked; a file that turns up later waits for a tick", () => {
+test("nothing is ticked until the user ticks it, and a file that turns up later waits for a tick", () => {
   const first = nextSelection(null, "/a", ["a.rs", "b.rs"]);
-  assert.deepEqual(first, { root: "/a", ticked: ["a.rs", "b.rs"] });
+  assert.deepEqual(first, { root: "/a", ticked: [] }, "a commit never takes files the user has not picked");
   const user = { root: "/a", ticked: ["a.rs"] };
   const refreshed = nextSelection(user, "/a", ["a.rs", "b.rs", "secret.env"]);
   assert.deepEqual(refreshed.ticked, ["a.rs"], "an agent's new file is not committed without a tick");
   assert.deepEqual(nextSelection(refreshed, "/a", ["b.rs"]).ticked, [], "a committed file drops out");
-  assert.deepEqual(nextSelection(refreshed, "/b", ["x.rs"]).ticked, ["x.rs"], "another folder starts afresh");
+  assert.deepEqual(nextSelection(refreshed, "/b", ["x.rs"]).ticked, [], "another folder starts afresh, unticked");
 });

@@ -611,7 +611,8 @@ test("an untick survives leaving Changes and every refresh of the list", async (
   const store = createEditorStore({ api: relay.api, storage: memoryStorage(), timers: manualTimers() });
   await store.setRoot(ROOT);
   await settle();
-  assert.deepEqual(store.getState().selection.ticked, ["a.rs", "b.rs"]);
+  assert.deepEqual(store.getState().selection.ticked, []);
+  store.setTicked(["a.rs", "b.rs"], true);
   store.setTicked(["b.rs"], false);
   store.setPanelView("files");
   store.setPanelView("changes");
@@ -714,7 +715,7 @@ test("ticks are kept per folder, so going away and back does not tick a file aga
   const store = createEditorStore({ api: relay.api, storage: memoryStorage(), timers: manualTimers() });
   await store.setRoot("/a");
   await settle();
-  store.setTicked(["unticked.txt"], false);
+  store.setTicked(["a.txt"], true);
   await store.setRoot("/b");
   await settle();
   await store.setRoot("/a");
@@ -737,4 +738,222 @@ test("a branch action picked in one folder never runs in another", async () => {
   assert.equal(await store.switchBranch({ branch: "topic", root: ROOT }), false);
   assert.equal(await store.addWorktree({ branch: "topic", root: ROOT }), null);
   assert.deepEqual(calls, [], "the menu was opened for /repo; the folder is now /c");
+});
+
+test("a branch switch that rewrites a saved file is a reload, not someone overwriting the user's lines", async () => {
+  const { relay, timers, store, doc } = await openEditor({ files: { "a.rs": "fn a() {}\n" } });
+  relay.api.branches = async () => ({ root: ROOT, current: "main", branches: [], worktrees: [], busy: null });
+  relay.api.switchBranch = async () => {
+    relay.disk.set("a.rs", "fn older() {}\n");
+    return { current: "older" };
+  };
+  store.edit("a.rs", "fn a() {}\nlet keep = 1;\n");
+  await timers.fire(AUTOSAVE_DELAY_MS);
+  assert.equal(await store.switchBranch({ branch: "older" }), true);
+  await settle();
+  assert.equal(doc().text, "fn older() {}\n");
+  assert.equal(doc().overwritten, null);
+  assert.equal(doc().lastSavedAt, null, "the other branch's file has not been saved by the user");
+  // An agent rewriting it afterwards is still caught, against what the user saves next.
+  store.edit("a.rs", "fn older() {}\nlet mine = 2;\n");
+  await timers.fire(AUTOSAVE_DELAY_MS);
+  relay.disk.set("a.rs", "fn agent() {}\n");
+  await store.checkDisk();
+  assert.ok(doc().overwritten, "a later rewrite by someone else is still reported");
+});
+
+test("a commit's message and its outcome belong to the folder they were written in", async () => {
+  const { relay, store } = await openEditor({ files: { "a.rs": "a\n", "b.rs": "b\n" } });
+  relay.api.commit = async () => {
+    throw new Error("pre-commit: refused");
+  };
+  store.setCommitMessage("Fix the thing");
+  await store.commit({ paths: ["a.rs"], message: "Fix the thing" });
+  assert.match(store.getState().commit.error, /refused/);
+  await store.setRoot("/other");
+  assert.equal(store.getState().commit.error, null);
+  assert.equal(store.getState().commit.message, "");
+  store.setCommitMessage("Other folder's message");
+  await store.setRoot(ROOT);
+  assert.match(store.getState().commit.error, /refused/);
+  assert.equal(store.getState().commit.message, "Fix the thing");
+});
+
+test("a file brought into the Editor from elsewhere shows in the file tree", async () => {
+  const { store } = await openEditor({ files: { "a.rs": "a\n", "src/deep/x.rs": "x\n" } });
+  store.setPanelView("history");
+  await store.showInEditor({ root: ROOT, path: "src/deep/x.rs" });
+  assert.equal(store.getState().panelView, "files");
+  assert.equal(store.getState().expanded.src, true);
+  assert.equal(store.getState().expanded["src/deep"], true);
+});
+
+test("after a reload the open file's folders are expanded again", async () => {
+  const storage = memoryStorage();
+  const first = await openEditor({ files: { "a.rs": "a\n", "src/deep/x.rs": "x\n" }, storage });
+  first.store.openFile("src/deep/x.rs");
+  await settle();
+  const relay = fakeRelay({ "a.rs": "a\n", "src/deep/x.rs": "x\n" });
+  const store = createEditorStore({ api: relay.api, storage, timers: manualTimers() });
+  await store.setRoot(ROOT);
+  assert.equal(store.getState().expanded["src/deep"], true);
+});
+
+test("opening a folder reads its branch for the location, quietly", async () => {
+  const relay = fakeRelay({ "a.rs": "a\n" });
+  const store = createEditorStore({ api: relay.api, storage: memoryStorage(), timers: manualTimers() });
+  await store.setRoot(ROOT);
+  await settle();
+  assert.equal(store.getState().branches.error, null, "a folder whose branches cannot be read shows no error");
+  relay.api.branches = async () => ({ root: "/b", current: "main", branches: [], worktrees: [], busy: null });
+  await store.setRoot("/b");
+  await settle();
+  assert.equal(store.getState().branches.data?.current, "main");
+});
+
+test("a branch switch and a new worktree each say what they did", async () => {
+  const { relay, store } = await openEditor();
+  relay.api.branches = async () => ({ root: ROOT, current: "topic", branches: [], worktrees: [], busy: null });
+  relay.api.switchBranch = async () => ({ current: "topic" });
+  await store.switchBranch({ branch: "topic" });
+  assert.deepEqual(
+    { kind: store.getState().notice?.kind, branch: store.getState().notice?.branch, root: store.getState().notice?.root },
+    { kind: "switched", branch: "topic", root: ROOT }
+  );
+  relay.api.addWorktree = async () => ({ path: "/repo/.sealwire/worktrees/spike" });
+  await store.addWorktree({ branch: "spike", create: true });
+  assert.equal(store.getState().notice?.kind, "worktree");
+  assert.equal(store.getState().notice?.path, "/repo/.sealwire/worktrees/spike");
+  store.clearNotice();
+  assert.equal(store.getState().notice, null);
+});
+
+test("a refused switch remembers which branch it was, so a new worktree can be offered instead", async () => {
+  const { relay, store } = await openEditor();
+  relay.api.branches = async () => ({ root: ROOT, current: "main", branches: [], worktrees: [], busy: null });
+  relay.api.switchBranch = async () => {
+    throw new Error("error: Your local changes to the following files would be overwritten by checkout");
+  };
+  assert.equal(await store.switchBranch({ branch: "topic", remote: false }), false);
+  assert.deepEqual(store.getState().branches.failed, { branch: "topic", remote: false });
+});
+
+test("a pinned tab moves to the front and stays when the others are closed", async () => {
+  const { store } = await openEditor({ files: { "a.rs": "a\n", "b.rs": "b\n", "c.rs": "c\n" } });
+  store.openFile("b.rs");
+  store.openFile("c.rs");
+  await settle();
+  store.setTabPinned("c.rs", true);
+  assert.deepEqual(store.tabsOf().paths, ["c.rs", "a.rs", "b.rs"]);
+  assert.deepEqual(store.tabsOf().pinned, ["c.rs"]);
+  store.setTabPinned("c.rs", false);
+  assert.deepEqual(store.tabsOf().pinned, []);
+});
+
+test("a deleted file opens read-only, compared with its last commit", async () => {
+  const { store, relay } = await openEditor();
+  const key = store.openDeleted("gone.rs");
+  const deleted = store.getState().docs[key];
+  assert.equal(deleted.deleted, true);
+  assert.equal(deleted.readonly, true);
+  assert.equal(deleted.loading, false);
+  assert.equal(store.getState().viewModes[key], "diff");
+  store.editKey(key, "typed\n");
+  assert.equal(store.getState().docs[key].dirty, false);
+  assert.equal(relay.writes.length, 0);
+});
+
+test("a document only reads as saved once the editor has saved it", async () => {
+  const { timers, store, doc } = await openEditor();
+  assert.equal(doc().lastSavedAt ?? null, null);
+  store.edit("a.rs", "fn b() {}\n");
+  await timers.fire(AUTOSAVE_DELAY_MS);
+  assert.ok(doc().lastSavedAt > 0);
+});
+
+test("a branch switch, a new worktree and a commit tell whoever shows git state", async () => {
+  const relay = fakeRelay({ "a.rs": "a\n" });
+  const changed = [];
+  const store = createEditorStore({ api: relay.api, storage: memoryStorage(), timers: manualTimers(), onGitChange: (root) => changed.push(root) });
+  await store.setRoot(ROOT);
+  relay.api.branches = async () => ({ root: ROOT, current: "topic", branches: [], worktrees: [], busy: null });
+  relay.api.switchBranch = async () => ({ current: "topic" });
+  relay.api.commit = async () => ({ commit: "abc", subject: "x" });
+  relay.api.addWorktree = async () => ({ path: "/repo/.sealwire/worktrees/w" });
+  await store.switchBranch({ branch: "topic" });
+  store.openFile("a.rs");
+  await settle();
+  await store.commit({ paths: ["a.rs"], message: "x" });
+  await store.addWorktree({ branch: "w", create: true });
+  assert.deepEqual(changed, [ROOT, ROOT, ROOT]);
+});
+
+test("a file deleted while it was open opens as the deletion, unless it holds unsaved text", async () => {
+  const { relay, store } = await openEditor({ files: { "a.rs": "fn a() {}\n", "b.rs": "b\n" } });
+  store.openFile("b.rs");
+  await settle();
+  relay.disk.delete("a.rs");
+  const key = store.openDeleted("a.rs");
+  assert.equal(store.getState().docs[key].deleted, true, "the cached text is not passed off as the file");
+  assert.equal(store.getState().docs[key].readonly, true);
+  store.edit("b.rs", "b typed\n");
+  relay.disk.delete("b.rs");
+  const kept = store.openDeleted("b.rs");
+  assert.equal(store.getState().docs[kept].text, "b typed\n", "unsaved text is never dropped for the deletion view");
+  assert.equal(store.getState().docs[kept].deleted, undefined);
+});
+
+test("a deleted file that comes back, by a switch or a write, opens as the file again", async () => {
+  const { relay, store } = await openEditor({ files: { "a.rs": "a\n" } });
+  relay.disk.delete("gone.rs");
+  const key = store.openDeleted("gone.rs");
+  relay.disk.set("gone.rs", "back\n");
+  await store.checkDisk();
+  await settle();
+  assert.equal(store.getState().docs[key].deleted, undefined);
+  assert.equal(store.getState().docs[key].text, "back\n");
+  relay.disk.delete("other.rs");
+  const other = store.openDeleted("other.rs");
+  relay.disk.set("other.rs", "here\n");
+  store.openFile("other.rs");
+  await settle();
+  assert.equal(store.getState().docs[other].text, "here\n", "opening it from the tree reads the file");
+});
+
+test("a deleted file's tab is still the deletion after a reload", async () => {
+  const storage = memoryStorage();
+  const first = await openEditor({ files: { "a.rs": "a\n" }, storage });
+  first.store.openDeleted("gone.rs");
+  await settle();
+  const relay = fakeRelay({ "a.rs": "a\n" });
+  const store = createEditorStore({ api: relay.api, storage, timers: manualTimers() });
+  await store.setRoot(ROOT);
+  await settle();
+  const doc = store.getState().docs[docKey(ROOT, "gone.rs")];
+  assert.equal(doc?.deleted, true);
+  assert.equal(doc?.error ?? null, null);
+  assert.equal(store.getState().viewModes[docKey(ROOT, "gone.rs")], "diff");
+});
+
+test("showing a deletion in a tab that is already open keeps it, pinned or not", async () => {
+  const { store } = await openEditor({ files: { "a.rs": "a\n" } });
+  store.openDeleted("gone.rs");
+  store.setTabPinned("gone.rs", true);
+  store.openDeleted("gone.rs");
+  store.openDeleted("other.rs");
+  assert.deepEqual(store.tabsOf().pinned, ["gone.rs"]);
+  assert.ok(store.tabsOf().paths.includes("gone.rs"), "the pinned tab is not taken over as a preview");
+});
+
+test("focusing a tab after a reload loads its file, even for a folder the Editor has not opened", async () => {
+  const storage = memoryStorage();
+  const first = await openEditor({ files: { "a.rs": "a\n", "b.rs": "b\n" }, storage });
+  first.store.openFile("b.rs");
+  await settle();
+  const relay = fakeRelay({ "a.rs": "a\n", "b.rs": "b\n" });
+  const store = createEditorStore({ api: relay.api, storage, timers: manualTimers() });
+  // The session panel shows the session's folder without the Editor ever opening it.
+  store.focusTab("a.rs", ROOT);
+  await settle();
+  assert.equal(store.getState().docs[docKey(ROOT, "a.rs")]?.text, "a\n");
 });
