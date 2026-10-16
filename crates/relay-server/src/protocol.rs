@@ -1991,6 +1991,52 @@ pub struct EditorFileStat {
     pub too_large: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorBranchView {
+    /// Short name: `topic`, or `origin/topic` for a remote-tracking branch.
+    pub name: String,
+    pub remote: bool,
+    /// The worktree that has this branch checked out, if any.
+    pub worktree: Option<String>,
+    pub committed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorBranchesView {
+    pub root: String,
+    /// `None` for a detached HEAD.
+    pub current: Option<String>,
+    pub branches: Vec<EditorBranchView>,
+    pub worktrees: Vec<WorkspaceRootView>,
+    /// Why switching branches here is refused right now, if it is.
+    pub busy: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EditorBranchInput {
+    pub root: String,
+    pub branch: String,
+    /// Create `branch` from the folder's current commit.
+    #[serde(default)]
+    pub create: bool,
+    /// `branch` names a remote-tracking branch; a local one tracking it is created.
+    #[serde(default)]
+    pub remote: bool,
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorSwitchReceipt {
+    pub root: String,
+    pub current: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorWorktreeReceipt {
+    pub path: String,
+}
+
 /// A file as of the last commit, for the editor's "compared with last commit" view.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EditorBaseView {

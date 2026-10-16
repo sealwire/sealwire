@@ -390,3 +390,34 @@ test("a file that turns binary on disk stops being editable instead of becoming 
   await timers.fire(AUTOSAVE_DELAY_MS);
   assert.equal(relay.writes.length, 0, "nothing written over the binary file");
 });
+
+test("switching branches saves pending edits first and keeps git's refusal for the user", async () => {
+  const { relay, store } = await openEditor();
+  const calls = [];
+  relay.api.branches = async () => ({ current: "main", branches: [], worktrees: [], busy: null });
+  relay.api.switchBranch = async (request) => {
+    calls.push({ request, diskAtSwitch: relay.disk.get("a.rs") });
+    if (request.branch === "dirty") {
+      throw new Error("Your local changes would be overwritten by checkout: a.rs");
+    }
+    return { root: ROOT, current: request.branch };
+  };
+  store.edit("a.rs", "fn saved_first() {}\n");
+  assert.equal(await store.switchBranch({ branch: "topic" }), true);
+  assert.equal(calls[0].diskAtSwitch, "fn saved_first() {}\n", "the edit reached disk before the switch");
+  assert.deepEqual(calls[0].request, { root: ROOT, branch: "topic", create: false, remote: false });
+  assert.equal(await store.switchBranch({ branch: "dirty" }), false);
+  assert.match(store.getState().branches.error, /would be overwritten/);
+});
+
+test("a new worktree becomes the folder on screen", async () => {
+  const { relay, store } = await openEditor();
+  relay.api.branches = async () => ({ current: "spike", branches: [], worktrees: [{ path: "/repo/.sealwire/worktrees/spike", branch: "spike" }], busy: null });
+  relay.api.addWorktree = async ({ branch, create }) => {
+    assert.equal(create, true);
+    return { path: `/repo/.sealwire/worktrees/${branch}` };
+  };
+  const path = await store.addWorktree({ branch: "spike", create: true });
+  assert.equal(path, "/repo/.sealwire/worktrees/spike");
+  assert.equal(store.getState().root, "/repo/.sealwire/worktrees/spike");
+});

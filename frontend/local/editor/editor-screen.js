@@ -8,7 +8,8 @@ import React from "react";
 import { createStore } from "zustand/vanilla";
 
 import { t } from "../../shared/i18n.js";
-import { ContextMenu, MenuItem, MenuSeparator } from "../../shared/context-menu-react.js";
+import { ContextMenu, MenuFilter, MenuHeading, MenuItem, MenuSeparator } from "../../shared/context-menu-react.js";
+import { branchMenuModel } from "./branch-menu-model.js";
 import { CHEVRON_DOWN_SVG, CHEVRON_RIGHT_SVG } from "../../svg.js";
 import { docKey } from "./editor-store.js";
 
@@ -70,15 +71,164 @@ export function closeTargets(paths, path, action) {
   return [...paths];
 }
 
+function BranchRow({ row, acting, onSwitch, onNewWorktree, onOpen }) {
+  return h(
+    "div",
+    { className: "editor-branch-row", "data-branch": row.name },
+    h("span", { className: "editor-branch-name", title: row.name }, row.name),
+    row.action === "current"
+      ? h("span", { className: "editor-branch-note" }, t("Current"))
+      : row.action === "open"
+        ? h(
+            React.Fragment,
+            null,
+            h("span", { className: "editor-branch-note", title: row.worktree }, t("in {name}", { name: baseName(row.worktree) })),
+            h("button", { type: "button", className: "editor-branch-button", disabled: acting, onClick: onOpen }, t("Open"))
+          )
+        : h(
+            React.Fragment,
+            null,
+            h(
+              "button",
+              {
+                type: "button",
+                className: "editor-branch-button",
+                disabled: acting || Boolean(row.switchBlocked),
+                title: row.switchBlocked || t("Check this branch out in this folder"),
+                onClick: onSwitch,
+              },
+              t("Switch")
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                className: "editor-branch-button",
+                disabled: acting,
+                title: t("Check this branch out in a new folder; this one is left as it is"),
+                onClick: onNewWorktree,
+              },
+              t("New worktree")
+            )
+          )
+  );
+}
+
+function LocationMenu({ store, anchor, buttonRef, onClose }) {
+  const root = useStore(store, (state) => state.root);
+  const branches = useStore(store, (state) => state.branches);
+  const [query, setQuery] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  const [newName, setNewName] = useState("");
+  useEffect(() => {
+    void store.loadBranches();
+  }, [store, root]);
+  const data = branches.data;
+  const model = branchMenuModel({ data, query, showAll });
+  const acting = branches.acting === true;
+  const finish = (ok) => {
+    if (ok) {
+      onClose();
+    }
+  };
+  const switchTo = (choice) => void store.switchBranch(choice).then(finish);
+  const newTree = (choice) => void store.addWorktree(choice).then((path) => finish(Boolean(path)));
+  const openTree = (path) => {
+    onClose();
+    void store.setRoot(path);
+  };
+  const branchRow = (row, remote) =>
+    h(BranchRow, {
+      key: row.name,
+      row,
+      acting,
+      onSwitch: () => switchTo({ branch: row.name, remote }),
+      onNewWorktree: () => newTree({ branch: row.name, remote }),
+      onOpen: () => openTree(row.worktree),
+    });
+
+  return h(
+    ContextMenu,
+    { anchor, ariaLabel: t("Worktrees and branches"), ignoreRef: buttonRef, onClose, className: "editor-location-menu" },
+    h(MenuFilter, { value: query, onChange: setQuery, placeholder: t("Search worktrees and branches") }),
+    branches.loading && !data ? h("div", { className: "editor-menu-note" }, t("Loading…")) : null,
+    branches.error ? h("div", { className: "editor-menu-error", role: "alert" }, branches.error) : null,
+    h(MenuHeading, null, t("Worktrees")),
+    ...model.worktrees.map((tree) =>
+      h(MenuItem, {
+        key: tree.path,
+        checked: tree.path === root,
+        label: tree.branch ? `${baseName(tree.path)} · ${tree.branch}` : baseName(tree.path),
+        onSelect: () => openTree(tree.path),
+      })
+    ),
+    data ? h(MenuHeading, null, t("Branches")) : null,
+    data?.busy ? h("div", { className: "editor-menu-note is-warn" }, t("Switching is off: {reason}.", { reason: data.busy })) : null,
+    ...model.local.map((row) => branchRow(row, false)),
+    model.hidden > 0
+      ? h(
+          "button",
+          { type: "button", className: "editor-menu-more", onClick: () => setShowAll(true) },
+          t("Show {count} more", { count: model.hidden })
+        )
+      : null,
+    model.remote.length ? h(MenuHeading, null, t("Remote branches")) : null,
+    ...model.remote.map((row) => branchRow(row, true)),
+    data
+      ? h(
+          "form",
+          {
+            className: "editor-new-branch",
+            onSubmit: (event) => {
+              event.preventDefault();
+              if (newName.trim() && !data.busy) {
+                switchTo({ branch: newName.trim(), create: true });
+              }
+            },
+          },
+          h("input", {
+            type: "text",
+            value: newName,
+            spellCheck: false,
+            autoComplete: "off",
+            placeholder: data.current
+              ? t("New branch from {branch}", { branch: data.current })
+              : t("New branch from here"),
+            "aria-label": t("New branch name"),
+            onChange: (event) => setNewName(event.target.value),
+          }),
+          h(
+            "button",
+            { type: "submit", className: "editor-branch-button", disabled: acting || !newName.trim() || Boolean(data.busy), title: data.busy || "" },
+            t("Create here")
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "editor-branch-button",
+              disabled: acting || !newName.trim(),
+              onClick: () => newTree({ branch: newName.trim(), create: true }),
+            },
+            t("In new worktree")
+          )
+        )
+      : null
+  );
+}
+
 function LocationChip({ store }) {
   const root = useStore(store, (state) => state.root);
   const roots = useStore(store, (state) => state.roots);
+  const branchData = useStore(store, (state) => state.branches.data);
   const [menu, setMenu] = useState(null);
   const buttonRef = useRef(null);
   if (!root) {
     return null;
   }
-  const current = roots.find((entry) => entry.path === root);
+  const branch = branchData?.root === root && branchData.current
+    ? branchData.current
+    : roots.find((entry) => entry.path === root)?.branch;
   const open = () => {
     const box = buttonRef.current?.getBoundingClientRect();
     setMenu(box ? { x: box.left, y: box.bottom + 4 } : { x: 0, y: 0 });
@@ -97,26 +247,10 @@ function LocationChip({ store }) {
         onClick: () => (menu ? setMenu(null) : open()),
       },
       h("span", { className: "editor-location-name" }, baseName(root)),
-      current?.branch ? h("span", { className: "editor-location-branch" }, current.branch) : null,
+      branch ? h("span", { className: "editor-location-branch" }, branch) : null,
       svg(CHEVRON_DOWN_SVG, "editor-location-chevron")
     ),
-    menu
-      ? h(
-          ContextMenu,
-          { anchor: menu, ariaLabel: t("Worktrees"), ignoreRef: buttonRef, onClose: () => setMenu(null) },
-          ...(roots.length ? roots : [{ path: root, branch: null }]).map((entry) =>
-            h(MenuItem, {
-              key: entry.path,
-              checked: entry.path === root,
-              label: entry.branch ? `${baseName(entry.path)} · ${entry.branch}` : baseName(entry.path),
-              onSelect: () => {
-                setMenu(null);
-                void store.setRoot(entry.path);
-              },
-            })
-          )
-        )
-      : null
+    menu ? h(LocationMenu, { store, anchor: menu, buttonRef, onClose: () => setMenu(null) }) : null
   );
 }
 

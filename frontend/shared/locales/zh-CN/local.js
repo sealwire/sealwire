@@ -361,4 +361,21 @@ export default {
   "New file — not in the last commit": "新文件，上次提交里没有",
   "View": "查看方式",
   "Open in Editor": "在编辑器中打开",
+
+  // Editor location menu: worktrees and branches
+  "in {name}": "在 {name}",
+  "Check this branch out in this folder": "在这个文件夹里切到这个 branch",
+  "Switch": "切换",
+  "Check this branch out in a new folder; this one is left as it is": "在一个新文件夹里打开这个 branch，当前文件夹不动",
+  "New worktree": "新 worktree",
+  "Worktrees and branches": "worktree 和 branch",
+  "Search worktrees and branches": "搜索 worktree 和 branch",
+  "Branches": "Branch",
+  "Switching is off: {reason}.": "现在不能切换：{reason}。",
+  "Remote branches": "远程 branch",
+  "New branch from {branch}": "从 {branch} 新建 branch",
+  "New branch from here": "从这里新建 branch",
+  "New branch name": "新 branch 名",
+  "Create here": "在这里创建",
+  "In new worktree": "放到新 worktree",
 };

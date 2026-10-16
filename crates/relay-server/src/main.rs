@@ -50,15 +50,16 @@ use protocol::{
     ApplyFileChangeReceipt, ApprovalDecisionInput, ApprovalReceipt, AskDetailResponse,
     AskUserAnswerReceipt, BulkRevokeDevicesReceipt, ClientErrorCode, CommentHandBackInput,
     CommentMutationReceipt, CommentResolveInput, CreateCommentInput, DeleteThreadInput,
-    DevicesResponse, EditorBaseView, EditorChangesView, EditorDirListing, EditorFileStat,
-    EditorFileView, EditorWriteInput, EditorWriteOutcome, ForkSessionInput, HealthResponse,
-    HeartbeatInput, ListCommentsQuery, ListCommentsResponse, ListReviewTicksQuery,
-    ListReviewTicksResponse, LocalTranscriptEvent, ModelOptionView, PairingDecisionInput,
-    PairingDecisionReceipt, PairingStartInput, PairingTicketView, ProjectActionInput,
-    ProjectActionReceipt, ProjectsResponse, ReadThreadEntryDetailInput, ReadThreadTranscriptInput,
-    RenameThreadInput, RepairWorkspaceInput, RequestReviewInput, RequestReviewReceipt,
-    ResolvedWorkspace, ResumeSessionInput, ReviewAcceptReceipt, ReviewActionInput,
-    ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
+    DevicesResponse, EditorBaseView, EditorBranchInput, EditorBranchesView, EditorChangesView,
+    EditorDirListing, EditorFileStat, EditorFileView, EditorSwitchReceipt, EditorWorktreeReceipt,
+    EditorWriteInput, EditorWriteOutcome, ForkSessionInput, HealthResponse, HeartbeatInput,
+    ListCommentsQuery, ListCommentsResponse, ListReviewTicksQuery, ListReviewTicksResponse,
+    LocalTranscriptEvent, ModelOptionView, PairingDecisionInput, PairingDecisionReceipt,
+    PairingStartInput, PairingTicketView, ProjectActionInput, ProjectActionReceipt,
+    ProjectsResponse, ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput,
+    RepairWorkspaceInput, RequestReviewInput, RequestReviewReceipt, ResolvedWorkspace,
+    ResumeSessionInput, ReviewAcceptReceipt, ReviewActionInput, ReviewDeleteReceipt,
+    ReviewsResponse, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
     SessionSnapshotCompactProfile, SetThreadFlagInput, SkillInvocationInput, StartSessionInput,
     StartTeamInput, StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt, StopTurnInput,
     SubmitAskUserAnswerInput, TeamActionInput, TeamActionReceipt, TeamFileResponse, TeamMarkInput,
@@ -449,6 +450,9 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         )
         .route("/api/editor/stat", get(editor_stat))
         .route("/api/editor/base", get(editor_base))
+        .route("/api/editor/branches", get(editor_branches))
+        .route("/api/editor/switch", post(editor_switch))
+        .route("/api/editor/worktree", post(editor_worktree))
         .route("/api/editor/changes", get(editor_changes))
         .route(
             "/api/thread/workspace",
@@ -1259,6 +1263,42 @@ async fn editor_base(
         .editor_base_file(query.device_id.as_deref(), &query.root, &query.path)
         .await
         .map(|base| Json(ApiEnvelope::ok(base)))
+        .map_err(bad_request)
+}
+
+async fn editor_branches(
+    State(context): State<AppContext>,
+    Query(query): Query<EditorChangesQuery>,
+) -> Result<Json<ApiEnvelope<EditorBranchesView>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_branches(query.device_id.as_deref(), &query.root)
+        .await
+        .map(|branches| Json(ApiEnvelope::ok(branches)))
+        .map_err(bad_request)
+}
+
+async fn editor_switch(
+    State(context): State<AppContext>,
+    Json(input): Json<EditorBranchInput>,
+) -> Result<Json<ApiEnvelope<EditorSwitchReceipt>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_switch_branch(input)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        .map_err(bad_request)
+}
+
+async fn editor_worktree(
+    State(context): State<AppContext>,
+    Json(input): Json<EditorBranchInput>,
+) -> Result<Json<ApiEnvelope<EditorWorktreeReceipt>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_add_worktree(input)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(bad_request)
 }
 

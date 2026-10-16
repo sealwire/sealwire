@@ -500,6 +500,166 @@ async fn choose_free_slot(
     ))
 }
 
+/// A branch the user picked in the editor: one that exists here, a remote-tracking one,
+/// or a new one to create from the folder's current commit.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BranchChoice<'a> {
+    Local(&'a str),
+    Remote(&'a str),
+    New(&'a str),
+}
+
+/// A name git takes as a branch and never as an option.
+async fn validate_branch_name(workspace: &TrustedWorkspace, name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.starts_with('-')
+        || !git_ok(workspace, &["check-ref-format", "--branch", name]).await
+    {
+        return Err(format!("{name:?} is not a valid branch name"));
+    }
+    Ok(())
+}
+
+async fn ref_exists(workspace: &TrustedWorkspace, full_ref: &str) -> bool {
+    git_ok(workspace, &["rev-parse", "--verify", "--quiet", full_ref]).await
+}
+
+/// Check the choice against the repository: the branch must exist (or, for a new one,
+/// must not), and its name can never be read as an option. Returns the local name.
+async fn checked_branch<'a>(
+    workspace: &TrustedWorkspace,
+    choice: BranchChoice<'a>,
+) -> Result<&'a str, String> {
+    match choice {
+        BranchChoice::Local(name) => {
+            validate_branch_name(workspace, name).await?;
+            if !ref_exists(workspace, &format!("refs/heads/{name}")).await {
+                return Err(format!("there is no branch named {name}"));
+            }
+            Ok(name)
+        }
+        BranchChoice::New(name) => {
+            validate_branch_name(workspace, name).await?;
+            if ref_exists(workspace, &format!("refs/heads/{name}")).await {
+                return Err(format!("a branch named {name} already exists"));
+            }
+            Ok(name)
+        }
+        BranchChoice::Remote(name) => {
+            if name.starts_with('-')
+                || !ref_exists(workspace, &format!("refs/remotes/{name}")).await
+            {
+                return Err(format!("there is no remote branch named {name}"));
+            }
+            let local = name.split_once('/').map(|(_, rest)| rest).unwrap_or(name);
+            validate_branch_name(workspace, local).await?;
+            Ok(local)
+        }
+    }
+}
+
+fn git_refusal(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else {
+        stderr
+    }
+}
+
+/// `git switch` in the user's own tree, on their say-so. Hooks stay off: a checkout fires
+/// `post-checkout` as the relay user, outside any agent sandbox. No `--force`: git's own
+/// refusal to overwrite uncommitted work is the protection, and its words reach the user.
+pub(crate) async fn switch_branch(
+    workspace: &TrustedWorkspace,
+    choice: BranchChoice<'_>,
+) -> Result<(), String> {
+    let local = checked_branch(workspace, choice).await?;
+    let output = match choice {
+        BranchChoice::Local(_) => {
+            run_git_capture(workspace, &["-c", NO_HOOKS, "switch", "--no-guess", local]).await?
+        }
+        BranchChoice::Remote(remote) => {
+            run_git_capture(
+                workspace,
+                &["-c", NO_HOOKS, "switch", "--track", "-c", local, remote],
+            )
+            .await?
+        }
+        BranchChoice::New(_) => {
+            run_git_capture(workspace, &["-c", NO_HOOKS, "switch", "-c", local]).await?
+        }
+    };
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(git_refusal(&output))
+    }
+}
+
+/// A worktree for one of the user's branches, nested beside the task worktrees so the
+/// allowed root already reaches it. Returns its path.
+pub(crate) async fn add_branch_worktree(
+    origin: &TrustedWorkspace,
+    choice: BranchChoice<'_>,
+    path_guard: &(dyn Fn(&str) -> Result<(), String> + Sync),
+) -> Result<String, String> {
+    let main = repo_main_worktree(origin).await?;
+    path_guard(main.as_str())?;
+    let local = checked_branch(origin, choice).await?;
+    let start = match choice {
+        BranchChoice::New(_) => Some(
+            git_line(origin, &["rev-parse", "--verify", "HEAD"])
+                .await
+                .ok_or_else(|| "this folder has no commit to branch from yet".to_string())?,
+        ),
+        _ => None,
+    };
+    let override_root = std::env::var(TASK_WORKTREE_ROOT_ENV).ok();
+    let base = resolve_worktrees_base(main.as_str(), override_root.as_deref());
+    let slug = task_slug(local);
+    let path = (1..=MAX_SLUG_ATTEMPTS)
+        .map(|attempt| {
+            if attempt == 1 {
+                base.join(&slug)
+            } else {
+                base.join(format!("{slug}-{attempt}"))
+            }
+        })
+        .find(|candidate| !candidate.exists())
+        .map(|candidate| normalize_cwd(&candidate.to_string_lossy()))
+        .ok_or_else(|| format!("no free folder for a {local} worktree"))?;
+    path_guard(&path)?;
+    ensure_sealwire_excluded(&main).await;
+    let output = match choice {
+        BranchChoice::Local(name) => {
+            run_git_capture(&main, &["-c", NO_HOOKS, "worktree", "add", &path, name]).await?
+        }
+        BranchChoice::New(name) => {
+            let start = start.as_deref().unwrap_or("HEAD");
+            run_git_capture(
+                &main,
+                &["-c", NO_HOOKS, "worktree", "add", "-b", name, &path, start],
+            )
+            .await?
+        }
+        BranchChoice::Remote(remote) => {
+            run_git_capture(
+                &main,
+                &[
+                    "-c", NO_HOOKS, "worktree", "add", "--track", "-b", local, &path, remote,
+                ],
+            )
+            .await?
+        }
+    };
+    if output.status.success() {
+        Ok(path)
+    } else {
+        Err(git_refusal(&output))
+    }
+}
+
 /// `git worktree add`, with the three flags that matter.
 ///
 /// `-b` is not optional: the target branch is normally already checked out in the

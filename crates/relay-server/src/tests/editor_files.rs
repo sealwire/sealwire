@@ -4,7 +4,7 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
-fn query_value(value: &str) -> String {
+pub(super) fn query_value(value: &str) -> String {
     value
         .bytes()
         .map(|byte| match byte {
@@ -20,7 +20,7 @@ fn revision(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
-fn git(root: &str, args: &[&str]) {
+pub(super) fn git(root: &str, args: &[&str]) {
     let out = std::process::Command::new("git")
         .args(args)
         .current_dir(root)
@@ -31,7 +31,7 @@ fn git(root: &str, args: &[&str]) {
 
 /// A repo with an ignored build tree, a committed source file, one modified tracked file
 /// (`seed.txt`) and one untracked file (`new.txt`).
-async fn editor_repo() -> (tempfile::TempDir, String) {
+pub(super) async fn editor_repo() -> (tempfile::TempDir, String) {
     let dir = tempfile::TempDir::new().expect("tmp");
     let root = seed_git_repo(dir.path()).await;
     std::fs::write(format!("{root}/.gitignore"), "target/\n").unwrap();
@@ -46,7 +46,7 @@ async fn editor_repo() -> (tempfile::TempDir, String) {
     (dir, root)
 }
 
-async fn trusted_router(root: &str) -> axum::Router {
+pub(super) async fn trusted_router(root: &str) -> axum::Router {
     git_context_router(root, vec![root.to_string()], vec![root.to_string()]).await
 }
 

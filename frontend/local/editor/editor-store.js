@@ -130,6 +130,8 @@ export function createEditorStore({
     expanded: { "": true },
     changedOnly: false,
     changes: { entries: [], loading: false, complete: true, isRepo: true },
+    // The folder's branches and worktrees, read when the location menu opens.
+    branches: { loading: false, error: null, data: null, acting: false },
     tabsByRoot: persisted.tabsByRoot && typeof persisted.tabsByRoot === "object" ? persisted.tabsByRoot : {},
     docs: {},
     autosave,
@@ -254,7 +256,9 @@ export function createEditorStore({
       root,
       roots: roots || get().roots,
       rootError: null,
-      ...(changed ? { dirs: {}, expanded: { "": true } } : {}),
+      ...(changed
+        ? { dirs: {}, expanded: { "": true }, branches: { loading: false, error: null, data: null, acting: false } }
+        : {}),
     });
     persistSession();
     if (changed || !get().dirs[""]) {
@@ -750,6 +754,68 @@ export function createEditorStore({
     setDoc(key, { overwritten: null });
   }
 
+  async function loadBranches() {
+    const { root } = get();
+    if (!root) {
+      return;
+    }
+    set({ branches: { ...get().branches, loading: true, error: null } });
+    try {
+      const data = await api.branches(root);
+      if (get().root === root) {
+        set({ branches: { loading: false, error: null, data, acting: false }, roots: data.worktrees || get().roots });
+        persistSession();
+      }
+    } catch (error) {
+      if (get().root === root) {
+        set({ branches: { ...get().branches, loading: false, error: error.message } });
+      }
+    }
+  }
+
+  /**
+   * Switch the folder on screen to another branch. Unsaved edits are saved first; any
+   * file the switch changes then reloads, or turns into a conflict if it had edits.
+   */
+  async function switchBranch({ branch, create = false, remote = false }) {
+    const { root } = get();
+    if (!root || !branch || get().branches.acting) {
+      return false;
+    }
+    flushSaves();
+    set({ branches: { ...get().branches, acting: true, error: null } });
+    try {
+      await api.switchBranch({ root, branch, create, remote });
+      set({ branches: { ...get().branches, acting: false } });
+      refreshTree();
+      await checkDisk(root);
+      await loadBranches();
+      return true;
+    } catch (error) {
+      set({ branches: { ...get().branches, acting: false, error: error.message } });
+      return false;
+    }
+  }
+
+  /** Check a branch out in a new worktree and show that worktree. */
+  async function addWorktree({ branch, create = false, remote = false }) {
+    const { root } = get();
+    if (!root || !branch || get().branches.acting) {
+      return null;
+    }
+    set({ branches: { ...get().branches, acting: true, error: null } });
+    try {
+      const { path } = await api.addWorktree({ root, branch, create, remote });
+      set({ branches: { ...get().branches, acting: false } });
+      await setRoot(path);
+      await loadBranches();
+      return path;
+    } catch (error) {
+      set({ branches: { ...get().branches, acting: false, error: error.message } });
+      return null;
+    }
+  }
+
   function rememberCursor(key, position) {
     if (key && position) {
       cursors.set(key, position);
@@ -846,6 +912,9 @@ export function createEditorStore({
     cursorOf,
     loadBase,
     showInEditor,
+    loadBranches,
+    switchBranch,
+    addWorktree,
     setAutosave,
   };
 }

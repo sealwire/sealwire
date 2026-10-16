@@ -1448,6 +1448,19 @@ impl RelayState {
         })
     }
 
+    /// True if any thread is mid-turn anywhere inside `tree`. Containment, not equality:
+    /// an agent started in a subfolder still has its files changed by a branch switch.
+    /// Reviewers count too — a switch would change the tree under their reading.
+    pub(crate) fn has_working_thread_under(&self, tree: &str) -> bool {
+        let tree = std::path::Path::new(tree);
+        self.runtimes.iter().any(|(thread_id, runtime)| {
+            runtime.is_working()
+                && !runtime.current_cwd.is_empty()
+                && std::path::Path::new(&runtime.current_cwd).starts_with(tree)
+                && !self.locally_deleted_thread_ids.contains(thread_id)
+        })
+    }
+
     /// The workspace cwd for an arbitrary thread (not just the active one): its live
     /// runtime's `current_cwd`, falling back to the cached thread row. Used to scope a
     /// review at the NAMED parent thread's workspace instead of the active thread's.

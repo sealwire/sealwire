@@ -8,10 +8,13 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 use super::team_diff::{resolve_worktree_file_path, validate_repo_relative_path};
+use super::worktree::{add_branch_worktree, git_line, switch_branch, BranchChoice};
 use super::*;
 use crate::protocol::{
-    EditorBaseView, EditorChangeEntry, EditorChangesView, EditorDirEntry, EditorDirListing,
-    EditorEntryKind, EditorFileStat, EditorFileView, EditorWriteInput, EditorWriteOutcome,
+    EditorBaseView, EditorBranchInput, EditorBranchView, EditorBranchesView, EditorChangeEntry,
+    EditorChangesView, EditorDirEntry, EditorDirListing, EditorEntryKind, EditorFileStat,
+    EditorFileView, EditorSwitchReceipt, EditorWorktreeReceipt, EditorWriteInput,
+    EditorWriteOutcome,
 };
 
 /// The editor holds the whole text in memory and every save sends all of it back.
@@ -344,6 +347,134 @@ impl AppState {
         Ok(view)
     }
 
+    /// Why a branch switch in this folder would be refused right now. The whole worktree
+    /// counts, not just the folder the editor is rooted at: a switch changes all of it.
+    async fn editor_switch_blocker(&self, workspace: &TrustedWorkspace) -> Option<String> {
+        let tree = git_line(workspace, &["rev-parse", "--show-toplevel"])
+            .await
+            .map(|top| normalize_cwd(&top))
+            .unwrap_or_else(|| workspace.as_str().to_string());
+        let relay = self.relay.read().await;
+        if relay.is_cwd_team_locked(&tree) {
+            return Some("a task team is working in this folder".to_string());
+        }
+        if relay.has_working_thread_under(&tree) {
+            return Some(
+                "an agent is working in this folder right now; switching would change files under it"
+                    .to_string(),
+            );
+        }
+        None
+    }
+
+    pub(crate) async fn editor_branches(
+        &self,
+        device_id: Option<&str>,
+        root: &str,
+    ) -> Result<EditorBranchesView, String> {
+        let workspace = self.editor_workspace(device_id, root).await?;
+        let current = git_line(&workspace, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await;
+        let worktrees = list_worktrees_in(&workspace).await;
+        let refs = tokio::time::timeout(EDITOR_GIT_BUDGET, async {
+            run_git_capture(
+                &workspace,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)%00%(committerdate:unix)",
+                    "refs/heads",
+                    "refs/remotes",
+                ],
+            )
+            .await
+            .ok()
+        })
+        .await
+        .ok()
+        .flatten();
+        let mut branches: Vec<EditorBranchView> = refs
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let (refname, when) = line.split_once('\0')?;
+                let (name, remote) = if let Some(name) = refname.strip_prefix("refs/heads/") {
+                    (name, false)
+                } else {
+                    (refname.strip_prefix("refs/remotes/")?, true)
+                };
+                if remote && name.ends_with("/HEAD") {
+                    return None;
+                }
+                let worktree = if remote {
+                    None
+                } else {
+                    worktrees
+                        .iter()
+                        .find(|tree| tree.branch.as_deref() == Some(name))
+                        .map(|tree| tree.path.clone())
+                };
+                Some(EditorBranchView {
+                    name: name.to_string(),
+                    remote,
+                    worktree,
+                    committed_at: when.trim().parse().ok(),
+                })
+            })
+            .collect();
+        branches.sort_by(|a, b| {
+            b.committed_at
+                .cmp(&a.committed_at)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        let busy = self.editor_switch_blocker(&workspace).await;
+        Ok(EditorBranchesView {
+            root: workspace.as_str().to_string(),
+            current,
+            branches,
+            worktrees,
+            busy,
+        })
+    }
+
+    pub(crate) async fn editor_switch_branch(
+        &self,
+        input: EditorBranchInput,
+    ) -> Result<EditorSwitchReceipt, String> {
+        let device_id = require_device_id(input.device_id.clone())?;
+        let workspace = self.editor_workspace(Some(&device_id), &input.root).await?;
+        if let Some(reason) = self.editor_switch_blocker(&workspace).await {
+            return Err(format!("Not switched: {reason}."));
+        }
+        let choice = branch_choice(&input);
+        switch_branch(&workspace, choice).await?;
+        let current = git_line(&workspace, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await;
+        Ok(EditorSwitchReceipt {
+            root: workspace.as_str().to_string(),
+            current,
+        })
+    }
+
+    pub(crate) async fn editor_add_worktree(
+        &self,
+        input: EditorBranchInput,
+    ) -> Result<EditorWorktreeReceipt, String> {
+        let device_id = require_device_id(input.device_id.clone())?;
+        let workspace = self.editor_workspace(Some(&device_id), &input.root).await?;
+        let scope = {
+            let relay = self.relay.read().await;
+            relay.workspace_scope(Some(&device_id))
+        };
+        let choice = branch_choice(&input);
+        let path = add_branch_worktree(&workspace, choice, &|planned| {
+            scope
+                .ensure(planned)
+                .map_err(|_| EDITOR_OUT_OF_SCOPE.to_string())
+        })
+        .await?;
+        Ok(EditorWorktreeReceipt { path })
+    }
+
     pub(crate) async fn editor_changes(
         &self,
         device_id: Option<&str>,
@@ -389,6 +520,16 @@ impl AppState {
             complete: true,
             entries,
         })
+    }
+}
+
+fn branch_choice(input: &EditorBranchInput) -> BranchChoice<'_> {
+    if input.create {
+        BranchChoice::New(&input.branch)
+    } else if input.remote {
+        BranchChoice::Remote(&input.branch)
+    } else {
+        BranchChoice::Local(&input.branch)
     }
 }
 

@@ -23,6 +23,16 @@ export function createEditorApi({ apiFetch, getDeviceId }) {
     return unwrap(await apiFetch(`${path}?${query}`, { method: "GET" }));
   }
 
+  async function post(path, body) {
+    return unwrap(
+      await apiFetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, device_id: getDeviceId() }),
+      })
+    );
+  }
+
   return {
     listDir: (root, dir) => get("/api/editor/dir", { root, dir }),
     readFile: (root, path) => get("/api/editor/file", { root, path }),
@@ -30,6 +40,13 @@ export function createEditorApi({ apiFetch, getDeviceId }) {
     statFiles: (root, paths) => get("/api/editor/stat", { root, paths: JSON.stringify(paths) }),
     changes: (root) => get("/api/editor/changes", { root }),
     threadWorkspace: (threadId) => get("/api/thread/workspace", { thread_id: threadId }),
+    branches: (root) => get("/api/editor/branches", { root }),
+    async switchBranch({ root, branch, create = false, remote = false }) {
+      return post("/api/editor/switch", { root, branch, create, remote });
+    },
+    async addWorktree({ root, branch, create = false, remote = false }) {
+      return post("/api/editor/worktree", { root, branch, create, remote });
+    },
     async writeFile({ root, path, content, expectedRevision }) {
       return unwrap(
         await apiFetch("/api/editor/file", {
