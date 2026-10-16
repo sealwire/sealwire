@@ -619,3 +619,122 @@ test("an untick survives leaving Changes and every refresh of the list", async (
   await settle();
   assert.deepEqual(store.getState().selection.ticked, ["a.rs"]);
 });
+
+test("taking the disk version of a restored draft keeps a binary file uneditable", async () => {
+  const storage = memoryStorage();
+  {
+    const { store, timers } = await openEditor({ storage, autosave: false });
+    store.edit("a.rs", "fn draft() {}\n");
+    await timers.fire(400);
+  }
+  const relay = fakeRelay({ "a.rs": { bytes: "\u0000binary" } });
+  const store = createEditorStore({ api: relay.api, storage, autosave: true, timers: manualTimers() });
+  await store.setRoot(ROOT);
+  store.openFile("a.rs");
+  await settle();
+  const doc = () => store.getState().docs[docKey(ROOT, "a.rs")];
+  assert.ok(doc().conflict, "the draft meets a changed file");
+  await store.resolveConflict("a.rs", "theirs");
+  assert.equal(doc().binary, true);
+  store.edit("a.rs", "typed\n");
+  await store.save("a.rs");
+  assert.equal(relay.writes.length, 0);
+});
+
+test("a switch waits on saves for the same files opened from another folder, and on edits made while it waits", async () => {
+  const relay = fakeRelay({ "a.rs": "a\n", "b.rs": "b\n" });
+  const timers = manualTimers();
+  const store = createEditorStore({ api: relay.api, storage: memoryStorage(), autosave: true, timers });
+  relay.api.branches = async () => ({ current: "topic", branches: [], worktrees: [{ path: "/repo", branch: "main" }], busy: null });
+  let switched = 0;
+  relay.api.switchBranch = async () => {
+    switched += 1;
+    return { current: "topic" };
+  };
+  await store.setRoot("/repo/src");
+  store.openFile("a.rs");
+  await settle();
+  const write = relay.api.writeFile;
+  let release;
+  relay.api.writeFile = (request) => new Promise((resolve) => {
+    release = () => resolve(write(request));
+  });
+  store.edit("a.rs", "a saving\n");
+  await timers.fire(AUTOSAVE_DELAY_MS);
+  await store.setRoot("/repo");
+  await store.loadBranches();
+  const switching = store.switchBranch({ branch: "topic" });
+  await settle();
+  assert.equal(switched, 0, "a save under /repo/src is inside the tree being switched");
+  // While it waits, the user types into another file of the same tree with autosave off.
+  store.setAutosave(false);
+  store.openFile("b.rs");
+  await settle();
+  store.edit("b.rs", "b typed while waiting\n");
+  relay.api.writeFile = write;
+  release();
+  assert.equal(await switching, false);
+  assert.equal(switched, 0, "an edit made during the wait still blocks the switch");
+  assert.match(store.getState().branches.error, /b\.rs/);
+});
+
+test("a switch that finishes after the user moved on leaves the new folder's branch state alone", async () => {
+  const { relay, store } = await openEditor();
+  relay.api.branches = async (root) => ({ root, current: "main", branches: [], worktrees: [], busy: null });
+  relay.api.switchBranch = async () => ({ current: "topic" });
+  let statRelease;
+  const stat = relay.api.statFiles;
+  relay.api.statFiles = (root, paths) => new Promise((resolve) => {
+    statRelease = () => resolve(stat(root, paths));
+  });
+  const switching = store.switchBranch({ branch: "topic" });
+  await settle();
+  relay.api.statFiles = stat;
+  await store.setRoot("/elsewhere");
+  let finishAdd;
+  relay.api.addWorktree = () => new Promise((resolve) => (finishAdd = resolve));
+  const adding = store.addWorktree({ branch: "spike", create: true });
+  await settle();
+  assert.equal(store.getState().branches.acting, true);
+  statRelease();
+  await switching;
+  await settle();
+  assert.equal(store.getState().branches.acting, true, "B's own action is still under way");
+  finishAdd({ path: "/elsewhere/.sealwire/worktrees/spike" });
+  await adding;
+});
+
+test("ticks are kept per folder, so going away and back does not tick a file again", async () => {
+  const relay = fakeRelay({});
+  relay.api.changes = async (root) => ({
+    entries: root === "/a" ? [{ path: "a.txt", status: "M" }, { path: "unticked.txt", status: "?" }] : [{ path: "b.txt", status: "M" }],
+    complete: true,
+    is_repo: true,
+  });
+  const store = createEditorStore({ api: relay.api, storage: memoryStorage(), timers: manualTimers() });
+  await store.setRoot("/a");
+  await settle();
+  store.setTicked(["unticked.txt"], false);
+  await store.setRoot("/b");
+  await settle();
+  await store.setRoot("/a");
+  await settle();
+  assert.deepEqual(store.getState().selection.ticked, ["a.txt"]);
+});
+
+test("a branch action picked in one folder never runs in another", async () => {
+  const { relay, store } = await openEditor();
+  const calls = [];
+  relay.api.switchBranch = async (request) => {
+    calls.push(["switch", request.root]);
+    return { current: "topic" };
+  };
+  relay.api.addWorktree = async (request) => {
+    calls.push(["worktree", request.root]);
+    return { path: "/x" };
+  };
+  await store.setRoot("/c");
+  assert.equal(await store.switchBranch({ branch: "topic", root: ROOT }), false);
+  assert.equal(await store.addWorktree({ branch: "topic", root: ROOT }), null);
+  assert.deepEqual(calls, [], "the menu was opened for /repo; the folder is now /c");
+});

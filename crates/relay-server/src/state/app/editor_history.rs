@@ -1,7 +1,8 @@
 //! The editor's History: the log of the folder's repository, one commit's files, and one
 //! file before and after a commit. Read-only, and kept to the folder the editor is rooted at.
 
-use tokio::io::AsyncReadExt;
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::editor_files::{
     editable_text, GitProbe, GitView, EDITOR_FILE_MAX_BYTES, EDITOR_GIT_BUDGET,
@@ -21,7 +22,9 @@ const EDITOR_COMMIT_FILES_MAX: usize = 2000;
 const EDITOR_COMMIT_FILES_BYTES: usize = 2 * 1024 * 1024;
 /// A log over a large history, narrowed to a path, walks every commit.
 const EDITOR_HISTORY_BUDGET: Duration = Duration::from_secs(5);
-const LOG_FORMAT: &str = "--format=%H%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s";
+/// NUL between fields: it is the one byte git keeps out of names and subjects.
+const LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%at%x00%D%x00%s%x00";
+const LOG_FIELDS: usize = 6;
 
 impl AppState {
     pub(crate) async fn editor_log(&self, query: EditorLogQuery) -> Result<EditorLogView, String> {
@@ -57,6 +60,8 @@ impl AppState {
             complete,
             commits: Vec::new(),
             more: false,
+            tips: String::new(),
+            moved: false,
         };
         let git = match GitView::open(&workspace).await {
             GitProbe::Repo(git) => git,
@@ -92,21 +97,39 @@ impl AppState {
                 "--fixed-strings".to_string(),
             ]);
         }
-        match query
+        let branch = match query
             .branch
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
         {
-            Some(name) => args.push(branch_ref(&workspace, name, query.remote).await?),
-            None => {
-                args.extend(["--branches".to_string(), "--remotes".to_string()]);
-                // A repository with no commit yet has no HEAD, and git refuses to log one.
-                if git_succeeds(&workspace, &["rev-parse", "--verify", "--quiet", "HEAD"]).await {
-                    args.push("HEAD".to_string());
-                }
-            }
+            Some(name) => Some(branch_ref(&workspace, name, query.remote).await?),
+            None => None,
+        };
+        // Pages are walked from the commits the branches pointed at, named by id, so a
+        // branch moving between pages cannot shift the offset; the caller starts over.
+        let Some(tips) = log_tips(&workspace, branch.as_deref()).await else {
+            return Ok(empty(true, false));
+        };
+        let tips_key = format!("{:x}", Sha256::digest(tips.join("\n").as_bytes()));
+        if query
+            .tips
+            .as_deref()
+            .is_some_and(|seen| !seen.is_empty() && seen != tips_key)
+        {
+            return Ok(EditorLogView {
+                tips: tips_key,
+                moved: true,
+                ..empty(true, true)
+            });
         }
+        if tips.is_empty() {
+            return Ok(EditorLogView {
+                tips: tips_key,
+                ..empty(true, true)
+            });
+        }
+        args.push("--stdin".to_string());
         args.push("--".to_string());
         if let Some(path) = path {
             args.push(path);
@@ -115,15 +138,27 @@ impl AppState {
         }
 
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let raw = match git_read(&workspace, &args, EDITOR_LOG_BYTES, EDITOR_HISTORY_BUDGET).await {
+        let input: Vec<u8> = tips
+            .iter()
+            .flat_map(|id| format!("{id}\n").into_bytes())
+            .collect();
+        let raw = match git_read_with(
+            &workspace,
+            &args,
+            Some(input),
+            EDITOR_LOG_BYTES,
+            EDITOR_HISTORY_BUDGET,
+        )
+        .await
+        {
             GitRead::Out(raw) => raw,
             GitRead::Late | GitRead::TooBig(_) => return Ok(empty(true, false)),
             GitRead::Failed => return Err("git could not read this folder's history".to_string()),
         };
-        let mut commits: Vec<EditorLogCommit> = String::from_utf8_lossy(&raw)
-            .lines()
-            .filter_map(parse_log_line)
-            .collect();
+        let Some(mut commits) = parse_log(&raw) else {
+            tracing::warn!("editor history: git log output did not split into whole commits");
+            return Ok(empty(true, false));
+        };
         let more = commits.len() > limit;
         commits.truncate(limit);
         Ok(EditorLogView {
@@ -132,6 +167,8 @@ impl AppState {
             complete: true,
             commits,
             more,
+            tips: tips_key,
+            moved: false,
         })
     }
 
@@ -289,12 +326,26 @@ async fn git_read(
     limit: usize,
     budget: Duration,
 ) -> GitRead {
+    git_read_with(workspace, args, None, limit, budget).await
+}
+
+async fn git_read_with(
+    workspace: &TrustedWorkspace,
+    args: &[&str],
+    input: Option<Vec<u8>>,
+    limit: usize,
+    budget: Duration,
+) -> GitRead {
     let run = async {
         let Ok(mut child) = background_git(workspace)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .kill_on_drop(true)
             .spawn()
         else {
@@ -303,13 +354,16 @@ async fn git_read(
         let Some(mut stdout) = child.stdout.take() else {
             return GitRead::Failed;
         };
+        let stdin = child.stdin.take();
+        let write = async move {
+            if let (Some(mut stdin), Some(input)) = (stdin, input) {
+                let _ = stdin.write_all(&input).await;
+            }
+        };
         let mut bytes = Vec::new();
-        if (&mut stdout)
-            .take(limit as u64 + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .is_err()
-        {
+        let mut capped = (&mut stdout).take(limit as u64 + 1);
+        let ((), read) = tokio::join!(write, capped.read_to_end(&mut bytes));
+        if read.is_err() {
             return GitRead::Failed;
         }
         if bytes.len() > limit {
@@ -327,6 +381,67 @@ async fn git_read(
     tokio::time::timeout(budget, run)
         .await
         .unwrap_or(GitRead::Late)
+}
+
+/// The commits a log starts from: the one branch, or every local and remote-tracking branch
+/// plus HEAD. Sorted, so the same refs always give the same key. `None` when git did not say.
+async fn log_tips(workspace: &TrustedWorkspace, branch: Option<&str>) -> Option<Vec<String>> {
+    let mut tips = Vec::new();
+    match branch {
+        Some(full) => {
+            let peeled = format!("{full}^{{commit}}");
+            match git_read(
+                workspace,
+                &["rev-parse", "--verify", "--quiet", &peeled],
+                4096,
+                EDITOR_GIT_BUDGET,
+            )
+            .await
+            {
+                GitRead::Out(raw) => tips.push(String::from_utf8_lossy(&raw).trim().to_string()),
+                _ => return None,
+            }
+        }
+        None => {
+            match git_read(
+                workspace,
+                &[
+                    "for-each-ref",
+                    "--format=%(objectname)",
+                    "refs/heads",
+                    "refs/remotes",
+                ],
+                EDITOR_LOG_BYTES,
+                EDITOR_GIT_BUDGET,
+            )
+            .await
+            {
+                GitRead::Out(raw) => tips.extend(
+                    String::from_utf8_lossy(&raw)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string),
+                ),
+                _ => return None,
+            }
+            // A detached HEAD is on no branch; a repository with no commit has none at all.
+            if let GitRead::Out(raw) = git_read(
+                workspace,
+                &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                4096,
+                EDITOR_GIT_BUDGET,
+            )
+            .await
+            {
+                tips.push(String::from_utf8_lossy(&raw).trim().to_string());
+            }
+        }
+    }
+    tips.retain(|id| commit_id(id).is_ok());
+    tips.sort();
+    tips.dedup();
+    Some(tips)
 }
 
 async fn git_succeeds(workspace: &TrustedWorkspace, args: &[&str]) -> bool {
@@ -386,35 +501,44 @@ fn filter_text(value: Option<&str>, what: &str) -> Result<Option<String>, String
     Ok(Some(value.to_string()))
 }
 
-fn parse_log_line(line: &str) -> Option<EditorLogCommit> {
-    let mut fields = line.splitn(6, '\x1f');
-    let id = fields.next()?.to_string();
-    let parents = fields
-        .next()?
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
-    let author = fields.next()?.to_string();
-    let time = fields.next()?.trim().parse().unwrap_or_default();
-    // Ref names cannot hold a space, so git's ", " separator is unambiguous.
-    let refs = fields
-        .next()?
-        .split(", ")
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect();
-    let subject = fields.next().unwrap_or_default().to_string();
-    if id.is_empty() {
+/// `LOG_FORMAT` output: six NUL-ended fields per commit, then git's newline. `None` when it
+/// does not split into whole commits, so a shifted field is never shown as another.
+fn parse_log(raw: &[u8]) -> Option<Vec<EditorLogCommit>> {
+    let mut fields: Vec<&[u8]> = raw.split(|byte| *byte == 0).collect();
+    // The text after the last NUL is git's final newline, or nothing.
+    let tail = fields.pop().unwrap_or_default();
+    if !tail.iter().all(|byte| *byte == b'\n') || fields.len() % LOG_FIELDS != 0 {
         return None;
     }
-    Some(EditorLogCommit {
-        id,
-        parents,
-        author,
-        time,
-        refs,
-        subject,
-    })
+    let text = |field: &[u8]| String::from_utf8_lossy(field).to_string();
+    let mut commits = Vec::new();
+    for chunk in fields.chunks(LOG_FIELDS) {
+        let id = text(chunk[0].strip_prefix(b"\n").unwrap_or(chunk[0]));
+        commit_id(&id).ok()?;
+        let parents: Vec<String> = text(chunk[1])
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        if parents.iter().any(|parent| commit_id(parent).is_err()) {
+            return None;
+        }
+        let time = text(chunk[3]).trim().parse().ok()?;
+        // Ref names cannot hold a space, so git's ", " separator is unambiguous.
+        let refs = text(chunk[4])
+            .split(", ")
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect();
+        commits.push(EditorLogCommit {
+            id,
+            parents,
+            author: text(chunk[2]),
+            time,
+            refs,
+            subject: text(chunk[5]),
+        });
+    }
+    Some(commits)
 }
 
 /// `diff-tree -z --name-status`: a status, then one path, or two after a rename or copy.
@@ -424,24 +548,30 @@ fn parse_name_status(raw: &[u8], cut: bool) -> (Vec<EditorCommitFileEntry>, bool
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty());
     let mut files = Vec::new();
+    // A name that is not UTF-8 is left out rather than shown as a lossy copy, which could
+    // read as (and open) another file's name.
+    let mut unreadable = false;
+    let name = |field: &[u8]| std::str::from_utf8(field).ok().map(str::to_string);
     while let Some(status) = fields.next() {
         let letter = status.first().copied().unwrap_or(b'M');
         let Some(first) = fields.next() else {
             break;
         };
-        let first = String::from_utf8_lossy(first).to_string();
         let entry = if matches!(letter, b'R' | b'C') {
             let Some(second) = fields.next() else {
                 break;
             };
-            EditorCommitFileEntry {
-                path: String::from_utf8_lossy(second).to_string(),
-                old_path: Some(first),
-                status: if letter == b'R' { "R" } else { "A" }.to_string(),
+            match (name(first), name(second)) {
+                (Some(old), Some(path)) => Some(EditorCommitFileEntry {
+                    path,
+                    old_path: Some(old),
+                    status: if letter == b'R' { "R" } else { "A" }.to_string(),
+                }),
+                _ => None,
             }
         } else {
-            EditorCommitFileEntry {
-                path: first,
+            name(first).map(|path| EditorCommitFileEntry {
+                path,
                 old_path: None,
                 status: match letter {
                     b'A' => "A",
@@ -449,14 +579,17 @@ fn parse_name_status(raw: &[u8], cut: bool) -> (Vec<EditorCommitFileEntry>, bool
                     _ => "M",
                 }
                 .to_string(),
-            }
+            })
         };
-        files.push(entry);
+        match entry {
+            Some(entry) => files.push(entry),
+            None => unreadable = true,
+        }
     }
     if cut {
         files.pop();
     }
-    let truncated = cut || files.len() > EDITOR_COMMIT_FILES_MAX;
+    let truncated = cut || unreadable || files.len() > EDITOR_COMMIT_FILES_MAX;
     files.truncate(EDITOR_COMMIT_FILES_MAX);
     (files, truncated)
 }

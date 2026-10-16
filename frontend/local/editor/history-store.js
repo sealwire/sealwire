@@ -13,7 +13,8 @@ export function graphApplies(filters) {
   return !filters.author.trim() && !filters.query.trim();
 }
 
-const emptyLog = () => ({ loading: false, error: null, commits: [], more: false, complete: true, isRepo: true });
+// `tips` names the commits the first page was walked from; later pages send it back.
+const emptyLog = () => ({ loading: false, error: null, commits: [], more: false, complete: true, isRepo: true, tips: "" });
 const emptyDetail = () => ({ id: null, loading: false, error: null, data: null });
 const emptyFile = () => ({ id: null, path: null, loading: false, error: null, data: null });
 
@@ -37,13 +38,18 @@ export function createHistoryStore({ api }) {
     if (!root) {
       return Promise.resolve();
     }
-    if (root !== get().root) {
-      logRequest += 1;
-      detailRequest += 1;
-      fileRequest += 1;
-      set({ root, filters: NO_FILTERS, log: emptyLog(), selected: null, detail: emptyDetail(), file: emptyFile() });
-    }
+    moveTo(root);
     return load();
+  }
+
+  function moveTo(root, filters = NO_FILTERS) {
+    if (root === get().root) {
+      return;
+    }
+    logRequest += 1;
+    detailRequest += 1;
+    fileRequest += 1;
+    set({ root, filters, log: emptyLog(), selected: null, detail: emptyDetail(), file: emptyFile() });
   }
 
   async function load({ append = false } = {}) {
@@ -64,8 +70,15 @@ export function createHistoryStore({ api }) {
         query: filters.query.trim(),
         skip,
         limit: HISTORY_PAGE,
+        tips: append ? log.tips : "",
       });
       if (request !== logRequest) {
+        return;
+      }
+      if (data?.moved) {
+        // A branch moved since the first page: the offset no longer lines up, so start over.
+        set({ log: { ...get().log, loading: false } });
+        await load();
         return;
       }
       const incoming = Array.isArray(data?.commits) ? data.commits : [];
@@ -83,6 +96,7 @@ export function createHistoryStore({ api }) {
           more: Boolean(data?.more),
           complete: data?.complete !== false,
           isRepo: data?.is_repo !== false,
+          tips: data?.tips || "",
         },
       });
       if (!append && get().selected && !commits.some((commit) => commit.id === get().selected)) {
@@ -97,7 +111,12 @@ export function createHistoryStore({ api }) {
     }
   }
 
-  function setFilters(patch) {
+  /** Narrow the log. `root` is the folder the choice was made in, when it may not be shown yet. */
+  function setFilters(patch, root = get().root) {
+    if (root && root !== get().root) {
+      moveTo(root, { ...NO_FILTERS, ...patch });
+      return load();
+    }
     set({ filters: { ...get().filters, ...patch } });
     return load();
   }

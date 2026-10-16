@@ -594,14 +594,38 @@ impl AppState {
             chosen.push(path);
             paths.push(path.clone());
             // The old name is already out of the index, so it is committed but not added.
+            // A file written at the old name since is the user's to tick: committing that
+            // name would take its new contents.
             match &change.renamed_from {
-                Some(Some(source)) => paths.push(source.clone()),
+                Some(Some(source)) => {
+                    let reused = tokio::fs::symlink_metadata(Path::new(workspace.as_str()).join(source))
+                        .await
+                        .is_ok();
+                    if reused && !input.paths.contains(source) {
+                        return Err(format!(
+                            "{source} was renamed to {path} and then written again; tick {source} too, or leave the rename out"
+                        ));
+                    }
+                    paths.push(source.clone());
+                }
                 Some(None) => {
                     return Err(format!(
                         "{path} was moved here from outside this folder; commit it from the repository's top folder"
                     ))
                 }
                 None => {}
+            }
+        }
+        // A file that replaced a folder (or the reverse) names every changed path under it.
+        for path in &chosen {
+            let inside = format!("{path}/");
+            if let Some(other) = changed
+                .keys()
+                .find(|other| other.starts_with(&inside) && !input.paths.contains(other))
+            {
+                return Err(format!(
+                    "committing {path} would also take {other}, which is not ticked"
+                ));
             }
         }
         chosen.sort();

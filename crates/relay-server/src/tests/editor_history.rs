@@ -472,3 +472,132 @@ async fn editor_history_needs_a_trusted_folder_inside_the_allowed_roots() {
     let (status, body) = history(router, &elsewhere, "").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
 }
+
+#[tokio::test]
+async fn editor_history_reads_an_author_name_holding_a_separator_byte() {
+    let (_dir, root) = history_repo().await;
+    std::fs::write(format!("{root}/top.txt"), "odd author\n").unwrap();
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=Ann\u{1f}Inserted",
+            "commit",
+            "-q",
+            "-am",
+            "Odd author",
+        ],
+    );
+    let router = trusted_router(&root).await;
+    let (status, body) = history(router, &root, "&limit=1").await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let commit = &body["data"]["commits"][0];
+    assert_eq!(commit["subject"], "Odd author", "{body}");
+    assert_eq!(commit["author"], "Ann\u{1f}Inserted");
+    assert!(commit["time"].as_i64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn editor_history_next_page_never_skips_commits_when_a_branch_moves() {
+    let (_dir, root) = history_repo().await;
+    let router = trusted_router(&root).await;
+    let (_, first) = history(router.clone(), &root, "&branch=main&limit=2").await;
+    let tips = first["data"]["tips"].as_str().expect("tips").to_string();
+    let (_, all) = history(router.clone(), &root, "&branch=main").await;
+    git(&root, &["update-ref", "refs/heads/main", "HEAD~1"]);
+    let (status, next) = history(
+        router.clone(),
+        &root,
+        &format!("&branch=main&limit=50&skip=2&tips={tips}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={next}");
+    if next["data"]["moved"] == true {
+        assert_eq!(
+            subjects(&next),
+            Vec::<String>::new(),
+            "a moved branch asks for a fresh start"
+        );
+    } else {
+        let mut joined = subjects(&first);
+        joined.extend(subjects(&next));
+        assert_eq!(joined, subjects(&all), "no commit skipped");
+    }
+    assert_ne!(next["data"]["tips"].as_str().unwrap_or_default(), tips);
+}
+
+#[tokio::test]
+async fn editor_history_does_not_merge_two_file_names_that_differ_only_in_bad_bytes() {
+    let (_dir, root) = history_repo().await;
+    let blob = |text: &str| {
+        let mut child = std::process::Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(&root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let (bad, good) = (blob("bad bytes\n"), blob("good name\n"));
+    let mut listing = Vec::new();
+    listing.extend_from_slice(format!("100644 blob {bad}\todd-").as_bytes());
+    listing.extend_from_slice(b"\xff.txt\0");
+    listing.extend_from_slice(format!("100644 blob {good}\todd-\u{fffd}.txt\0").as_bytes());
+    let mut child = std::process::Command::new("git")
+        .args(["mktree", "-z"])
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(&listing).unwrap();
+    }
+    let tree = String::from_utf8(child.wait_with_output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let out = std::process::Command::new("git")
+        .args(["commit-tree", &tree, "-m", "odd names"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let id = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let router = trusted_router(&root).await;
+    let (status, body) = get_json(
+        router,
+        &format!(
+            "/api/editor/history/commit?root={}&id={id}",
+            query_value(&root)
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let paths: Vec<&str> = body["data"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        ["odd-\u{fffd}.txt"],
+        "the bad name is not shown as the good one: {body}"
+    );
+    assert_eq!(
+        body["data"]["truncated"], true,
+        "the list says it is not complete"
+    );
+}

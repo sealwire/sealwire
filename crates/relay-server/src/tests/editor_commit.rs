@@ -372,3 +372,62 @@ async fn editor_commit_with_a_long_message_and_a_noisy_hook_does_not_hang() {
     let (status, body) = reply.expect("the commit finished instead of waiting on full pipes");
     assert_eq!(status, StatusCode::OK, "body={body}");
 }
+
+#[tokio::test]
+async fn a_rename_whose_old_name_was_written_again_needs_that_file_ticked_too() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["mv", "src/lib.rs", "src/core.rs"]);
+    std::fs::write(format!("{root}/src/lib.rs"), "private work\n").unwrap();
+    let before = head_subject(&root);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src/core.rs"], "message": "Rename", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(
+        head_subject(&root),
+        before,
+        "the unticked file at the old name was not committed"
+    );
+}
+
+#[tokio::test]
+async fn a_ticked_file_that_replaced_a_folder_does_not_take_the_folders_unticked_files() {
+    let (_dir, root) = editor_repo().await;
+    std::fs::remove_dir_all(format!("{root}/src")).unwrap();
+    std::fs::write(format!("{root}/src"), "now a file\n").unwrap();
+    let before = head_subject(&root);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router.clone(),
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src"], "message": "Flatten", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(head_subject(&root), before);
+    let staged = std::process::Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&staged.stdout).trim(),
+        "",
+        "nothing was staged either"
+    );
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src", "src/lib.rs"], "message": "Flatten", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "with every affected file ticked it goes through: {body}"
+    );
+}

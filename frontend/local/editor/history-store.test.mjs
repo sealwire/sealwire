@@ -116,3 +116,45 @@ test("the graph is drawn unless an author or text filter has dropped commits", (
   assert.equal(graphApplies({ ...NO_FILTERS, author: "ann" }), false);
   assert.equal(graphApplies({ ...NO_FILTERS, query: "fix" }), false);
 });
+
+test("the next page names the commits the first page started from, and starts over when they moved", async () => {
+  const { api, calls } = pendingApi();
+  const history = createHistoryStore({ api });
+  const shown = history.show("/a");
+  calls[0].resolve({ commits: [commit("c1"), commit("c2")], more: true, tips: "t1" });
+  await shown;
+  const more = history.load({ append: true });
+  assert.equal(calls[1].args[0].tips, "t1");
+  calls[1].resolve({ commits: [], more: false, moved: true, tips: "t2" });
+  await settle();
+  assert.equal(calls.length, 3, "a moved branch reloads from the top");
+  assert.equal(calls[2].args[0].skip, 0);
+  assert.equal(calls[2].args[0].tips, "");
+  calls[2].resolve({ commits: [commit("c0"), commit("c1")], more: false, tips: "t2" });
+  await more;
+  await settle();
+  assert.deepEqual(history.getState().log.commits.map((entry) => entry.id), ["c0", "c1"]);
+});
+
+test("a branch picked for another folder than the one last shown goes to that folder", async () => {
+  const { api, calls } = pendingApi();
+  const history = createHistoryStore({ api });
+  const shown = history.show("/a");
+  calls[0].resolve({ commits: [], more: false });
+  await shown;
+  const picked = history.setFilters({ branch: "topic" }, "/b");
+  assert.equal(calls[1].args[0].root, "/b");
+  assert.equal(calls[1].args[0].branch, "topic");
+  calls[1].resolve({ commits: [commit("b1")], more: false });
+  await picked;
+  const again = history.show("/b");
+  assert.equal(calls[2].args[0].branch, "topic", "showing the same folder keeps the pick");
+  calls[2].resolve({ commits: [commit("b1")], more: false });
+  await again;
+});
+
+async function settle() {
+  for (let i = 0; i < 10; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}

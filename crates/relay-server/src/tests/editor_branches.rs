@@ -393,3 +393,34 @@ async fn an_agent_in_a_nested_linked_worktree_does_not_block_its_parent_tree() {
     assert_eq!(head(&root), "topic");
     assert_eq!(head(&task), "task");
 }
+
+#[tokio::test]
+async fn a_switch_never_overwrites_ignored_files_such_as_a_nested_worktree() {
+    let (_dir, _wt_dir, root, _wt) = branchy_repo().await;
+    std::fs::remove_file(format!("{root}/new.txt")).unwrap();
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    // `topic` tracks a file where main keeps an ignored nested worktree.
+    git(&root, &["switch", "-q", "topic"]);
+    std::fs::create_dir_all(format!("{root}/.sealwire/worktrees/task")).unwrap();
+    std::fs::write(format!("{root}/.sealwire/worktrees/task/seed"), "topic's\n").unwrap();
+    git(&root, &["add", "-f", ".sealwire/worktrees/task/seed"]);
+    git(&root, &["commit", "-q", "-m", "track it"]);
+    git(&root, &["switch", "-q", "main"]);
+    std::fs::write(format!("{root}/.git/info/exclude"), ".sealwire/\n").unwrap();
+    let task = format!("{root}/.sealwire/worktrees/task");
+    git(&root, &["worktree", "add", "-q", "-b", "task", &task]);
+    std::fs::write(format!("{task}/seed"), "the agent's unsaved work\n").unwrap();
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/switch",
+        serde_json::json!({ "root": root, "branch": "topic", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(
+        std::fs::read_to_string(format!("{task}/seed")).unwrap(),
+        "the agent's unsaved work\n"
+    );
+    assert_eq!(head(&root), "main");
+}

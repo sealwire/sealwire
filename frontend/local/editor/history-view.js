@@ -89,13 +89,15 @@ export function HistoryPanel({ store, history }) {
   const model = branchMenuModel({ data, showAll: true });
   const acting = branches.acting === true;
 
+  // A menu belongs to the folder it was opened in; it goes when the folder changes.
+  useEffect(() => setMenu(null), [root]);
   const showBranch = (name, remote) => {
     store.showHistory();
-    void history.setFilters({ branch: name, remote });
+    void history.setFilters({ branch: name, remote }, root);
   };
   const openMenu = (row, remote) => (event) => {
     event.preventDefault();
-    setMenu({ row, remote, x: event.clientX, y: event.clientY });
+    setMenu({ row, remote, root, x: event.clientX, y: event.clientY });
   };
   const branchRows = (rows, remote) =>
     rows.map((row) =>
@@ -119,7 +121,7 @@ export function HistoryPanel({ store, history }) {
       selected: !filters.branch,
       onClick: () => {
         store.showHistory();
-        void history.setFilters({ branch: null, remote: false });
+        void history.setFilters({ branch: null, remote: false }, root);
       },
     }),
     branches.loading && !data ? h("div", { className: "editor-tree-note" }, t("Loading…")) : null,
@@ -167,7 +169,7 @@ export function HistoryPanel({ store, history }) {
                 disabled: acting || menu.row.action === "current" || Boolean(menu.row.switchBlocked),
                 onSelect: () => {
                   setMenu(null);
-                  void store.switchBranch({ branch: menu.row.name, remote: menu.remote });
+                  void store.switchBranch({ branch: menu.row.name, remote: menu.remote, root: menu.root });
                 },
               }),
           h(MenuItem, {
@@ -175,7 +177,7 @@ export function HistoryPanel({ store, history }) {
             disabled: acting || menu.row.action !== "switch",
             onSelect: () => {
               setMenu(null);
-              void store.addWorktree({ branch: menu.row.name, remote: menu.remote });
+              void store.addWorktree({ branch: menu.row.name, remote: menu.remote, root: menu.root });
             },
           })
         )

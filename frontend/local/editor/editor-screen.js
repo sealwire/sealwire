@@ -114,8 +114,8 @@ function LocationMenu({ store, anchor, buttonRef, onClose }) {
       onClose();
     }
   };
-  const switchTo = (choice) => void store.switchBranch(choice).then(finish);
-  const newTree = (choice) => void store.addWorktree(choice).then((path) => finish(Boolean(path)));
+  const switchTo = (choice) => void store.switchBranch({ ...choice, root }).then(finish);
+  const newTree = (choice) => void store.addWorktree({ ...choice, root }).then((path) => finish(Boolean(path)));
   const openTree = (path) => {
     onClose();
     void store.setRoot(path);

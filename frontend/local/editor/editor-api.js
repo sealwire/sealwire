@@ -41,8 +41,8 @@ export function createEditorApi({ apiFetch, getDeviceId }) {
     changes: (root) => get("/api/editor/changes", { root }),
     threadWorkspace: (threadId) => get("/api/thread/workspace", { thread_id: threadId }),
     branches: (root) => get("/api/editor/branches", { root }),
-    history: ({ root, branch = "", remote = false, author = "", path = "", query = "", skip = 0, limit = 200 }) =>
-      get("/api/editor/history", { root, branch, remote, author, path, query, skip, limit }),
+    history: ({ root, branch = "", remote = false, author = "", path = "", query = "", skip = 0, limit = 200, tips = "" }) =>
+      get("/api/editor/history", { root, branch, remote, author, path, query, skip, limit, tips }),
     historyCommit: (root, id) => get("/api/editor/history/commit", { root, id }),
     historyFile: (root, id, path, oldPath = "") =>
       get("/api/editor/history/file", { root, id, path, old_path: oldPath }),

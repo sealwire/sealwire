@@ -155,6 +155,8 @@ export function createEditorStore({
   const composing = new Set();
   // The save under way for each document, so anything that needs it landed can wait on it.
   const inflight = new Map();
+  // Ticks for every folder visited, so going away and back keeps what the user unticked.
+  const selections = new Map();
   // Where the cursor was in each document, so another view of it opens at the same place.
   const cursors = new Map();
 
@@ -246,7 +248,7 @@ export function createEditorStore({
             complete: view.complete,
             isRepo: view.is_repo,
           },
-          selection: nextSelection(get().selection, root, view.entries.map((entry) => entry.path)),
+          selection: rememberSelection(nextSelection(selections.get(root) || null, root, view.entries.map((entry) => entry.path))),
         });
       }
     } catch {
@@ -391,7 +393,13 @@ export function createEditorStore({
           patch.text = draft.text;
           patch.dirty = true;
           patch.revision = draft.revision;
-          patch.conflict = { diskText: content, diskRevision: file.revision };
+          patch.conflict = {
+            diskText: content,
+            diskRevision: file.revision,
+            ...(file.binary === true ? { diskBinary: true } : {}),
+            ...(file.too_large === true ? { diskTooLarge: true } : {}),
+            ...(file.readonly === true ? { diskReadonly: true } : {}),
+          };
         }
       }
       setDoc(key, (doc) => ({ ...patch, externalVersion: doc.externalVersion + 1 }));
@@ -499,7 +507,8 @@ export function createEditorStore({
       return null;
     }
     set({ commit: { committing: true, error: null, last: get().commit.last } });
-    const unsaved = await settleSaves(root, { paths, force: true });
+    const files = new Set(paths.map((path) => `${root}/${path}`));
+    const unsaved = await settleSaves((key) => files.has(`${keyRoot(key)}/${keyPath(key)}`), { force: true });
     if (get().root !== root) {
       set({ commit: { committing: false, error: null, last: null } });
       return null;
@@ -533,6 +542,11 @@ export function createEditorStore({
     }
   }
 
+  function rememberSelection(selection) {
+    selections.set(selection.root, selection);
+    return selection;
+  }
+
   function setTicked(paths, on) {
     const { selection, changes } = get();
     if (selection.root !== changes.root) {
@@ -547,7 +561,7 @@ export function createEditorStore({
       }
     }
     const order = changes.entries.map((entry) => entry.path);
-    set({ selection: { root: selection.root, ticked: order.filter((path) => ticked.has(path)) } });
+    set({ selection: rememberSelection({ root: selection.root, ticked: order.filter((path) => ticked.has(path)) }) });
   }
 
   function focusTab(path, root = get().root) {
@@ -793,30 +807,49 @@ export function createEditorStore({
   }
 
   /**
-   * Wait until the folder's edits are on disk: running saves land, pending ones are sent
-   * (with autosave, or `force` for the files a commit takes). Returns the paths whose edits
-   * still are not on disk, for the caller to refuse its action over.
+   * Wait until the edits to the files `match` picks are on disk: running saves land, pending
+   * ones are sent (with autosave, or `force` for the files a commit takes). Passes repeat,
+   * so a file edited while waiting counts too. Returns the paths still not on disk, for the
+   * caller to refuse its action over.
    */
-  async function settleSaves(root, { paths = null, force = false } = {}) {
-    const wanted = (key) => key.startsWith(`${root}\n`) && (!paths || paths.includes(keyPath(key)));
-    const keys = Object.keys(get().docs).filter(wanted);
-    await Promise.all(
-      keys.map((key) => {
-        const doc = get().docs[key];
-        if (doc?.dirty && (get().autosave || force)) {
+  async function settleSaves(match, { force = false } = {}) {
+    for (let pass = 0; pass < 5; pass += 1) {
+      const waits = [];
+      for (const [key, doc] of Object.entries(get().docs)) {
+        if (!match(key)) {
+          continue;
+        }
+        if (inflight.has(key)) {
+          waits.push(inflight.get(key));
+        } else if (doc.dirty && !doc.conflict && !doc.missing && (get().autosave || force)) {
           timers.clearTimeout(saveTimers.get(key));
           saveTimers.delete(key);
-          return saveKey(key);
+          waits.push(saveKey(key));
         }
-        return inflight.get(key) || null;
-      })
-    );
-    return keys
-      .filter((key) => {
-        const doc = get().docs[key];
-        return doc && (doc.dirty || doc.saving || doc.conflict || doc.saveError);
-      })
-      .map(keyPath);
+      }
+      if (!waits.length) {
+        break;
+      }
+      await Promise.all(waits);
+    }
+    return Object.entries(get().docs)
+      .filter(([key, doc]) => match(key) && (doc.dirty || doc.saving || doc.conflict || doc.saveError))
+      .map(([key]) => keyPath(key));
+  }
+
+  /**
+   * Which documents a branch switch in `root` rewrites: every file in its worktree, whichever
+   * folder it was opened from, except inside another worktree nested in it.
+   */
+  function inSwitchedTree(root) {
+    const trees = (get().branches.data?.worktrees || []).map((tree) => tree.path);
+    const under = (path, dir) => path === dir || path.startsWith(`${dir}/`);
+    const top = trees.filter((tree) => under(root, tree)).sort((a, b) => b.length - a.length)[0] || root;
+    const nested = trees.filter((tree) => tree !== top && under(tree, top));
+    return (key) => {
+      const file = `${keyRoot(key)}/${keyPath(key)}`;
+      return under(file, top) && !nested.some((tree) => under(file, tree));
+    };
   }
 
   function unsavedReason(paths) {
@@ -1007,14 +1040,14 @@ export function createEditorStore({
    * Switch the folder on screen to another branch. Unsaved edits are saved first; any
    * file the switch changes then reloads, or turns into a conflict if it had edits.
    */
-  async function switchBranch({ branch, create = false, remote = false }) {
+  async function switchBranch({ branch, create = false, remote = false, root: askedFor = null }) {
     const { root } = get();
-    if (!root || !branch || get().branches.acting) {
+    if (!root || !branch || get().branches.acting || (askedFor && askedFor !== root)) {
       return false;
     }
     set({ branches: { ...get().branches, acting: true, error: null } });
     // The switch must see the user's last edits on disk, not race them there.
-    const unsaved = await settleSaves(root);
+    const unsaved = await settleSaves(inSwitchedTree(root));
     if (get().root !== root) {
       return false;
     }
@@ -1030,7 +1063,9 @@ export function createEditorStore({
       set({ branches: { ...get().branches, acting: false } });
       refreshTree();
       await checkDisk(root);
-      await loadBranches();
+      if (get().root === root) {
+        await loadBranches();
+      }
       return true;
     } catch (error) {
       if (get().root === root) {
@@ -1041,9 +1076,9 @@ export function createEditorStore({
   }
 
   /** Check a branch out in a new worktree and show that worktree. */
-  async function addWorktree({ branch, create = false, remote = false }) {
+  async function addWorktree({ branch, create = false, remote = false, root: askedFor = null }) {
     const { root } = get();
-    if (!root || !branch || get().branches.acting) {
+    if (!root || !branch || get().branches.acting || (askedFor && askedFor !== root)) {
       return null;
     }
     set({ branches: { ...get().branches, acting: true, error: null } });

@@ -594,18 +594,51 @@ pub(crate) async fn switch_branch(
 ) -> Result<(), String> {
     let local = checked_branch(workspace, choice).await?;
     let output = match choice {
+        // `--no-overwrite-ignore`: git otherwise replaces ignored files the target tracks,
+        // and a nested worktree under an ignored folder is someone's live checkout.
         BranchChoice::Local(_) => {
-            run_git_capture(workspace, &["-c", NO_HOOKS, "switch", "--no-guess", local]).await?
+            run_git_capture(
+                workspace,
+                &[
+                    "-c",
+                    NO_HOOKS,
+                    "switch",
+                    "--no-overwrite-ignore",
+                    "--no-guess",
+                    local,
+                ],
+            )
+            .await?
         }
         BranchChoice::Remote(remote) => {
             run_git_capture(
                 workspace,
-                &["-c", NO_HOOKS, "switch", "--track", "-c", local, remote],
+                &[
+                    "-c",
+                    NO_HOOKS,
+                    "switch",
+                    "--no-overwrite-ignore",
+                    "--track",
+                    "-c",
+                    local,
+                    remote,
+                ],
             )
             .await?
         }
         BranchChoice::New(_) => {
-            run_git_capture(workspace, &["-c", NO_HOOKS, "switch", "-c", local]).await?
+            run_git_capture(
+                workspace,
+                &[
+                    "-c",
+                    NO_HOOKS,
+                    "switch",
+                    "--no-overwrite-ignore",
+                    "-c",
+                    local,
+                ],
+            )
+            .await?
         }
     };
     if output.status.success() {

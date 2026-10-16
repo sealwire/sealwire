@@ -2095,6 +2095,9 @@ pub struct EditorLogQuery {
     /// Plain text searched for in commit messages.
     #[serde(default)]
     pub query: Option<String>,
+    /// `tips` from the first page; a later page whose branches moved since says `moved`.
+    #[serde(default)]
+    pub tips: Option<String>,
     #[serde(default)]
     pub skip: Option<usize>,
     #[serde(default)]
@@ -2123,6 +2126,10 @@ pub struct EditorLogView {
     pub complete: bool,
     pub commits: Vec<EditorLogCommit>,
     pub more: bool,
+    /// Names the commits this log was walked from; send it back with the next page.
+    pub tips: String,
+    /// The branches moved since `tips`: nothing is listed, and paging must start over.
+    pub moved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
