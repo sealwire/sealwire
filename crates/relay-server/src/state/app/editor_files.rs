@@ -1077,6 +1077,9 @@ async fn commit_from(
             format!("nothing was committed: {words}")
         });
     }
+    // Right away, so a commit made from the index while post-commit runs (a slow push, an
+    // agent) records the ticked files as committed, not as they were before.
+    catch_up_index(workspace, prefix, plan, &commit).await;
     // Against the scratch index, like the other hooks: the user's own staging is not this
     // commit's, and a hook that amends must not take it in.
     let after = hook("post-commit", &[])
@@ -1087,14 +1090,15 @@ async fn commit_from(
     if !after.is_ok_and(|status| status.success()) {
         tracing::warn!(%commit, "editor commit: the post-commit hook failed");
     }
-    // After post-commit, which may have amended: the index follows what the branch holds.
+    // Again if post-commit amended: the index follows what the branch then holds.
     let landed = git_line(
         workspace,
         &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
     )
-    .await
-    .unwrap_or_else(|| commit.clone());
-    catch_up_index(workspace, prefix, plan, &landed).await;
+    .await;
+    if let Some(landed) = landed.filter(|landed| *landed != commit) {
+        catch_up_index(workspace, prefix, plan, &landed).await;
+    }
     Ok((commit, subject))
 }
 
@@ -1146,11 +1150,7 @@ async fn clean_message(workspace: &TrustedWorkspace, file: &Path) -> Result<Vec<
             if mode == "strip" {
                 // `auto` picks a character no line starts with, as `git commit` does;
                 // stripspace on its own would take `#` and drop real lines.
-                if config_value(workspace, "core.commentChar")
-                    .await?
-                    .as_deref()
-                    == Some("auto")
-                {
+                if comment_setting(workspace).await?.as_deref() == Some("auto") {
                     let comment = auto_comment_char(&written).ok_or_else(|| {
                         "every comment character git could pick starts a line of this message"
                             .to_string()
@@ -1202,6 +1202,25 @@ fn auto_comment_char(message: &[u8]) -> Option<char> {
     "#;@!$%^&|:"
         .chars()
         .find(|candidate| !starts.contains(&(*candidate as u8)))
+}
+
+/// `core.commentChar` and `core.commentString` are one setting under two names; the one set
+/// last wins, as git reads them.
+async fn comment_setting(workspace: &TrustedWorkspace) -> Result<Option<String>, String> {
+    let output = run_git_capture(
+        workspace,
+        &["config", "--get-regexp", r"^core\.comment(char|string)$"],
+    )
+    .await?;
+    match output.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .and_then(|line| line.split_once(' '))
+            .map(|(_, value)| value.trim().to_string())),
+        Some(1) => Ok(None),
+        _ => Err(git_words(&output)),
+    }
 }
 
 /// A config value, `None` when it is not set; a config git cannot read is an error.

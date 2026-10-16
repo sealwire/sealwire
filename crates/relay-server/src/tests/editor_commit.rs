@@ -1283,3 +1283,51 @@ async fn a_hook_refusal_that_happens_to_say_but_expected_still_reaches_the_user(
         "{body}"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_commit_made_from_the_index_during_post_commit_keeps_the_editors_change() {
+    let (_dir, root) = editor_repo().await;
+    // A slow post-commit (a push, a build) while another process commits from the index.
+    hook(
+        &root,
+        "post-commit",
+        "[ -n \"$FOLLOW\" ] && exit 0\nunset GIT_INDEX_FILE\nFOLLOW=1 git commit -q --allow-empty -m 'Meanwhile'",
+    );
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Seed", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(
+        git_output(&root, &["log", "-1", "--format=%s"]),
+        "Meanwhile"
+    );
+    assert_eq!(
+        git_output(&root, &["show", "HEAD:seed.txt"]),
+        "line1\nline2",
+        "the commit made meanwhile did not take the change back"
+    );
+}
+
+#[tokio::test]
+async fn an_automatic_comment_string_keeps_message_lines_that_start_with_hash() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["config", "commit.cleanup", "strip"]);
+    git(&root, &["config", "core.commentString", "auto"]);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Subject\n\n# Heading\nBody", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(
+        git_output(&root, &["log", "-1", "--format=%B"]),
+        "Subject\n\n# Heading\nBody"
+    );
+}
