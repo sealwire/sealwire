@@ -1096,8 +1096,14 @@ async fn commit_from(
         &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
     )
     .await;
+    // Not while a rebase or merge the hook started holds the index: its conflict entries are
+    // the user's to resolve, and copying over them would settle it by dropping this change.
     if let Some(landed) = landed.filter(|landed| *landed != commit) {
-        catch_up_index(workspace, prefix, plan, &landed).await;
+        let branch_now = git_raw_line(workspace, &["symbolic-ref", "--quiet", "HEAD"]).await;
+        if operation_in_progress(workspace).await.is_none() && branch_now.as_deref() == head.branch
+        {
+            catch_up_index(workspace, prefix, plan, &landed).await;
+        }
     }
     Ok((commit, subject))
 }

@@ -1331,3 +1331,35 @@ async fn an_automatic_comment_string_keeps_message_lines_that_start_with_hash() 
         "Subject\n\n# Heading\nBody"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_rebase_started_by_post_commit_keeps_its_conflict_for_the_user() {
+    let (_dir, root) = editor_repo().await;
+    // Upstream deleted the file the Editor is about to commit a change to.
+    git(&root, &["stash", "-q", "-u"]);
+    git(&root, &["switch", "-q", "-c", "up"]);
+    git(&root, &["rm", "-q", "seed.txt"]);
+    git(&root, &["commit", "-q", "-m", "upstream drops seed"]);
+    git(&root, &["switch", "-q", "main"]);
+    git(&root, &["stash", "pop", "-q"]);
+    // A sync hook rebases onto upstream after every commit.
+    hook(
+        &root,
+        "post-commit",
+        "[ -n \"$SYNCING\" ] && exit 0\nunset GIT_INDEX_FILE\nSYNCING=1 git rebase -q up >/dev/null 2>&1\nexit 0",
+    );
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": "Edit seed", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_ne!(
+        git_output(&root, &["ls-files", "--unmerged"]),
+        "",
+        "the rebase's conflict is still there for the user to resolve"
+    );
+}
