@@ -179,12 +179,15 @@ export function createCodeEditor(host, { onChange, onSave, onCursor, onCompositi
   const states = new Map();
   const paths = new Map();
   const languages = new Map();
+  const readonlyFlags = new Map();
   let currentKey = null;
   let applyingExternal = false;
 
   function extensions(key, readonly) {
     const language = new Compartment();
     languages.set(key, language);
+    const readonlyFlag = new Compartment();
+    readonlyFlags.set(key, readonlyFlag);
     return [
       lineNumbers(),
       highlightActiveLineGutter(),
@@ -202,7 +205,7 @@ export function createCodeEditor(host, { onChange, onSave, onCursor, onCompositi
       crosshairCursor(),
       highlightActiveLine(),
       highlightSelectionMatches(),
-      EditorState.readOnly.of(readonly),
+      readonlyFlag.of([EditorState.readOnly.of(readonly), EditorView.editable.of(!readonly)]),
       keymap.of([
         {
           key: "Mod-s",
@@ -327,6 +330,21 @@ export function createCodeEditor(host, { onChange, onSave, onCursor, onCompositi
     }
   }
 
+  /** A file can turn read-only on disk after it was opened. */
+  function setReadonly(key, readonly) {
+    const effect = readonlyFlags
+      .get(key)
+      ?.reconfigure([EditorState.readOnly.of(readonly), EditorView.editable.of(!readonly)]);
+    if (!effect) {
+      return;
+    }
+    if (key === currentKey) {
+      view.dispatch({ effects: effect });
+    } else if (states.has(key)) {
+      states.set(key, states.get(key).update({ effects: effect }).state);
+    }
+  }
+
   function revealLine(key, lineNumber) {
     if (key !== currentKey) {
       return;
@@ -341,11 +359,13 @@ export function createCodeEditor(host, { onChange, onSave, onCursor, onCompositi
   return {
     show,
     replaceText,
+    setReadonly,
     revealLine,
     forget(key) {
       states.delete(key);
       paths.delete(key);
       languages.delete(key);
+      readonlyFlags.delete(key);
     },
     focus() {
       view.focus();

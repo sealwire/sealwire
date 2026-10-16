@@ -478,3 +478,144 @@ test("a commit and a branch switch wait for the save they start to land", async 
     ["switch", "fn slow_save_again() {}\n"],
   ]);
 });
+
+test("a switch waits for a save already under way, and refuses while an edit cannot be saved", async () => {
+  const { relay, timers, store } = await openEditor();
+  relay.api.branches = async () => ({ current: "topic", branches: [], worktrees: [], busy: null });
+  const switched = [];
+  relay.api.switchBranch = async () => {
+    switched.push(relay.disk.get("a.rs"));
+    return { current: "topic" };
+  };
+  const write = relay.api.writeFile;
+  let release;
+  relay.api.writeFile = (request) => new Promise((resolve) => {
+    release = () => resolve(write(request));
+  });
+  store.edit("a.rs", "fn in_flight() {}\n");
+  await timers.fire(AUTOSAVE_DELAY_MS);
+  const switching = store.switchBranch({ branch: "topic" });
+  await settle();
+  assert.deepEqual(switched, [], "no switch while the save is still on its way");
+  release();
+  assert.equal(await switching, true);
+  assert.deepEqual(switched, ["fn in_flight() {}\n"]);
+
+  relay.api.writeFile = async () => {
+    throw new Error("disk full");
+  };
+  store.edit("a.rs", "fn cannot_land() {}\n");
+  assert.equal(await store.switchBranch({ branch: "main" }), false);
+  assert.equal(switched.length, 1, "an edit that failed to save blocks the switch");
+  assert.match(store.getState().branches.error, /a\.rs/);
+});
+
+test("with autosave off a switch is refused while there are unsaved edits", async () => {
+  const { relay, store } = await openEditor({ autosave: false });
+  relay.api.branches = async () => ({ current: "topic", branches: [], worktrees: [], busy: null });
+  let switched = 0;
+  relay.api.switchBranch = async () => {
+    switched += 1;
+    return { current: "topic" };
+  };
+  store.edit("a.rs", "fn unsaved() {}\n");
+  assert.equal(await store.switchBranch({ branch: "topic" }), false);
+  assert.equal(switched, 0);
+  assert.equal(relay.writes.length, 0, "the user's choice not to save is kept");
+  assert.match(store.getState().branches.error, /a\.rs/);
+});
+
+test("a commit saves the ticked files even with autosave off, and stops if one cannot be saved", async () => {
+  const { relay, store } = await openEditor({ autosave: false });
+  const committed = [];
+  relay.api.commit = async ({ paths }) => {
+    committed.push({ paths, disk: relay.disk.get("a.rs") });
+    return { commit: "abc1234", subject: "x" };
+  };
+  store.edit("a.rs", "fn on_screen() {}\n");
+  assert.ok(await store.commit({ paths: ["a.rs"], message: "x" }));
+  assert.equal(committed[0].disk, "fn on_screen() {}\n", "what is committed is what the user sees");
+
+  relay.disk.set("a.rs", "fn changed_by_agent() {}\n");
+  store.edit("a.rs", "fn mine() {}\n");
+  assert.equal(await store.commit({ paths: ["a.rs"], message: "y" }), null);
+  assert.equal(committed.length, 1, "a save refused by a conflict stops the commit");
+  assert.match(store.getState().commit.error, /a\.rs/);
+});
+
+test("a commit goes only to the folder whose changes were on screen", async () => {
+  const relay = fakeRelay({ "a.rs": "a\n" });
+  let answer;
+  relay.api.changes = (root) =>
+    root === "/other" ? new Promise((resolve) => (answer = resolve)) : Promise.resolve({ entries: [{ path: "a.rs", status: "M" }], complete: true, is_repo: true });
+  const commits = [];
+  relay.api.commit = async (request) => {
+    commits.push(request);
+    return { commit: "abc", subject: "x" };
+  };
+  const store = createEditorStore({ api: relay.api, storage: memoryStorage(), timers: manualTimers() });
+  await store.setRoot(ROOT);
+  await settle();
+  assert.equal(store.getState().changes.root, ROOT);
+  void store.setRoot("/other");
+  await settle();
+  assert.equal(await store.commit({ paths: ["a.rs"], message: "x" }), null);
+  assert.deepEqual(commits, [], "the list on screen was the old folder's");
+  answer({ entries: [], complete: true, is_repo: true });
+});
+
+test("a worktree that is ready after the user moved on does not pull them back", async () => {
+  const { relay, store } = await openEditor();
+  relay.api.branches = async () => ({ current: "main", branches: [], worktrees: [], busy: null });
+  let finish;
+  relay.api.addWorktree = () => new Promise((resolve) => (finish = resolve));
+  const adding = store.addWorktree({ branch: "spike", create: true });
+  await settle();
+  await store.setRoot("/elsewhere");
+  finish({ path: "/repo/.sealwire/worktrees/spike" });
+  await adding;
+  assert.equal(store.getState().root, "/elsewhere");
+  assert.equal(store.getState().branches.acting, false);
+});
+
+test("taking the disk version of a file that turned binary leaves it uneditable", async () => {
+  const { relay, timers, store, doc } = await openEditor();
+  store.edit("a.rs", "fn mine() {}\n");
+  relay.disk.set("a.rs", { bytes: "\u0000binary" });
+  await timers.fire(AUTOSAVE_DELAY_MS);
+  assert.ok(doc().conflict, "the save met a changed file");
+  await store.resolveConflict("a.rs", "theirs");
+  assert.equal(doc().binary, true);
+  store.edit("a.rs", "typed over it\n");
+  await timers.fire(AUTOSAVE_DELAY_MS);
+  assert.equal(relay.writes.length, 1, "only the refused save was ever sent");
+});
+
+test("a file that became read-only takes no edits and is never written", async () => {
+  const { relay, timers, store, doc } = await openEditor();
+  const read = relay.api.readFile;
+  relay.api.readFile = async (root, path) => ({ ...(await read(root, path)), readonly: true });
+  relay.disk.set("a.rs", "fn locked() {}\n");
+  await store.checkDisk();
+  assert.equal(doc().readonly, true);
+  store.edit("a.rs", "fn typed() {}\n");
+  await timers.fire(AUTOSAVE_DELAY_MS);
+  await store.save("a.rs");
+  assert.equal(relay.writes.length, 0);
+  assert.equal(doc().text, "fn locked() {}\n");
+});
+
+test("an untick survives leaving Changes and every refresh of the list", async () => {
+  const relay = fakeRelay({ "a.rs": "a\n", "b.rs": "b\n" });
+  relay.api.changes = async () => ({ entries: [{ path: "a.rs", status: "M" }, { path: "b.rs", status: "M" }], complete: true, is_repo: true });
+  const store = createEditorStore({ api: relay.api, storage: memoryStorage(), timers: manualTimers() });
+  await store.setRoot(ROOT);
+  await settle();
+  assert.deepEqual(store.getState().selection.ticked, ["a.rs", "b.rs"]);
+  store.setTicked(["b.rs"], false);
+  store.setPanelView("files");
+  store.setPanelView("changes");
+  store.refreshTree();
+  await settle();
+  assert.deepEqual(store.getState().selection.ticked, ["a.rs"]);
+});

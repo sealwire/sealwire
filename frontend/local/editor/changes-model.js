@@ -31,15 +31,14 @@ export function groupChanges(entries = [], sessions = []) {
 }
 
 /**
- * The ticked set after the list changed: files still listed keep their tick, files new to
- * the list arrive ticked, and files gone from it drop out.
+ * The ticked files after the list was read again. A folder's first list comes ticked;
+ * after that a file new to the list waits for the user to tick it, so nothing an agent
+ * writes meanwhile rides along in a commit unseen. Files gone from the list drop out.
  */
-export function carrySelection(previous, entries, known) {
-  const next = new Set();
-  for (const entry of entries) {
-    if (!known.has(entry.path) || previous.has(entry.path)) {
-      next.add(entry.path);
-    }
+export function nextSelection(previous, root, paths) {
+  if (!previous || previous.root !== root) {
+    return { root, ticked: [...paths] };
   }
-  return next;
+  const ticked = new Set(previous.ticked);
+  return { root, ticked: paths.filter((path) => ticked.has(path)) };
 }

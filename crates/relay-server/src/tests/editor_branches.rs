@@ -257,3 +257,139 @@ async fn editor_worktree_refuses_a_branch_already_checked_out() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
 }
+
+#[tokio::test]
+async fn editor_switch_from_a_subfolder_needs_the_whole_repository_in_scope() {
+    let (_dir, _wt_dir, root, _wt) = branchy_repo().await;
+    std::fs::remove_file(format!("{root}/new.txt")).unwrap();
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    let sub = format!("{root}/src");
+    // Only the subfolder is allowed; a switch would rewrite files above it.
+    let router = git_context_router(&sub, vec![sub.clone()], vec![root.clone()]).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/switch",
+        serde_json::json!({ "root": sub, "branch": "topic", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(head(&root), "main");
+}
+
+#[tokio::test]
+async fn editor_switch_refuses_shorthand_that_git_would_expand() {
+    let (_dir, _wt_dir, root, _wt) = branchy_repo().await;
+    std::fs::remove_file(format!("{root}/new.txt")).unwrap();
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    git(&root, &["switch", "-q", "topic"]);
+    git(&root, &["switch", "-q", "main"]);
+    let router = trusted_router(&root).await;
+    for (branch, create) in [
+        ("@{-1}", true),
+        ("@{-1}", false),
+        ("refs/heads/topic", false),
+        ("refs/heads/x", true),
+        ("HEAD", true),
+        ("@", true),
+    ] {
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/editor/switch",
+            serde_json::json!({ "root": root, "branch": branch, "create": create, "device_id": "d1" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{branch:?} create={create}: body={body}"
+        );
+        assert_eq!(head(&root), "main", "{branch:?}");
+    }
+    let (status, body) = post_json(
+        router,
+        "/api/editor/switch",
+        serde_json::json!({ "root": root, "branch": "origin/@{-1}", "remote": true, "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+}
+
+#[tokio::test]
+async fn editor_worktree_needs_the_git_directory_in_scope() {
+    let outside = tempfile::TempDir::new().expect("tmp");
+    let inside = tempfile::TempDir::new().expect("tmp");
+    let repo = inside.path().canonicalize().unwrap().join("repo");
+    let git_dir = outside.path().canonicalize().unwrap().join("repo.git");
+    let status = std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main", "--separate-git-dir"])
+        .arg(&git_dir)
+        .arg(&repo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let root = repo.to_string_lossy().to_string();
+    git(&root, &["config", "user.email", "t@e.com"]);
+    git(&root, &["config", "user.name", "T"]);
+    std::fs::write(format!("{root}/a.txt"), "a\n").unwrap();
+    git(&root, &["add", "a.txt"]);
+    git(&root, &["commit", "-q", "-m", "a"]);
+    let exclude = git_dir.join("info/exclude");
+    let before = std::fs::read_to_string(&exclude).unwrap_or_default();
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/worktree",
+        serde_json::json!({ "root": root, "branch": "spike", "create": true, "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(
+        std::fs::read_to_string(&exclude).unwrap_or_default(),
+        before
+    );
+    assert!(
+        !git_dir.join("worktrees").exists(),
+        "no worktree was registered"
+    );
+}
+
+#[tokio::test]
+async fn editor_will_not_switch_a_tree_inside_a_folder_an_agent_is_working_in() {
+    let (dir, _wt_dir, root, _wt) = branchy_repo().await;
+    std::fs::remove_file(format!("{root}/new.txt")).unwrap();
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    let above = dir.path().parent().unwrap().canonicalize().unwrap();
+    let router = busy_router(&root, &above.to_string_lossy()).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/switch",
+        serde_json::json!({ "root": root, "branch": "topic", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(head(&root), "main");
+}
+
+#[tokio::test]
+async fn an_agent_in_a_nested_linked_worktree_does_not_block_its_parent_tree() {
+    let (_dir, _wt_dir, root, _wt) = branchy_repo().await;
+    std::fs::remove_file(format!("{root}/new.txt")).unwrap();
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    std::fs::write(format!("{root}/.git/info/exclude"), ".sealwire/\n").unwrap();
+    let task = format!("{root}/.sealwire/worktrees/task");
+    git(&root, &["worktree", "add", "-q", "-b", "task", &task]);
+    let router = busy_router(&root, &format!("{task}/src")).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/switch",
+        serde_json::json!({ "root": root, "branch": "topic", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the task has its own checkout: {body}"
+    );
+    assert_eq!(head(&root), "topic");
+    assert_eq!(head(&task), "task");
+}

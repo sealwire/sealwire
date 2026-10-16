@@ -44,6 +44,18 @@ fn landed_edit(path: &str, revision: u64) -> crate::state::TranscriptRecord {
 
 /// A trusted router whose relay holds sessions that wrote files: `(thread, cwd, path, revision)`.
 async fn router_with_writers(root: &str, writes: &[(&str, &str, &str, u64)]) -> axum::Router {
+    let writes: Vec<(&str, &str, &str, Option<u64>)> = writes
+        .iter()
+        .map(|(thread, cwd, path, revision)| (*thread, *cwd, *path, Some(*revision)))
+        .collect();
+    router_with_history(root, &writes).await
+}
+
+/// As above; a `None` revision is a write read back from a saved conversation, not seen live.
+async fn router_with_history(
+    root: &str,
+    writes: &[(&str, &str, &str, Option<u64>)],
+) -> axum::Router {
     let (change_tx, _rx) = tokio::sync::watch::channel(0_u64);
     let relay = std::sync::Arc::new(tokio::sync::RwLock::new(crate::state::RelayState::new(
         root.to_string(),
@@ -59,7 +71,9 @@ async fn router_with_writers(root: &str, writes: &[(&str, &str, &str, u64)]) -> 
         for (thread, cwd, path, revision) in writes {
             let runtime = relay.ensure_runtime_for_thread(thread);
             runtime.current_cwd = cwd.to_string();
-            runtime.transcript.push(landed_edit(path, *revision));
+            let mut record = landed_edit(path, revision.unwrap_or_default());
+            record.last_live_upsert_revision = *revision;
+            runtime.transcript.push(record);
         }
     }
     let context = AppContext {
@@ -233,4 +247,128 @@ async fn editor_commit_needs_a_message_and_files() {
         let (status, reply) = post_json(router.clone(), "/api/editor/commit", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body={reply}");
     }
+}
+
+#[tokio::test]
+async fn a_write_seen_live_outranks_one_read_back_from_a_saved_conversation() {
+    let (_dir, root) = editor_repo().await;
+    let seed = format!("{root}/seed.txt");
+    let other = format!("{root}/other.txt");
+    // The saved conversation is long, so its write sits at a high index; that index is
+    // no time at all, and says nothing about another session.
+    let mut writes: Vec<(&str, &str, &str, Option<u64>)> = (0..6)
+        .map(|_| ("thread-saved", root.as_str(), other.as_str(), None))
+        .collect();
+    writes.push(("thread-saved", root.as_str(), seed.as_str(), None));
+    writes.push(("thread-live", root.as_str(), seed.as_str(), Some(1)));
+    let router = router_with_history(&root, &writes).await;
+    let (_, body) = get_json(
+        router,
+        &format!("/api/editor/changes?root={}", query_value(&root)),
+    )
+    .await;
+    assert_eq!(session_of(&body, "seed.txt"), "thread-live", "{body}");
+
+    let router = router_with_history(
+        &root,
+        &[
+            ("thread-x", root.as_str(), seed.as_str(), None),
+            ("thread-y", root.as_str(), seed.as_str(), None),
+        ],
+    )
+    .await;
+    let (_, body) = get_json(
+        router,
+        &format!("/api/editor/changes?root={}", query_value(&root)),
+    )
+    .await;
+    assert!(
+        session_of(&body, "seed.txt").is_null(),
+        "two saved conversations cannot say which wrote last: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_written_path_that_climbs_with_dot_dot_is_not_attributed() {
+    let (_dir, root) = editor_repo().await;
+    // `src/..` is only the root if `src` is not a symlink; the path is not trusted to say.
+    let climbing = format!("{root}/src/../seed.txt");
+    let router =
+        router_with_writers(&root, &[("thread-a", root.as_str(), climbing.as_str(), 3)]).await;
+    let (_, body) = get_json(
+        router,
+        &format!("/api/editor/changes?root={}", query_value(&root)),
+    )
+    .await;
+    assert!(session_of(&body, "seed.txt").is_null(), "{body}");
+}
+
+#[tokio::test]
+async fn editor_commit_takes_only_changed_files_never_a_folder() {
+    let (_dir, root) = editor_repo().await;
+    std::fs::write(format!("{root}/src/lib.rs"), "fn changed() {}\n").unwrap();
+    std::fs::write(format!("{root}/src/inner/more.rs"), "fn more() {}\n").unwrap();
+    let before = head_subject(&root);
+    let router = trusted_router(&root).await;
+    for path in ["src", ".", "src/inner", "src/unchanged.rs"] {
+        let (status, body) = post_json(
+            router.clone(),
+            "/api/editor/commit",
+            serde_json::json!({ "root": root, "paths": [path], "message": "too much", "device_id": "d1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: body={body}");
+    }
+    assert_eq!(head_subject(&root), before);
+}
+
+#[tokio::test]
+async fn editor_commit_of_a_renamed_file_takes_both_of_its_names() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["mv", "src/lib.rs", "src/core.rs"]);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src/core.rs"], "message": "Rename lib", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let out = std::process::Command::new("git")
+        .args(["show", "--name-status", "--format=", "-M", "HEAD"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let shown = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        shown.starts_with("R100\tsrc/lib.rs\tsrc/core.rs"),
+        "{shown}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn editor_commit_with_a_long_message_and_a_noisy_hook_does_not_hang() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, root) = editor_repo().await;
+    let hook = format!("{root}/.git/hooks/pre-commit");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nhead -c 400000 /dev/zero | tr '\\0' x\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let message = format!("Long\n\n{}", "word ".repeat(200_000));
+    let router = trusted_router(&root).await;
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        post_json(
+            router,
+            "/api/editor/commit",
+            serde_json::json!({ "root": root, "paths": ["seed.txt"], "message": message, "device_id": "d1" }),
+        ),
+    )
+    .await;
+    let (status, body) = reply.expect("the commit finished instead of waiting on full pipes");
+    assert_eq!(status, StatusCode::OK, "body={body}");
 }

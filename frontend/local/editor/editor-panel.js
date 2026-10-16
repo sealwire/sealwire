@@ -62,6 +62,14 @@ export function panelPath(rawPath, root) {
 }
 
 /**
+ * The Open action for rows in the Changes tab. Those rows can show another worktree than the
+ * session's, and this panel only opens the session's files, so Open is not offered there.
+ */
+export function changesOpener(openInPanel, sessionRoot, viewRoot) {
+  return !viewRoot || viewRoot === sessionRoot ? openInPanel : null;
+}
+
+/**
  * Everything the right panel needs from app.js: the session's worktree, the rail width,
  * and how to hand a document over to the Editor screen.
  */
@@ -80,14 +88,14 @@ export function createEditorPanelHost({
     if (!railControl) {
       return;
     }
-    if (!railControl.isOpen()) {
-      railControl.open();
-    }
     const target = Math.min(900, Math.round(viewportWidth() * 0.45));
     const width = railControl.getWidth();
     if (width < target) {
-      widthBeforeFile = width;
-      // Painted only: the user's saved rail width stays what they chose.
+      // A collapsed rail comes back at its usual width when the file is left, not shut.
+      if (widthBeforeFile === null || !railControl.isOpen()) {
+        widthBeforeFile = railControl.isOpen() ? width : railControl.getPreferredWidth?.() || target;
+      }
+      // Painted only, never `open()`: the user's saved rail width and state stay theirs.
       railControl.setWidth(target, { commit: false, updateOpenWidth: false });
     }
   }
@@ -101,6 +109,10 @@ export function createEditorPanelHost({
 
   function showFile(on) {
     if (Boolean(on) === panel.getState().showingFile) {
+      // The rail can be collapsed by its own toggle while a file shows; a file link opens it.
+      if (on) {
+        widen();
+      }
       return;
     }
     panel.setState({ showingFile: Boolean(on) });
@@ -273,6 +285,7 @@ function PanelFile({ host, root, docKey: key, doc, mode, autosave }) {
 export function LocalRightPanel({ host, ...tabProps }) {
   const { editorStore: store, panel } = host;
   const workspace = useStore(tabProps.store, (state) => state.workspace);
+  const viewRoot = useStore(tabProps.store, (state) => state.viewRoot);
   const root = workspace?.cwd || null;
   const tabs = useStore(store, (state) => (root ? state.tabsByRoot[root] : null));
   const docs = useStore(store, (state) => state.docs);
@@ -345,7 +358,7 @@ export function LocalRightPanel({ host, ...tabProps }) {
 
   return h(
     MarkdownFileOpenContext.Provider,
-    { value: host.openInPanel },
+    { value: changesOpener(host.openInPanel, root, viewRoot) },
     h(RightPanelTabs, { ...tabProps, files })
   );
 }

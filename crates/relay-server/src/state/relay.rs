@@ -1451,13 +1451,20 @@ impl RelayState {
     /// True if any thread is mid-turn anywhere inside `tree`. Containment, not equality:
     /// an agent started in a subfolder still has its files changed by a branch switch.
     /// Reviewers count too — a switch would change the tree under their reading.
-    pub(crate) fn has_working_thread_under(&self, tree: &str) -> bool {
+    /// Whether a working agent can reach files in `tree`: it works inside it, or in a folder
+    /// above it. One inside `nested` (another worktree's own checkout) does not count.
+    pub(crate) fn has_working_thread_over(&self, tree: &str, nested: &[String]) -> bool {
         let tree = std::path::Path::new(tree);
         self.runtimes.iter().any(|(thread_id, runtime)| {
-            runtime.is_working()
-                && !runtime.current_cwd.is_empty()
-                && std::path::Path::new(&runtime.current_cwd).starts_with(tree)
-                && !self.locally_deleted_thread_ids.contains(thread_id)
+            if !runtime.is_working()
+                || runtime.current_cwd.is_empty()
+                || self.locally_deleted_thread_ids.contains(thread_id)
+            {
+                return false;
+            }
+            let cwd = std::path::Path::new(&runtime.current_cwd);
+            (cwd.starts_with(tree) && !nested.iter().any(|inner| cwd.starts_with(inner)))
+                || tree.starts_with(cwd)
         })
     }
 

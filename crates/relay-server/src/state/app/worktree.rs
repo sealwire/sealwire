@@ -509,15 +509,28 @@ pub(crate) enum BranchChoice<'a> {
     New(&'a str),
 }
 
-/// A name git takes as a branch and never as an option.
+/// A literal branch name: never an option, and never shorthand. `check-ref-format --branch`
+/// would expand `@{-1}` instead of refusing it, so the full ref is checked as written.
 async fn validate_branch_name(workspace: &TrustedWorkspace, name: &str) -> Result<(), String> {
-    if name.is_empty()
-        || name.starts_with('-')
-        || !git_ok(workspace, &["check-ref-format", "--branch", name]).await
+    if !literal_ref_name(name)
+        || !git_ok(
+            workspace,
+            &["check-ref-format", &format!("refs/heads/{name}")],
+        )
+        .await
     {
         return Err(format!("{name:?} is not a valid branch name"));
     }
     Ok(())
+}
+
+fn literal_ref_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.starts_with("refs/")
+        && !name.contains("@{")
+        && name != "@"
+        && name != "HEAD"
 }
 
 async fn ref_exists(workspace: &TrustedWorkspace, full_ref: &str) -> bool {
@@ -546,7 +559,12 @@ async fn checked_branch<'a>(
             Ok(name)
         }
         BranchChoice::Remote(name) => {
-            if name.starts_with('-')
+            if !literal_ref_name(name)
+                || !git_ok(
+                    workspace,
+                    &["check-ref-format", &format!("refs/remotes/{name}")],
+                )
+                .await
                 || !ref_exists(workspace, &format!("refs/remotes/{name}")).await
             {
                 return Err(format!("there is no remote branch named {name}"));
@@ -606,6 +624,9 @@ pub(crate) async fn add_branch_worktree(
 ) -> Result<String, String> {
     let main = repo_main_worktree(origin).await?;
     path_guard(main.as_str())?;
+    if let Some(common) = git_common_dir(&main).await {
+        path_guard(&common)?;
+    }
     let local = checked_branch(origin, choice).await?;
     let start = match choice {
         BranchChoice::New(_) => Some(

@@ -7,6 +7,8 @@
 
 import { createStore } from "zustand/vanilla";
 
+import { nextSelection } from "./changes-model.js";
+
 export const AUTOSAVE_DELAY_MS = 1000;
 const SESSION_KEY = "sealwire:editor-session";
 const DRAFTS_KEY = "sealwire:editor-drafts";
@@ -129,7 +131,10 @@ export function createEditorStore({
     dirs: {},
     expanded: { "": true },
     changedOnly: false,
-    changes: { entries: [], sessions: [], loading: false, complete: true, isRepo: true },
+    // `root` is the folder the list was read for: a commit goes there, or nowhere.
+    changes: { root: null, entries: [], sessions: [], loading: false, complete: true, isRepo: true },
+    // The files ticked for the next commit, for the folder the list belongs to.
+    selection: { root: null, ticked: [] },
     // Left panel: the file tree, the changed files, or the branches for History.
     panelView: "files",
     // The History tab: whether it is in the tab strip, and whether it is the one shown.
@@ -148,6 +153,8 @@ export function createEditorStore({
   const draftTimers = new Map();
   let treeRefreshTimer = null;
   const composing = new Set();
+  // The save under way for each document, so anything that needs it landed can wait on it.
+  const inflight = new Map();
   // Where the cursor was in each document, so another view of it opens at the same place.
   const cursors = new Map();
 
@@ -232,17 +239,19 @@ export function createEditorStore({
       if (get().root === root) {
         set({
           changes: {
+            root,
             entries: view.entries,
             sessions: view.sessions || [],
             loading: false,
             complete: view.complete,
             isRepo: view.is_repo,
           },
+          selection: nextSelection(get().selection, root, view.entries.map((entry) => entry.path)),
         });
       }
     } catch {
       if (get().root === root) {
-        set({ changes: { entries: [], sessions: [], loading: false, complete: false, isRepo: true } });
+        set({ changes: { root, entries: [], sessions: [], loading: false, complete: false, isRepo: true } });
       }
     }
   }
@@ -277,7 +286,12 @@ export function createEditorStore({
       roots: roots || get().roots,
       rootError: null,
       ...(changed
-        ? { dirs: {}, expanded: { "": true }, branches: { loading: false, error: null, data: null, acting: false } }
+        ? {
+            dirs: {},
+            expanded: { "": true },
+            branches: { loading: false, error: null, data: null, acting: false },
+            changes: { root: null, entries: [], sessions: [], loading: true, complete: true, isRepo: true },
+          }
         : {}),
     });
     persistSession();
@@ -471,23 +485,69 @@ export function createEditorStore({
     set({ viewModes: { ...get().viewModes, [key]: mode === "diff" ? "diff" : "edit" } });
   }
 
-  /** Commit exactly the ticked files. Git and the repository's hooks have the last word. */
+  /**
+   * Commit exactly the ticked files, as the editor shows them: their edits are saved first
+   * even with autosave off. Git and the repository's hooks have the last word.
+   */
   async function commit({ paths, message }) {
-    const { root } = get();
+    const { root, changes } = get();
     if (!root || !paths?.length || !message?.trim() || get().commit.committing) {
       return null;
     }
+    // The ticked paths came from the list on screen; it must be this folder's.
+    if (changes.root !== root) {
+      return null;
+    }
     set({ commit: { committing: true, error: null, last: get().commit.last } });
-    await flushSaves();
+    const unsaved = await settleSaves(root, { paths, force: true });
+    if (get().root !== root) {
+      set({ commit: { committing: false, error: null, last: null } });
+      return null;
+    }
+    if (unsaved.length) {
+      set({
+        commit: {
+          committing: false,
+          error: `${unsaved.join(", ")} could not be saved, so nothing was committed.`,
+          last: get().commit.last,
+        },
+      });
+      return null;
+    }
     try {
       const receipt = await api.commit({ root, paths, message });
+      if (get().root !== root) {
+        set({ commit: { committing: false, error: null, last: null } });
+        return receipt;
+      }
       set({ commit: { committing: false, error: null, last: receipt } });
       refreshTree();
       return receipt;
     } catch (error) {
-      set({ commit: { committing: false, error: error.message, last: get().commit.last } });
+      if (get().root === root) {
+        set({ commit: { committing: false, error: error.message, last: get().commit.last } });
+      } else {
+        set({ commit: { committing: false, error: null, last: null } });
+      }
       return null;
     }
+  }
+
+  function setTicked(paths, on) {
+    const { selection, changes } = get();
+    if (selection.root !== changes.root) {
+      return;
+    }
+    const ticked = new Set(selection.ticked);
+    for (const path of paths) {
+      if (on) {
+        ticked.add(path);
+      } else {
+        ticked.delete(path);
+      }
+    }
+    const order = changes.entries.map((entry) => entry.path);
+    set({ selection: { root: selection.root, ticked: order.filter((path) => ticked.has(path)) } });
   }
 
   function focusTab(path, root = get().root) {
@@ -560,7 +620,7 @@ export function createEditorStore({
 
   function editKey(key, text) {
     const doc = get().docs[key];
-    if (!doc || doc.loading || doc.binary || doc.tooLarge || doc.text === text) {
+    if (!doc || doc.loading || doc.binary || doc.tooLarge || doc.readonly || doc.text === text) {
       return;
     }
     // Typing in a preview tab keeps it.
@@ -623,13 +683,30 @@ export function createEditorStore({
   }
 
   async function saveKey(key) {
+    const running = inflight.get(key);
+    if (running) {
+      await running;
+    }
     const doc = get().docs[key];
-    if (!doc || !doc.dirty || doc.saving || doc.conflict || doc.missing || doc.binary || doc.tooLarge) {
+    if (!doc || !doc.dirty || doc.saving || doc.conflict || doc.missing || doc.binary || doc.tooLarge || doc.readonly) {
       return doc;
     }
     if (composing.has(key)) {
       return doc;
     }
+    const write = writeDoc(key, doc);
+    inflight.set(key, write);
+    try {
+      await write;
+    } finally {
+      if (inflight.get(key) === write) {
+        inflight.delete(key);
+      }
+    }
+    return get().docs[key];
+  }
+
+  async function writeDoc(key, doc) {
     const root = keyRoot(key);
     const sent = doc.text;
     setDoc(key, { saving: true });
@@ -669,7 +746,6 @@ export function createEditorStore({
     } catch (error) {
       setDoc(key, { saving: false, saveError: error.message });
     }
-    return get().docs[key];
   }
 
   async function loadConflict(key) {
@@ -677,7 +753,17 @@ export function createEditorStore({
     const root = keyRoot(key);
     try {
       const file = await api.readFile(root, doc.path);
-      setDoc(key, { conflict: { diskText: file.content ?? "", diskRevision: file.revision } });
+      // A disk version the editor cannot hold is never offered as empty text to keep.
+      const readable = typeof file.content === "string" && file.binary !== true && file.too_large !== true;
+      setDoc(key, {
+        conflict: {
+          diskText: readable ? file.content : "",
+          diskRevision: file.revision,
+          ...(!readable && file.too_large !== true ? { diskBinary: true } : {}),
+          ...(file.too_large === true ? { diskTooLarge: true } : {}),
+          ...(file.readonly === true ? { diskReadonly: true } : {}),
+        },
+      });
     } catch (error) {
       setDoc(key, { saveError: error.message });
     }
@@ -704,6 +790,37 @@ export function createEditorStore({
       }
     }
     return Promise.all(saving);
+  }
+
+  /**
+   * Wait until the folder's edits are on disk: running saves land, pending ones are sent
+   * (with autosave, or `force` for the files a commit takes). Returns the paths whose edits
+   * still are not on disk, for the caller to refuse its action over.
+   */
+  async function settleSaves(root, { paths = null, force = false } = {}) {
+    const wanted = (key) => key.startsWith(`${root}\n`) && (!paths || paths.includes(keyPath(key)));
+    const keys = Object.keys(get().docs).filter(wanted);
+    await Promise.all(
+      keys.map((key) => {
+        const doc = get().docs[key];
+        if (doc?.dirty && (get().autosave || force)) {
+          timers.clearTimeout(saveTimers.get(key));
+          saveTimers.delete(key);
+          return saveKey(key);
+        }
+        return inflight.get(key) || null;
+      })
+    );
+    return keys
+      .filter((key) => {
+        const doc = get().docs[key];
+        return doc && (doc.dirty || doc.saving || doc.conflict || doc.saveError);
+      })
+      .map(keyPath);
+  }
+
+  function unsavedReason(paths) {
+    return `${paths.join(", ")} ${paths.length === 1 ? "has" : "have"} edits that are not saved yet. Save or undo them first.`;
   }
 
   /** Re-check the open files of the folder on screen against the disk. */
@@ -814,6 +931,9 @@ export function createEditorStore({
         text: diskText,
         dirty: false,
         editBase: null,
+        binary: latest.conflict?.diskBinary === true,
+        tooLarge: latest.conflict?.diskTooLarge === true,
+        readonly: latest.conflict?.diskReadonly === true,
         externalVersion: latest.externalVersion + 1,
       }));
       persistDraft(key, null);
@@ -894,16 +1014,28 @@ export function createEditorStore({
     }
     set({ branches: { ...get().branches, acting: true, error: null } });
     // The switch must see the user's last edits on disk, not race them there.
-    await flushSaves();
+    const unsaved = await settleSaves(root);
+    if (get().root !== root) {
+      return false;
+    }
+    if (unsaved.length) {
+      set({ branches: { ...get().branches, acting: false, error: unsavedReason(unsaved) } });
+      return false;
+    }
     try {
       await api.switchBranch({ root, branch, create, remote });
+      if (get().root !== root) {
+        return true;
+      }
       set({ branches: { ...get().branches, acting: false } });
       refreshTree();
       await checkDisk(root);
       await loadBranches();
       return true;
     } catch (error) {
-      set({ branches: { ...get().branches, acting: false, error: error.message } });
+      if (get().root === root) {
+        set({ branches: { ...get().branches, acting: false, error: error.message } });
+      }
       return false;
     }
   }
@@ -917,12 +1049,18 @@ export function createEditorStore({
     set({ branches: { ...get().branches, acting: true, error: null } });
     try {
       const { path } = await api.addWorktree({ root, branch, create, remote });
+      // The user may have gone to another folder meanwhile; that choice stands.
+      if (get().root !== root) {
+        return path;
+      }
       set({ branches: { ...get().branches, acting: false } });
       await setRoot(path);
       await loadBranches();
       return path;
     } catch (error) {
-      set({ branches: { ...get().branches, acting: false, error: error.message } });
+      if (get().root === root) {
+        set({ branches: { ...get().branches, acting: false, error: error.message } });
+      }
       return null;
     }
   }
@@ -1028,6 +1166,7 @@ export function createEditorStore({
     addWorktree,
     pinTab,
     setPanelView,
+    setTicked,
     showHistory,
     closeHistory,
     setViewMode,

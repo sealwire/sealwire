@@ -10,7 +10,7 @@ import { createStore } from "zustand/vanilla";
 import { t } from "../../shared/i18n.js";
 import { ContextMenu, MenuFilter, MenuHeading, MenuItem, MenuSeparator } from "../../shared/context-menu-react.js";
 import { branchMenuModel } from "./branch-menu-model.js";
-import { carrySelection, groupChanges } from "./changes-model.js";
+import { groupChanges } from "./changes-model.js";
 import { CHEVRON_DOWN_SVG, CHEVRON_RIGHT_SVG } from "../../svg.js";
 import { docKey } from "./editor-store.js";
 import { baseName, dirName, svg, useStore } from "./editor-ui.js";
@@ -332,11 +332,37 @@ function ChangedList({ store, activePath }) {
   );
 }
 
+/**
+ * What a diff against the last commit can show for this base: drawn only from an answer
+ * that read it, or that it is not in the commit; a failed or unreadable read says so.
+ */
+function baseState(base) {
+  if (!base || base.loading) {
+    return { note: t("Loading…"), original: null };
+  }
+  if (base.error) {
+    return { note: base.error, original: null };
+  }
+  if (base.binary) {
+    return { note: t("The last commit's version is not text, so there is no line diff."), original: null };
+  }
+  if (base.tooLarge) {
+    return { note: t("The last commit's version is too large to compare here."), original: null };
+  }
+  if (!base.tracked) {
+    return { note: t("New file — not in the last commit"), original: "" };
+  }
+  return { note: t("Compared with the last commit"), original: base.content ?? "" };
+}
+
 /** Read-only, one column: the text now, with what changed since the last commit marked. */
 export function DiffView({ doc, base, path }) {
   const hostRef = useRef(null);
-  const original = base?.tracked ? base.content ?? "" : "";
+  const { note, original } = baseState(base);
   useEffect(() => {
+    if (original === null) {
+      return undefined;
+    }
     let cancelled = false;
     let view = null;
     void import("./code-editor.js").then((mod) => {
@@ -352,12 +378,8 @@ export function DiffView({ doc, base, path }) {
   return h(
     React.Fragment,
     null,
-    h(
-      "div",
-      { className: "editor-panel-diff-note" },
-      base?.tracked ? t("Compared with the last commit") : t("New file — not in the last commit")
-    ),
-    h("div", { className: "editor-panel-diff", ref: hostRef })
+    h("div", { className: "editor-panel-diff-note" }, note),
+    original === null ? null : h("div", { className: "editor-panel-diff", ref: hostRef })
   );
 }
 
@@ -407,34 +429,18 @@ function ChangesPanel({ store, activePath }) {
   const root = useStore(store, (state) => state.root);
   const changes = useStore(store, (state) => state.changes);
   const commitState = useStore(store, (state) => state.commit);
-  const [selected, setSelected] = useState(() => new Set(changes.entries.map((entry) => entry.path)));
-  const known = useRef(new Set(changes.entries.map((entry) => entry.path)));
+  const selection = useStore(store, (state) => state.selection);
   const [message, setMessage] = useState("");
   useEffect(() => {
     void store.refreshTree();
   }, [store, root]);
-  useEffect(() => {
-    // Read before replacing it: the updater runs later, and must judge against the list
-    // the user last saw, or every new file would read as one they had unticked.
-    const before = known.current;
-    setSelected((previous) => carrySelection(previous, changes.entries, before));
-    known.current = new Set(changes.entries.map((entry) => entry.path));
-  }, [changes.entries]);
+  // The list on screen is only this folder's once it has been read for it.
+  const current = changes.root === root;
+  const selected = new Set(current && selection.root === root ? selection.ticked : []);
 
   const groups = groupChanges(changes.entries, changes.sessions);
-  const toggle = (paths, on) =>
-    setSelected((previous) => {
-      const next = new Set(previous);
-      for (const path of paths) {
-        if (on) {
-          next.add(path);
-        } else {
-          next.delete(path);
-        }
-      }
-      return next;
-    });
-  const chosen = changes.entries.filter((entry) => selected.has(entry.path)).map((entry) => entry.path);
+  const toggle = (paths, on) => store.setTicked(paths, on);
+  const chosen = current ? changes.entries.filter((entry) => selected.has(entry.path)).map((entry) => entry.path) : [];
   const open = (entry) => {
     if (entry.status === "D") {
       return;
@@ -446,7 +452,7 @@ function ChangesPanel({ store, activePath }) {
   };
 
   let body;
-  if (changes.loading && !changes.entries.length) {
+  if (!current || (changes.loading && !changes.entries.length)) {
     body = h("div", { className: "editor-tree-note" }, t("Loading…"));
   } else if (!changes.complete) {
     body = h("div", { className: "editor-tree-note" }, t("Too many changes to list here."));
@@ -924,11 +930,19 @@ export function CodeHost({ store, docKey: activeKey, doc, cursor, hidden }) {
     shown.current.add(activeKey);
   }, [ready, activeKey, showable]);
 
+  // Every change to the text, not only reloads: the same file can be typed into in another
+  // view, and this one must never hold an older buffer it could save back over it.
   useEffect(() => {
     if (ready && showable) {
       editorRef.current.replaceText(activeKey, doc.text);
     }
-  }, [ready, activeKey, doc?.externalVersion]);
+  }, [ready, activeKey, doc?.text, doc?.externalVersion]);
+
+  useEffect(() => {
+    if (ready && showable) {
+      editorRef.current.setReadonly(activeKey, Boolean(doc.readonly));
+    }
+  }, [ready, activeKey, showable, doc?.readonly]);
 
   useEffect(() => {
     if (ready && showable && doc.revealLine) {

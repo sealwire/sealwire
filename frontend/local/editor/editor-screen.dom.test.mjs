@@ -25,7 +25,8 @@ const React = (await import("react")).default;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { createEditorStore, docKey } = await import("./editor-store.js");
-const { EditorScreen } = await import("./editor-screen.js");
+const { EditorScreen, CodeHost, DiffView } = await import("./editor-screen.js");
+const { useStore } = await import("./editor-ui.js");
 const { createHistoryStore } = await import("./history-store.js");
 
 const h = React.createElement;
@@ -207,6 +208,84 @@ test("History is a tab beside the files: picking a file tab hides it, and its ta
     await settle();
     assert.ok(container.querySelector(".editor-history"));
     assert.equal(history.getState().selected, "c2", "the picked commit is still picked");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+async function mountCodeHost(store, key) {
+  function Host() {
+    const doc = useStore(store, (state) => state.docs[key]);
+    return h(CodeHost, { store, docKey: key, doc, cursor: null, hidden: false });
+  }
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => root.render(h(Host)));
+  await settle();
+  const content = () => container.querySelector(".editor-code").shadowRoot.querySelector(".cm-content");
+  return { root, content };
+}
+
+test("a code view follows text typed into the same file in another view", async () => {
+  const relay = relayWith({ "/a/foo.rs": "one\n" });
+  const store = createEditorStore({ api: relay.api, autosave: false });
+  await store.setRoot("/a");
+  store.openFile("foo.rs");
+  await settle();
+  const key = docKey("/a", "foo.rs");
+  const { root, content } = await mountCodeHost(store, key);
+  try {
+    assert.equal(content().textContent, "one");
+    // Typed in the session panel's view of the same file.
+    store.editKey(key, "two\n");
+    await settle();
+    assert.equal(content().textContent, "two", "this view would otherwise save its old text over the new");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("a code view stops taking keys once its file turns read-only", async () => {
+  const relay = relayWith({ "/a/foo.rs": "one\n" });
+  const store = createEditorStore({ api: relay.api, autosave: false });
+  await store.setRoot("/a");
+  store.openFile("foo.rs");
+  await settle();
+  const key = docKey("/a", "foo.rs");
+  const { root, content } = await mountCodeHost(store, key);
+  try {
+    assert.equal(content().getAttribute("contenteditable"), "true");
+    const docs = store.getState().docs;
+    await act(async () => store.setState({ docs: { ...docs, [key]: { ...docs[key], readonly: true } } }));
+    await settle();
+    assert.equal(content().getAttribute("contenteditable"), "false");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("a diff is drawn only against a base that was read; anything else says why not", async () => {
+  const doc = { text: "now\n", path: "a.rs" };
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const note = () => container.querySelector(".editor-panel-diff-note")?.textContent || "";
+  const drawn = () => Boolean(container.querySelector(".editor-panel-diff"));
+  try {
+    for (const [base, expected] of [
+      [{ loading: true }, /Loading/],
+      [{ loading: false, error: "reading the committed a.rs took too long" }, /took too long/],
+      [{ loading: false, tracked: true, binary: true, content: null }, /not text/],
+      [{ loading: false, tracked: true, tooLarge: true, content: null }, /too large/],
+    ]) {
+      await act(async () => root.render(h(DiffView, { doc, base, path: "a.rs" })));
+      assert.match(note(), expected, JSON.stringify(base));
+      assert.equal(drawn(), false, `no diff for ${JSON.stringify(base)}`);
+    }
+    await act(async () => root.render(h(DiffView, { doc, base: { loading: false, tracked: false }, path: "a.rs" })));
+    assert.match(note(), /New file/);
+    assert.equal(drawn(), true);
   } finally {
     await act(async () => root.unmount());
   }

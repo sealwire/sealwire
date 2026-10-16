@@ -418,4 +418,6 @@ export default {
   "Filter by author": "按作者筛选",
   "Path": "路径",
   "Filter by path": "按路径筛选",
+  "The last commit's version is not text, so there is no line diff.": "上次提交里的版本不是文本，没法逐行对比。",
+  "The last commit's version is too large to compare here.": "上次提交里的版本太大，这里没法对比。",
 };

@@ -350,15 +350,19 @@ impl AppState {
     /// Why a branch switch in this folder would be refused right now. The whole worktree
     /// counts, not just the folder the editor is rooted at: a switch changes all of it.
     async fn editor_switch_blocker(&self, workspace: &TrustedWorkspace) -> Option<String> {
-        let tree = git_line(workspace, &["rev-parse", "--show-toplevel"])
+        let tree = worktree_top(workspace).await;
+        // A linked worktree nested in this one has its own checkout; a switch here leaves it.
+        let nested: Vec<String> = list_worktrees_in(workspace)
             .await
-            .map(|top| normalize_cwd(&top))
-            .unwrap_or_else(|| workspace.as_str().to_string());
+            .into_iter()
+            .map(|other| other.path)
+            .filter(|path| *path != tree && Path::new(path).starts_with(&tree))
+            .collect();
         let relay = self.relay.read().await;
         if relay.is_cwd_team_locked(&tree) {
             return Some("a task team is working in this folder".to_string());
         }
-        if relay.has_working_thread_under(&tree) {
+        if relay.has_working_thread_over(&tree, &nested) {
             return Some(
                 "an agent is working in this folder right now; switching would change files under it"
                     .to_string(),
@@ -443,6 +447,15 @@ impl AppState {
     ) -> Result<EditorSwitchReceipt, String> {
         let device_id = require_device_id(input.device_id.clone())?;
         let workspace = self.editor_workspace(Some(&device_id), &input.root).await?;
+        // A switch rewrites the whole worktree, so all of it must be the caller's to change.
+        let top = worktree_top(&workspace).await;
+        if top != workspace.as_str() {
+            self.editor_workspace(Some(&device_id), &top)
+                .await
+                .map_err(|_| {
+                    format!("Not switched: a switch changes all of {top}, not only this folder, and that is outside what the relay may change.")
+                })?;
+        }
         if let Some(reason) = self.editor_switch_blocker(&workspace).await {
             return Err(format!("Not switched: {reason}."));
         }
@@ -484,16 +497,18 @@ impl AppState {
     ) -> (HashMap<String, String>, Vec<EditorSessionView>) {
         let relay = self.relay.read().await;
         let tree = Path::new(root);
-        let mut latest: HashMap<String, (u64, String)> = HashMap::new();
+        // Live writes carry a relay-wide revision. Writes read back from a saved conversation
+        // only have their place in it, which says nothing against another session.
+        let mut live: HashMap<String, (u64, String)> = HashMap::new();
+        let mut saved: HashMap<String, HashSet<String>> = HashMap::new();
         for (thread_id, runtime) in relay.runtimes.iter() {
             if relay.thread_is_locally_deleted(thread_id) {
                 continue;
             }
-            for (index, record) in runtime.transcript.iter().enumerate() {
+            for record in runtime.transcript.iter() {
                 let Some(tool) = record.tool.as_ref() else {
                     continue;
                 };
-                let when = record.last_live_upsert_revision.unwrap_or(index as u64);
                 for path in landed_write_paths(std::iter::once((tool, record.status.as_str()))) {
                     let Some(abs) = absolute_from(&runtime.current_cwd, &path) else {
                         continue;
@@ -502,13 +517,27 @@ impl AppState {
                         continue;
                     }
                     let key = abs.to_string_lossy().to_string();
-                    if latest.get(&key).is_none_or(|(seen, _)| *seen < when) {
-                        latest.insert(key, (when, thread_id.clone()));
+                    match record.last_live_upsert_revision {
+                        Some(when) => {
+                            if live.get(&key).is_none_or(|(seen, _)| *seen < when) {
+                                live.insert(key, (when, thread_id.clone()));
+                            }
+                        }
+                        None => {
+                            saved.entry(key).or_default().insert(thread_id.clone());
+                        }
                     }
                 }
             }
         }
-        let mut ids: Vec<String> = latest.values().map(|(_, id)| id.clone()).collect();
+        let mut owners: HashMap<String, String> =
+            live.into_iter().map(|(path, (_, id))| (path, id)).collect();
+        for (path, threads) in saved {
+            if threads.len() == 1 && !owners.contains_key(&path) {
+                owners.insert(path, threads.into_iter().next().unwrap_or_default());
+            }
+        }
+        let mut ids: Vec<String> = owners.values().cloned().collect();
         ids.sort();
         ids.dedup();
         let sessions = ids
@@ -522,10 +551,6 @@ impl AppState {
                     .map(|thread| thread.provider.clone()),
                 id,
             })
-            .collect();
-        let owners = latest
-            .into_iter()
-            .map(|(path, (_, id))| (path, id))
             .collect();
         (owners, sessions)
     }
@@ -553,27 +578,65 @@ impl AppState {
         for path in &input.paths {
             validate_repo_relative_path(path)?;
         }
+        // Each path must be one changed file: a folder name would take everything under it.
+        let changed = match GitView::open(&workspace).await {
+            GitProbe::Repo(git) => git.changed(&workspace).await.ok_or_else(|| {
+                "git did not list this folder's changes in time; try again".to_string()
+            })?,
+            _ => return Err("this folder is not in a git repository".to_string()),
+        };
+        let mut chosen: Vec<&str> = Vec::new();
+        let mut paths: Vec<String> = Vec::new();
+        for path in &input.paths {
+            let change = changed
+                .get(path)
+                .ok_or_else(|| format!("{path} has no change to commit"))?;
+            chosen.push(path);
+            paths.push(path.clone());
+            // The old name is already out of the index, so it is committed but not added.
+            match &change.renamed_from {
+                Some(Some(source)) => paths.push(source.clone()),
+                Some(None) => {
+                    return Err(format!(
+                        "{path} was moved here from outside this folder; commit it from the repository's top folder"
+                    ))
+                }
+                None => {}
+            }
+        }
+        chosen.sort();
+        chosen.dedup();
+        paths.sort();
+        paths.dedup();
         let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
-        add.extend(input.paths.iter().map(String::as_str));
+        add.extend(chosen);
         let staged = run_git_capture(&workspace, &add).await?;
         if !staged.status.success() {
             return Err(git_words(&staged));
         }
         let mut child = background_git(&workspace)
             .args(["--literal-pathspecs", "commit", "--file=-", "--"])
-            .args(&input.paths)
+            .args(&paths)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("could not run git commit: {error}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(message.as_bytes()).await;
+        // Written while the output drains: hooks run before git reads the message, and a
+        // hook filling the output pipe would otherwise wait on us while we wait on git.
+        let stdin = child.stdin.take();
+        let body = message.as_bytes().to_vec();
+        let write = async move {
+            if let Some(mut stdin) = stdin {
+                stdin.write_all(&body).await?;
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        let (written, output) = tokio::join!(write, child.wait_with_output());
+        let output = output.map_err(|error| format!("git commit did not finish: {error}"))?;
+        if let Err(error) = written {
+            tracing::warn!(%error, "editor commit: writing the message to git failed");
         }
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|error| format!("git commit did not finish: {error}"))?;
         if !output.status.success() {
             return Err(git_words(&output));
         }
@@ -681,8 +744,15 @@ fn git_words(output: &std::process::Output) -> String {
 }
 
 /// A path an agent wrote, made absolute against the folder it worked in, without
-/// touching the disk.
+/// touching the disk. A path that climbs with `..` is left out: through a symlink it can
+/// name a different file than the one it reads as.
 fn absolute_from(cwd: &str, path: &str) -> Option<PathBuf> {
+    if Path::new(path)
+        .components()
+        .any(|part| part == std::path::Component::ParentDir)
+    {
+        return None;
+    }
     let joined = if Path::new(path).is_absolute() {
         PathBuf::from(path)
     } else if cwd.is_empty() {
@@ -701,6 +771,14 @@ fn absolute_from(cwd: &str, path: &str) -> Option<PathBuf> {
         }
     }
     Some(clean)
+}
+
+/// The top of the worktree holding `workspace`, or the folder itself outside a repository.
+async fn worktree_top(workspace: &TrustedWorkspace) -> String {
+    git_line(workspace, &["rev-parse", "--show-toplevel"])
+        .await
+        .map(|top| normalize_cwd(&top))
+        .unwrap_or_else(|| workspace.as_str().to_string())
 }
 
 fn branch_choice(input: &EditorBranchInput) -> BranchChoice<'_> {
@@ -755,6 +833,16 @@ impl GitView {
 
     /// Changed paths relative to the editor root. `None` means "could not tell in time".
     async fn statuses(&self, workspace: &TrustedWorkspace) -> Option<HashMap<String, String>> {
+        Some(
+            self.changed(workspace)
+                .await?
+                .into_iter()
+                .map(|(path, change)| (path, change.status))
+                .collect(),
+        )
+    }
+
+    async fn changed(&self, workspace: &TrustedWorkspace) -> Option<HashMap<String, Change>> {
         let raw = match tokio::time::timeout(EDITOR_GIT_BUDGET, read_status(workspace)).await {
             Ok(raw) => raw?,
             Err(_) => return None,
@@ -762,15 +850,37 @@ impl GitView {
         Some(
             parse_porcelain_z(&raw)
                 .into_iter()
-                .filter_map(|(path, status)| {
-                    path.strip_prefix(&self.prefix)
-                        .filter(|rel| !rel.is_empty())
-                        .map(|rel| (rel.to_string(), status))
+                .filter_map(|(path, status, renamed_from)| {
+                    let rel = path
+                        .strip_prefix(&self.prefix)
+                        .filter(|rel| !rel.is_empty())?;
+                    let renamed_from = renamed_from.map(|source| {
+                        source
+                            .strip_prefix(&self.prefix)
+                            .filter(|rel| !rel.is_empty())
+                            .map(str::to_string)
+                    });
+                    Some((
+                        rel.to_string(),
+                        Change {
+                            status,
+                            renamed_from,
+                        },
+                    ))
                 })
                 .collect(),
         )
     }
 }
+
+/// One changed path. `renamed_from` is `Some(None)` when the rename came from outside the
+/// editor root.
+struct Change {
+    status: String,
+    renamed_from: Option<Option<String>>,
+}
+
+impl GitView {}
 
 async fn read_status(workspace: &TrustedWorkspace) -> Option<Vec<u8>> {
     let mut child = background_git(workspace)
@@ -800,8 +910,9 @@ async fn read_status(workspace: &TrustedWorkspace) -> Option<Vec<u8>> {
     }
 }
 
-/// `XY path\0`, plus a second `orig\0` field after a rename or copy.
-fn parse_porcelain_z(raw: &[u8]) -> Vec<(String, String)> {
+/// `XY path\0`, plus a second `orig\0` field after a rename or copy. The source of a
+/// rename is kept: committing the new name alone would leave its deletion behind.
+fn parse_porcelain_z(raw: &[u8]) -> Vec<(String, String, Option<String>)> {
     let mut fields = raw
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty());
@@ -811,13 +922,23 @@ fn parse_porcelain_z(raw: &[u8]) -> Vec<(String, String)> {
             continue;
         }
         let (x, y) = (field[0] as char, field[1] as char);
-        if matches!(x, 'R' | 'C') {
-            fields.next();
-        }
+        let source = if matches!(x, 'R' | 'C') {
+            fields.next()
+        } else {
+            None
+        };
         let Ok(path) = std::str::from_utf8(&field[3..]) else {
             continue;
         };
-        entries.push((path.to_string(), status_letter(x, y).to_string()));
+        let renamed_from = source
+            .filter(|_| x == 'R')
+            .and_then(|source| std::str::from_utf8(source).ok())
+            .map(str::to_string);
+        entries.push((
+            path.to_string(),
+            status_letter(x, y).to_string(),
+            renamed_from,
+        ));
     }
     entries
 }
@@ -1048,15 +1169,23 @@ mod tests {
     }
 
     #[test]
-    fn porcelain_parsing_skips_the_original_path_of_a_rename() {
-        let raw = b"R  new.rs\0old.rs\0 M src/a.rs\0?? b.txt\0UU c.rs\0";
+    fn porcelain_parsing_keeps_the_source_of_a_rename_beside_its_new_name() {
+        let raw = b"R  new.rs\0old.rs\0C  copy.rs\0orig.rs\0 M src/a.rs\0?? b.txt\0UU c.rs\0";
+        let entry = |path: &str, status: &str, from: Option<&str>| {
+            (
+                path.to_string(),
+                status.to_string(),
+                from.map(str::to_string),
+            )
+        };
         assert_eq!(
             parse_porcelain_z(raw),
             vec![
-                ("new.rs".to_string(), "R".to_string()),
-                ("src/a.rs".to_string(), "M".to_string()),
-                ("b.txt".to_string(), "?".to_string()),
-                ("c.rs".to_string(), "U".to_string()),
+                entry("new.rs", "R", Some("old.rs")),
+                entry("copy.rs", "R", None),
+                entry("src/a.rs", "M", None),
+                entry("b.txt", "?", None),
+                entry("c.rs", "U", None),
             ]
         );
     }

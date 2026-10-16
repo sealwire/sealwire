@@ -900,8 +900,8 @@ const editorPanelHost = createEditorPanelHost({
   getThreadId: () => viewedThreadId(),
   railControl: {
     isOpen: () => rightPanelControl.isOpen(),
-    open: () => rightPanelControl.open(),
     getWidth: () => rightPanelControl.getWidth(),
+    getPreferredWidth: () => rightPanelControl.getPreferredWidth(),
     setWidth: (width, options) => rightPanelControl.setWidth(width, options),
   },
   openEditor: () => void openEditorDestination(sessionViewController),

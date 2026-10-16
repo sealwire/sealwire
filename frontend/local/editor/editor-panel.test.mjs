@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createEditorPanelHost, panelPath } from "./editor-panel.js";
+import { changesOpener, createEditorPanelHost, panelPath } from "./editor-panel.js";
 
 test("an agent's path is taken relative to the session's worktree, never outside it", () => {
   const root = "/repo";
@@ -69,4 +69,43 @@ test("a path outside the session's worktree is left to the link's own fallback",
   assert.equal(host.openInPanel({ path: "/elsewhere/a.rs" }), false);
   assert.equal(editorStore.opened.length, 0);
   assert.equal(host.panel.getState().showingFile, false);
+});
+
+function storedRail(width) {
+  const rail = fakeRail(width);
+  rail.opened = 0;
+  rail.open = () => {
+    rail.opened += 1;
+    rail.setWidth(320, { commit: true, updateOpenWidth: true });
+  };
+  rail.getPreferredWidth = () => 360;
+  return rail;
+}
+
+test("a file opened while the rail is collapsed opens it again, without saving any width", () => {
+  const editorStore = fakeEditorStore();
+  const rail = storedRail(320);
+  const host = createEditorPanelHost({
+    editorStore,
+    getSessionRoot: () => "/repo",
+    railControl: rail,
+    viewportWidth: () => 1600,
+  });
+  host.openInPanel({ path: "src/a.rs" });
+  // The user collapses the rail with its own toggle while the file is showing.
+  rail.setWidth(0, { commit: true, updateOpenWidth: false });
+  rail.calls.length = 0;
+  host.openInPanel({ path: "src/b.rs" });
+  assert.ok(rail.isOpen(), "the next file link brings the rail back");
+  assert.equal(rail.opened, 0, "open() would save its width as the user's choice");
+  assert.ok(rail.calls.every((call) => call.options?.commit === false), JSON.stringify(rail.calls));
+  host.showFile(false);
+  assert.ok(rail.getWidth() > 0, "leaving the file shows the rail at its usual width, not collapsed");
+});
+
+test("Open on a change shown for another worktree is not offered in the session's panel", () => {
+  const open = () => true;
+  assert.equal(changesOpener(open, "/repo", null), open);
+  assert.equal(changesOpener(open, "/repo", "/repo"), open);
+  assert.equal(changesOpener(open, "/repo", "/repo/.sealwire/worktrees/b"), null);
 });
