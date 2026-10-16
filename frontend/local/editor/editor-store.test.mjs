@@ -421,3 +421,60 @@ test("a new worktree becomes the folder on screen", async () => {
   assert.equal(path, "/repo/.sealwire/worktrees/spike");
   assert.equal(store.getState().root, "/repo/.sealwire/worktrees/spike");
 });
+
+test("a click in Changes reuses one preview tab until the user edits in it", async () => {
+  const { store } = await openEditor({ files: { "a.rs": "a\n", "b.rs": "b\n", "c.rs": "c\n", "d.rs": "d\n" } });
+  await store.closeTabs(["a.rs"]);
+  store.openFile("b.rs", { preview: true });
+  store.openFile("c.rs", { preview: true });
+  await settle();
+  assert.deepEqual(store.tabsOf().paths, ["c.rs"], "the second preview replaced the first");
+  assert.equal(store.getState().docs[docKey(ROOT, "b.rs")], undefined, "the replaced clean doc is let go");
+  store.edit("c.rs", "c edited\n");
+  assert.equal(store.tabsOf().preview, null, "typing keeps the tab");
+  store.openFile("d.rs", { preview: true });
+  assert.deepEqual(store.tabsOf().paths, ["c.rs", "d.rs"]);
+  assert.equal(store.tabsOf().preview, "d.rs");
+});
+
+test("a commit saves pending edits first and keeps a hook's refusal", async () => {
+  const { relay, store } = await openEditor();
+  const seen = [];
+  relay.api.commit = async ({ paths, message }) => {
+    seen.push({ paths, message, disk: relay.disk.get("a.rs") });
+    if (message === "blocked") {
+      throw new Error("pre-commit: blocked by the repo hook");
+    }
+    return { commit: "abc1234", subject: message };
+  };
+  store.edit("a.rs", "fn committed() {}\n");
+  const receipt = await store.commit({ paths: ["a.rs"], message: "Commit it" });
+  assert.deepEqual(receipt, { commit: "abc1234", subject: "Commit it" });
+  assert.equal(seen[0].disk, "fn committed() {}\n");
+  assert.equal(await store.commit({ paths: ["a.rs"], message: "blocked" }), null);
+  assert.match(store.getState().commit.error, /blocked by the repo hook/);
+});
+
+test("a commit and a branch switch wait for the save they start to land", async () => {
+  const { relay, store } = await openEditor();
+  const write = relay.api.writeFile;
+  relay.api.writeFile = (request) => new Promise((resolve) => setTimeout(() => resolve(write(request)), 20));
+  const seen = [];
+  relay.api.commit = async () => {
+    seen.push(["commit", relay.disk.get("a.rs")]);
+    return { commit: "abc1234", subject: "x" };
+  };
+  relay.api.switchBranch = async () => {
+    seen.push(["switch", relay.disk.get("a.rs")]);
+    return { current: "topic" };
+  };
+  relay.api.branches = async () => ({ current: "topic", branches: [], worktrees: [], busy: null });
+  store.edit("a.rs", "fn slow_save() {}\n");
+  await store.commit({ paths: ["a.rs"], message: "x" });
+  store.edit("a.rs", "fn slow_save_again() {}\n");
+  await store.switchBranch({ branch: "topic" });
+  assert.deepEqual(seen, [
+    ["commit", "fn slow_save() {}\n"],
+    ["switch", "fn slow_save_again() {}\n"],
+  ]);
+});

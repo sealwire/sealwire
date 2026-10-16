@@ -2,6 +2,7 @@ use super::*;
 use axum::http::{header, header::HeaderName, Method, StatusCode};
 
 mod editor_branches;
+mod editor_commit;
 mod editor_files;
 use relay_http::{
     apply_standard_security_headers, build_content_security_policy, DEFAULT_CONNECT_SRC,

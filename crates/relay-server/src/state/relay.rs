@@ -1128,7 +1128,7 @@ impl RelayState {
     }
 
     /// Resolve a thread's label for cards, session selection and notifications.
-    fn thread_display_name(&self, thread_id: &str) -> Option<String> {
+    pub(crate) fn thread_display_name(&self, thread_id: &str) -> Option<String> {
         self.thread_custom_name(thread_id).or_else(|| {
             self.threads
                 .iter()

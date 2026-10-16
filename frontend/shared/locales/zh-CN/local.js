@@ -378,4 +378,13 @@ export default {
   "New branch name": "新 branch 名",
   "Create here": "在这里创建",
   "In new worktree": "放到新 worktree",
+
+  // Editor Changes panel
+  "Not from a session": "不是会话改的",
+  "Commit message": "提交信息",
+  "Committed {commit}: {subject}": "已提交 {commit}：{subject}",
+  "Committing…": "正在提交…",
+  "Commit 1 file": "提交 1 个文件",
+  "Commit {count} files": "提交 {count} 个文件",
+  "Changed by {session}": "由 {session} 修改",
 };

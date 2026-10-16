@@ -41,6 +41,9 @@ export function createEditorApi({ apiFetch, getDeviceId }) {
     changes: (root) => get("/api/editor/changes", { root }),
     threadWorkspace: (threadId) => get("/api/thread/workspace", { thread_id: threadId }),
     branches: (root) => get("/api/editor/branches", { root }),
+    async commit({ root, paths, message }) {
+      return post("/api/editor/commit", { root, paths, message });
+    },
     async switchBranch({ root, branch, create = false, remote = false }) {
       return post("/api/editor/switch", { root, branch, create, remote });
     },

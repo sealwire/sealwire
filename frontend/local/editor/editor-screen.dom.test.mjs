@@ -101,3 +101,34 @@ test("a close confirmation answers for the folder it was asked in, even after sw
     await act(async () => root.unmount());
   }
 });
+
+test("files that arrive in the Changes list come ticked", async () => {
+  const relay = relayWith({ "/a/x.rs": "x\n", "/a/y.rs": "y\n" });
+  relay.api.changes = () =>
+    new Promise((resolve) =>
+      setTimeout(() => resolve({ entries: [{ path: "x.rs", status: "M" }, { path: "y.rs", status: "?" }], sessions: [], complete: true, is_repo: true }), 30)
+    );
+  const store = createEditorStore({ api: relay.api, autosave: true });
+  await store.setRoot("/a");
+  store.setChangedOnly(false);
+  const host = { store, isVisible: () => true, ensureLoaded() {} };
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(h(EditorScreen, { host })));
+    await act(async () => {
+      container.querySelector(".editor-panel-view:nth-child(2)").click();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+    await settle();
+    const boxes = [...container.querySelectorAll(".editor-change-row input[type=checkbox]")];
+    assert.equal(boxes.length, 2);
+    assert.deepEqual(boxes.map((box) => box.checked), [true, true]);
+    assert.equal(container.querySelector(".editor-commit-button").textContent, "Commit 2 files");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});

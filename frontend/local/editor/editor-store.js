@@ -129,7 +129,12 @@ export function createEditorStore({
     dirs: {},
     expanded: { "": true },
     changedOnly: false,
-    changes: { entries: [], loading: false, complete: true, isRepo: true },
+    changes: { entries: [], sessions: [], loading: false, complete: true, isRepo: true },
+    // Left panel: the file tree or the changed files.
+    panelView: "files",
+    // "diff" or "edit" per document; edit when absent.
+    viewModes: {},
+    commit: { committing: false, error: null, last: null },
     // The folder's branches and worktrees, read when the location menu opens.
     branches: { loading: false, error: null, data: null, acting: false },
     tabsByRoot: persisted.tabsByRoot && typeof persisted.tabsByRoot === "object" ? persisted.tabsByRoot : {},
@@ -172,11 +177,15 @@ export function createEditorStore({
 
   function tabsOf(root = get().root) {
     const entry = get().tabsByRoot[root];
-    return { paths: Array.isArray(entry?.paths) ? entry.paths : [], active: entry?.active || null };
+    const paths = Array.isArray(entry?.paths) ? entry.paths : [];
+    const preview = entry?.preview && paths.includes(entry.preview) ? entry.preview : null;
+    return { paths, active: entry?.active || null, preview };
   }
 
-  function setTabs(paths, active, root = get().root) {
-    set({ tabsByRoot: { ...get().tabsByRoot, [root]: { paths, active } } });
+  // `preview` is the one tab a click in Changes reuses; it is kept unless told otherwise.
+  function setTabs(paths, active, root = get().root, preview = tabsOf(root).preview) {
+    const kept = preview && paths.includes(preview) ? preview : null;
+    set({ tabsByRoot: { ...get().tabsByRoot, [root]: { paths, active, preview: kept } } });
     persistSession();
   }
 
@@ -218,11 +227,19 @@ export function createEditorStore({
     try {
       const view = await api.changes(root);
       if (get().root === root) {
-        set({ changes: { entries: view.entries, loading: false, complete: view.complete, isRepo: view.is_repo } });
+        set({
+          changes: {
+            entries: view.entries,
+            sessions: view.sessions || [],
+            loading: false,
+            complete: view.complete,
+            isRepo: view.is_repo,
+          },
+        });
       }
     } catch {
       if (get().root === root) {
-        set({ changes: { entries: [], loading: false, complete: false, isRepo: true } });
+        set({ changes: { entries: [], sessions: [], loading: false, complete: false, isRepo: true } });
       }
     }
   }
@@ -369,23 +386,84 @@ export function createEditorStore({
     }
   }
 
-  /** Open `path` in a tab beside the current one; an open file just gets focus. */
-  function openFile(path, { line = null, root = get().root } = {}) {
+  /**
+   * Open `path` in a tab beside the current one; an open file just gets focus. A preview
+   * open (a click in Changes) takes over the previous preview tab instead of adding one.
+   */
+  function openFile(path, { line = null, root = get().root, preview = false } = {}) {
     if (!root || !path) {
       return null;
     }
-    const { paths, active } = tabsOf(root);
+    const { paths, active, preview: previewPath } = tabsOf(root);
     let next = paths;
+    let nextPreview = previewPath;
     if (!paths.includes(path)) {
-      const at = active ? paths.indexOf(active) + 1 : paths.length;
-      next = [...paths.slice(0, at), path, ...paths.slice(at)];
+      if (preview && previewPath) {
+        next = paths.map((entry) => (entry === previewPath ? path : entry));
+        dropIfClean(root, previewPath);
+      } else {
+        const at = active ? paths.indexOf(active) + 1 : paths.length;
+        next = [...paths.slice(0, at), path, ...paths.slice(at)];
+      }
+      nextPreview = preview ? path : previewPath;
+    } else if (!preview && previewPath === path) {
+      nextPreview = null;
     }
-    setTabs(next, path, root);
+    setTabs(next, path, root, nextPreview);
     const key = ensureDoc(root, path);
     if (line) {
       setDoc(key, { revealLine: { line, at: now() } });
     }
     return key;
+  }
+
+  function dropIfClean(root, path) {
+    const key = docKey(root, path);
+    const doc = get().docs[key];
+    if (doc && !doc.dirty && !doc.conflict) {
+      const docs = { ...get().docs };
+      delete docs[key];
+      cursors.delete(key);
+      set({ docs });
+    }
+  }
+
+  /** Keep a preview tab: it stops being the one the next click in Changes replaces. */
+  function pinTab(path, root = get().root) {
+    const { paths, active, preview } = tabsOf(root);
+    if (preview === path) {
+      setTabs(paths, active, root, null);
+    }
+  }
+
+  function setPanelView(view) {
+    set({ panelView: view === "changes" ? "changes" : "files" });
+    if (view === "changes") {
+      void loadChanges();
+    }
+  }
+
+  function setViewMode(key, mode) {
+    set({ viewModes: { ...get().viewModes, [key]: mode === "diff" ? "diff" : "edit" } });
+  }
+
+  /** Commit exactly the ticked files. Git and the repository's hooks have the last word. */
+  async function commit({ paths, message }) {
+    const { root } = get();
+    if (!root || !paths?.length || !message?.trim() || get().commit.committing) {
+      return null;
+    }
+    set({ commit: { committing: true, error: null, last: get().commit.last } });
+    await flushSaves();
+    try {
+      const receipt = await api.commit({ root, paths, message });
+      set({ commit: { committing: false, error: null, last: receipt } });
+      refreshTree();
+      return receipt;
+    } catch (error) {
+      set({ commit: { committing: false, error: error.message, last: get().commit.last } });
+      return null;
+    }
   }
 
   function focusTab(path, root = get().root) {
@@ -460,6 +538,8 @@ export function createEditorStore({
     if (!doc || doc.loading || doc.binary || doc.tooLarge || doc.text === text) {
       return;
     }
+    // Typing in a preview tab keeps it.
+    pinTab(keyPath(key), keyRoot(key));
     const dirty = text !== doc.savedText;
     setDoc(key, {
       text,
@@ -582,18 +662,23 @@ export function createEditorStore({
     return saveKey(docKey(root, path));
   }
 
-  /** Save everything with unsaved edits now: tab switch, leaving the screen, losing focus. */
+  /**
+   * Save everything with unsaved edits now: tab switch, leaving the screen, losing focus.
+   * Resolves once those saves have landed, for callers that must act after them.
+   */
   function flushSaves() {
     if (!get().autosave) {
-      return;
+      return Promise.resolve();
     }
+    const saving = [];
     for (const [key, doc] of Object.entries(get().docs)) {
       if (doc.dirty) {
         timers.clearTimeout(saveTimers.get(key));
         saveTimers.delete(key);
-        void saveKey(key);
+        saving.push(saveKey(key));
       }
     }
+    return Promise.all(saving);
   }
 
   /** Re-check the open files of the folder on screen against the disk. */
@@ -782,8 +867,9 @@ export function createEditorStore({
     if (!root || !branch || get().branches.acting) {
       return false;
     }
-    flushSaves();
     set({ branches: { ...get().branches, acting: true, error: null } });
+    // The switch must see the user's last edits on disk, not race them there.
+    await flushSaves();
     try {
       await api.switchBranch({ root, branch, create, remote });
       set({ branches: { ...get().branches, acting: false } });
@@ -915,6 +1001,10 @@ export function createEditorStore({
     loadBranches,
     switchBranch,
     addWorktree,
+    pinTab,
+    setPanelView,
+    setViewMode,
+    commit,
     setAutosave,
   };
 }

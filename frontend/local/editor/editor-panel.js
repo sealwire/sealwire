@@ -14,9 +14,11 @@ import {
   CodeHost,
   CompareView,
   DocBanners,
+  DiffView,
   Placeholder,
   TabStrip,
   useStore,
+  ViewModeSwitch,
 } from "./editor-screen.js";
 
 const h = React.createElement;
@@ -192,34 +194,6 @@ export function createEditorPanelHost({
   };
 }
 
-function PanelDiff({ doc, base, path }) {
-  const hostRef = useRef(null);
-  const original = base?.tracked ? base.content ?? "" : "";
-  useEffect(() => {
-    let cancelled = false;
-    let view = null;
-    void import("./code-editor.js").then((mod) => {
-      if (!cancelled && hostRef.current) {
-        view = mod.createDiffView(hostRef.current, { original, text: doc.text, path });
-      }
-    });
-    return () => {
-      cancelled = true;
-      view?.destroy();
-    };
-  }, [original, doc.text, path]);
-  return h(
-    React.Fragment,
-    null,
-    h(
-      "div",
-      { className: "editor-panel-diff-note" },
-      base?.tracked ? t("Compared with the last commit") : t("New file — not in the last commit")
-    ),
-    h("div", { className: "editor-panel-diff", ref: hostRef })
-  );
-}
-
 function PanelFile({ host, root, docKey: key, doc, mode, autosave }) {
   const { editorStore: store } = host;
   const [comparing, setComparing] = useState(false);
@@ -263,29 +237,7 @@ function PanelFile({ host, root, docKey: key, doc, mode, autosave }) {
       ),
       h("span", { className: "editor-status-grow" }),
       saveState ? h("span", { className: "editor-panel-save" }, saveState) : null,
-      !body
-        ? h(
-            "span",
-            { className: "editor-mode", role: "radiogroup", "aria-label": t("View") },
-            ...[
-              ["diff", t("Diff")],
-              ["edit", t("Edit")],
-            ].map(([value, label]) =>
-              h(
-                "button",
-                {
-                  key: value,
-                  type: "button",
-                  role: "radio",
-                  "aria-checked": mode === value,
-                  className: mode === value ? "editor-mode-option is-selected" : "editor-mode-option",
-                  onClick: () => host.setMode(key, value),
-                },
-                label
-              )
-            )
-          )
-        : null,
+      !body ? h(ViewModeSwitch, { mode, onChange: (value) => host.setMode(key, value) }) : null,
       button(t("Open in Editor"), () => void host.openInEditor(key))
     ),
     !compareDoc ? h(DocBanners, { store, docKey: key, doc, onCompare: () => setComparing(true) }) : null,
@@ -312,7 +264,7 @@ function PanelFile({ host, root, docKey: key, doc, mode, autosave }) {
         })
       : null,
     body,
-    showDiff ? h(PanelDiff, { doc, base: doc.base, path: doc.path }) : null,
+    showDiff ? h(DiffView, { doc, base: doc.base, path: doc.path }) : null,
     h(CodeHost, { store, docKey: key, doc, cursor: null, hidden: Boolean(body || compareDoc || showDiff) })
   );
 }

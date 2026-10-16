@@ -2052,6 +2052,32 @@ pub struct EditorBaseView {
 pub struct EditorChangeEntry {
     pub path: String,
     pub status: String,
+    /// The loaded session that last wrote this file, if one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorSessionView {
+    pub id: String,
+    pub title: Option<String>,
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EditorCommitInput {
+    pub root: String,
+    /// Exactly the files to commit, relative to the editor root.
+    pub paths: Vec<String>,
+    pub message: String,
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorCommitReceipt {
+    pub commit: String,
+    pub subject: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2061,6 +2087,9 @@ pub struct EditorChangesView {
     /// False when the scan ran out of time or output budget; `entries` is then empty.
     pub complete: bool,
     pub entries: Vec<EditorChangeEntry>,
+    /// The sessions named by `entries[].session`.
+    #[serde(default)]
+    pub sessions: Vec<EditorSessionView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

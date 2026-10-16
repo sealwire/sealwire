@@ -37,7 +37,7 @@ pub(crate) use self::relay::relay_boot_id;
 pub(crate) use self::relay::relay_clock_ms;
 pub(crate) use self::relay::IdSpace;
 #[cfg(test)]
-use self::relay::TranscriptRecord;
+pub(crate) use self::relay::TranscriptRecord;
 pub(crate) use self::relay::{
     clip_chars, injection_kind_from_name, injection_kind_name, DelegateMark, ForkMark, GoalMark,
     HandoverMark, InjectedMessage, InjectionTag, MessageAnchor, ReviewMark,

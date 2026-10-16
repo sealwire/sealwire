@@ -12,9 +12,9 @@ use super::worktree::{add_branch_worktree, git_line, switch_branch, BranchChoice
 use super::*;
 use crate::protocol::{
     EditorBaseView, EditorBranchInput, EditorBranchView, EditorBranchesView, EditorChangeEntry,
-    EditorChangesView, EditorDirEntry, EditorDirListing, EditorEntryKind, EditorFileStat,
-    EditorFileView, EditorSwitchReceipt, EditorWorktreeReceipt, EditorWriteInput,
-    EditorWriteOutcome,
+    EditorChangesView, EditorCommitInput, EditorCommitReceipt, EditorDirEntry, EditorDirListing,
+    EditorEntryKind, EditorFileStat, EditorFileView, EditorSessionView, EditorSwitchReceipt,
+    EditorWorktreeReceipt, EditorWriteInput, EditorWriteOutcome,
 };
 
 /// The editor holds the whole text in memory and every save sends all of it back.
@@ -475,6 +475,117 @@ impl AppState {
         Ok(EditorWorktreeReceipt { path })
     }
 
+    /// Which session last wrote each file under `root`, by absolute path. Read from the
+    /// conversations held in memory, so a session not loaded since the relay started is
+    /// not known here and its files read as "not from a session".
+    async fn editor_change_owners(
+        &self,
+        root: &str,
+    ) -> (HashMap<String, String>, Vec<EditorSessionView>) {
+        let relay = self.relay.read().await;
+        let tree = Path::new(root);
+        let mut latest: HashMap<String, (u64, String)> = HashMap::new();
+        for (thread_id, runtime) in relay.runtimes.iter() {
+            if relay.thread_is_locally_deleted(thread_id) {
+                continue;
+            }
+            for (index, record) in runtime.transcript.iter().enumerate() {
+                let Some(tool) = record.tool.as_ref() else {
+                    continue;
+                };
+                let when = record.last_live_upsert_revision.unwrap_or(index as u64);
+                for path in landed_write_paths(std::iter::once((tool, record.status.as_str()))) {
+                    let Some(abs) = absolute_from(&runtime.current_cwd, &path) else {
+                        continue;
+                    };
+                    if !abs.starts_with(tree) {
+                        continue;
+                    }
+                    let key = abs.to_string_lossy().to_string();
+                    if latest.get(&key).is_none_or(|(seen, _)| *seen < when) {
+                        latest.insert(key, (when, thread_id.clone()));
+                    }
+                }
+            }
+        }
+        let mut ids: Vec<String> = latest.values().map(|(_, id)| id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        let sessions = ids
+            .into_iter()
+            .map(|id| EditorSessionView {
+                title: relay.thread_display_name(&id),
+                provider: relay
+                    .threads
+                    .iter()
+                    .find(|thread| thread.id == id)
+                    .map(|thread| thread.provider.clone()),
+                id,
+            })
+            .collect();
+        let owners = latest
+            .into_iter()
+            .map(|(path, (_, id))| (path, id))
+            .collect();
+        (owners, sessions)
+    }
+
+    /// Commit exactly `paths`. Paths are literal (no pathspec magic), and the repository's
+    /// own hooks run: this is the user's commit, and a hook refusing it is an answer to show.
+    pub(crate) async fn editor_commit(
+        &self,
+        input: EditorCommitInput,
+    ) -> Result<EditorCommitReceipt, String> {
+        let device_id = require_device_id(input.device_id.clone())?;
+        let workspace = self.editor_workspace(Some(&device_id), &input.root).await?;
+        let message = input.message.trim();
+        if message.is_empty() {
+            return Err("a commit message is required".to_string());
+        }
+        if input.paths.is_empty() {
+            return Err("pick at least one file to commit".to_string());
+        }
+        if input.paths.len() > EDITOR_COMMIT_MAX_PATHS {
+            return Err(format!(
+                "at most {EDITOR_COMMIT_MAX_PATHS} files can be committed at once"
+            ));
+        }
+        for path in &input.paths {
+            validate_repo_relative_path(path)?;
+        }
+        let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
+        add.extend(input.paths.iter().map(String::as_str));
+        let staged = run_git_capture(&workspace, &add).await?;
+        if !staged.status.success() {
+            return Err(git_words(&staged));
+        }
+        let mut child = background_git(&workspace)
+            .args(["--literal-pathspecs", "commit", "--file=-", "--"])
+            .args(&input.paths)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("could not run git commit: {error}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(message.as_bytes()).await;
+        }
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|error| format!("git commit did not finish: {error}"))?;
+        if !output.status.success() {
+            return Err(git_words(&output));
+        }
+        let commit = git_line(&workspace, &["rev-parse", "--short", "HEAD"])
+            .await
+            .unwrap_or_default();
+        Ok(EditorCommitReceipt {
+            commit,
+            subject: message.lines().next().unwrap_or_default().to_string(),
+        })
+    }
+
     pub(crate) async fn editor_changes(
         &self,
         device_id: Option<&str>,
@@ -490,6 +601,7 @@ impl AppState {
                     is_repo: false,
                     complete: true,
                     entries: Vec::new(),
+                    sessions: Vec::new(),
                 })
             }
             GitProbe::Unknown => {
@@ -498,6 +610,7 @@ impl AppState {
                     is_repo: true,
                     complete: false,
                     entries: Vec::new(),
+                    sessions: Vec::new(),
                 })
             }
         };
@@ -507,20 +620,87 @@ impl AppState {
                 is_repo: true,
                 complete: false,
                 entries: Vec::new(),
+                sessions: Vec::new(),
             });
         };
+        let (owners, sessions) = self.editor_change_owners(&root).await;
         let mut entries: Vec<EditorChangeEntry> = statuses
             .into_iter()
-            .map(|(path, status)| EditorChangeEntry { path, status })
+            .map(|(path, status)| {
+                let session = owners.get(&format!("{root}/{path}")).cloned();
+                EditorChangeEntry {
+                    path,
+                    status,
+                    session,
+                }
+            })
             .collect();
         entries.sort_by(|a, b| a.path.cmp(&b.path));
+        let named: HashSet<&String> = entries
+            .iter()
+            .filter_map(|entry| entry.session.as_ref())
+            .collect();
+        let sessions = sessions
+            .into_iter()
+            .filter(|session| named.contains(&session.id))
+            .collect();
         Ok(EditorChangesView {
             root,
             is_repo: true,
             complete: true,
             entries,
+            sessions,
         })
     }
+}
+
+const EDITOR_COMMIT_MAX_PATHS: usize = 2000;
+
+/// What git said, hooks included, capped so a noisy hook cannot flood the reply.
+fn git_words(output: &std::process::Output) -> String {
+    let mut words = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        if !words.is_empty() {
+            words.push('\n');
+        }
+        words.push_str(&stdout);
+    }
+    if words.is_empty() {
+        words = "git refused".to_string();
+    }
+    if words.len() > 4000 {
+        let mut cut = 4000;
+        while !words.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        words.truncate(cut);
+        words.push('…');
+    }
+    words
+}
+
+/// A path an agent wrote, made absolute against the folder it worked in, without
+/// touching the disk.
+fn absolute_from(cwd: &str, path: &str) -> Option<PathBuf> {
+    let joined = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else if cwd.is_empty() {
+        return None;
+    } else {
+        Path::new(cwd).join(path)
+    };
+    let mut clean = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                clean.pop();
+            }
+            other => clean.push(other),
+        }
+    }
+    Some(clean)
 }
 
 fn branch_choice(input: &EditorBranchInput) -> BranchChoice<'_> {

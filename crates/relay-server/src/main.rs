@@ -51,25 +51,26 @@ use protocol::{
     AskUserAnswerReceipt, BulkRevokeDevicesReceipt, ClientErrorCode, CommentHandBackInput,
     CommentMutationReceipt, CommentResolveInput, CreateCommentInput, DeleteThreadInput,
     DevicesResponse, EditorBaseView, EditorBranchInput, EditorBranchesView, EditorChangesView,
-    EditorDirListing, EditorFileStat, EditorFileView, EditorSwitchReceipt, EditorWorktreeReceipt,
-    EditorWriteInput, EditorWriteOutcome, ForkSessionInput, HealthResponse, HeartbeatInput,
-    ListCommentsQuery, ListCommentsResponse, ListReviewTicksQuery, ListReviewTicksResponse,
-    LocalTranscriptEvent, ModelOptionView, PairingDecisionInput, PairingDecisionReceipt,
-    PairingStartInput, PairingTicketView, ProjectActionInput, ProjectActionReceipt,
-    ProjectsResponse, ReadThreadEntryDetailInput, ReadThreadTranscriptInput, RenameThreadInput,
-    RepairWorkspaceInput, RequestReviewInput, RequestReviewReceipt, ResolvedWorkspace,
-    ResumeSessionInput, ReviewAcceptReceipt, ReviewActionInput, ReviewDeleteReceipt,
-    ReviewsResponse, RevokeDeviceReceipt, SendMessageInput, SessionSnapshot,
-    SessionSnapshotCompactProfile, SetThreadFlagInput, SkillInvocationInput, StartSessionInput,
-    StartTeamInput, StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt, StopTurnInput,
-    SubmitAskUserAnswerInput, TeamActionInput, TeamActionReceipt, TeamFileResponse, TeamMarkInput,
-    TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt, ThreadEntryDetailResponse,
-    ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView, ThreadSkillsView,
-    ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery, ThreadsResponse,
-    TickReviewFileInput, TranscriptCursorToken, TranscriptDeltaEvent, TranscriptResyncEvent,
-    UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput, WorkflowActionReceipt,
-    WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView, WorkspaceTrustInput,
-    WorkspaceTrustReceipt, TRANSCRIPT_RESYNC_EVENT_KIND, TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
+    EditorCommitInput, EditorCommitReceipt, EditorDirListing, EditorFileStat, EditorFileView,
+    EditorSwitchReceipt, EditorWorktreeReceipt, EditorWriteInput, EditorWriteOutcome,
+    ForkSessionInput, HealthResponse, HeartbeatInput, ListCommentsQuery, ListCommentsResponse,
+    ListReviewTicksQuery, ListReviewTicksResponse, LocalTranscriptEvent, ModelOptionView,
+    PairingDecisionInput, PairingDecisionReceipt, PairingStartInput, PairingTicketView,
+    ProjectActionInput, ProjectActionReceipt, ProjectsResponse, ReadThreadEntryDetailInput,
+    ReadThreadTranscriptInput, RenameThreadInput, RepairWorkspaceInput, RequestReviewInput,
+    RequestReviewReceipt, ResolvedWorkspace, ResumeSessionInput, ReviewAcceptReceipt,
+    ReviewActionInput, ReviewDeleteReceipt, ReviewsResponse, RevokeDeviceReceipt, SendMessageInput,
+    SessionSnapshot, SessionSnapshotCompactProfile, SetThreadFlagInput, SkillInvocationInput,
+    StartSessionInput, StartTeamInput, StartTeamReceipt, StartWorkflowInput, StartWorkflowReceipt,
+    StopTurnInput, SubmitAskUserAnswerInput, TeamActionInput, TeamActionReceipt, TeamFileResponse,
+    TeamMarkInput, TeamsResponse, ThreadArchiveReceipt, ThreadDeleteReceipt,
+    ThreadEntryDetailResponse, ThreadFlagReceipt, ThreadRenameReceipt, ThreadSettingsView,
+    ThreadSkillsView, ThreadTranscriptResponse, ThreadWorkspaceInput, ThreadsQuery,
+    ThreadsResponse, TickReviewFileInput, TranscriptCursorToken, TranscriptDeltaEvent,
+    TranscriptResyncEvent, UpdateSessionSettingsInput, WatchThreadsInput, WorkflowActionInput,
+    WorkflowActionReceipt, WorkflowsResponse, WorkspaceDiffResponse, WorkspaceGitContextView,
+    WorkspaceTrustInput, WorkspaceTrustReceipt, TRANSCRIPT_RESYNC_EVENT_KIND,
+    TRANSCRIPT_STREAM_LAGGED_EVENT_KIND,
 };
 use provider::ProviderImage;
 use relay_http::{
@@ -453,6 +454,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/editor/branches", get(editor_branches))
         .route("/api/editor/switch", post(editor_switch))
         .route("/api/editor/worktree", post(editor_worktree))
+        .route("/api/editor/commit", post(editor_commit))
         .route("/api/editor/changes", get(editor_changes))
         .route(
             "/api/thread/workspace",
@@ -1297,6 +1299,18 @@ async fn editor_worktree(
     context
         .app
         .editor_add_worktree(input)
+        .await
+        .map(|receipt| Json(ApiEnvelope::ok(receipt)))
+        .map_err(bad_request)
+}
+
+async fn editor_commit(
+    State(context): State<AppContext>,
+    Json(input): Json<EditorCommitInput>,
+) -> Result<Json<ApiEnvelope<EditorCommitReceipt>>, (StatusCode, Json<ApiError>)> {
+    context
+        .app
+        .editor_commit(input)
         .await
         .map(|receipt| Json(ApiEnvelope::ok(receipt)))
         .map_err(bad_request)

@@ -10,6 +10,7 @@ import { createStore } from "zustand/vanilla";
 import { t } from "../../shared/i18n.js";
 import { ContextMenu, MenuFilter, MenuHeading, MenuItem, MenuSeparator } from "../../shared/context-menu-react.js";
 import { branchMenuModel } from "./branch-menu-model.js";
+import { carrySelection, groupChanges } from "./changes-model.js";
 import { CHEVRON_DOWN_SVG, CHEVRON_RIGHT_SVG } from "../../svg.js";
 import { docKey } from "./editor-store.js";
 
@@ -349,13 +350,268 @@ function ChangedList({ store, activePath }) {
   );
 }
 
+/** Read-only, one column: the text now, with what changed since the last commit marked. */
+export function DiffView({ doc, base, path }) {
+  const hostRef = useRef(null);
+  const original = base?.tracked ? base.content ?? "" : "";
+  useEffect(() => {
+    let cancelled = false;
+    let view = null;
+    void import("./code-editor.js").then((mod) => {
+      if (!cancelled && hostRef.current) {
+        view = mod.createDiffView(hostRef.current, { original, text: doc.text, path });
+      }
+    });
+    return () => {
+      cancelled = true;
+      view?.destroy();
+    };
+  }, [original, doc.text, path]);
+  return h(
+    React.Fragment,
+    null,
+    h(
+      "div",
+      { className: "editor-panel-diff-note" },
+      base?.tracked ? t("Compared with the last commit") : t("New file — not in the last commit")
+    ),
+    h("div", { className: "editor-panel-diff", ref: hostRef })
+  );
+}
+
+/** Diff / Edit for one document. */
+export function ViewModeSwitch({ mode, onChange }) {
+  return h(
+    "span",
+    { className: "editor-mode", role: "radiogroup", "aria-label": t("View") },
+    ...[
+      ["diff", t("Diff")],
+      ["edit", t("Edit")],
+    ].map(([value, label]) =>
+      h(
+        "button",
+        {
+          key: value,
+          type: "button",
+          role: "radio",
+          "aria-checked": mode === value,
+          className: mode === value ? "editor-mode-option is-selected" : "editor-mode-option",
+          onClick: () => onChange(value),
+        },
+        label
+      )
+    )
+  );
+}
+
+function Checkbox({ checked, mixed = false, label, onChange }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.indeterminate = mixed;
+    }
+  }, [mixed]);
+  return h("input", {
+    ref,
+    type: "checkbox",
+    className: "editor-check",
+    checked,
+    "aria-label": label,
+    onChange: (event) => onChange(event.target.checked),
+  });
+}
+
+function ChangesPanel({ store, activePath }) {
+  const root = useStore(store, (state) => state.root);
+  const changes = useStore(store, (state) => state.changes);
+  const commitState = useStore(store, (state) => state.commit);
+  const [selected, setSelected] = useState(() => new Set(changes.entries.map((entry) => entry.path)));
+  const known = useRef(new Set(changes.entries.map((entry) => entry.path)));
+  const [message, setMessage] = useState("");
+  useEffect(() => {
+    void store.refreshTree();
+  }, [store, root]);
+  useEffect(() => {
+    // Read before replacing it: the updater runs later, and must judge against the list
+    // the user last saw, or every new file would read as one they had unticked.
+    const before = known.current;
+    setSelected((previous) => carrySelection(previous, changes.entries, before));
+    known.current = new Set(changes.entries.map((entry) => entry.path));
+  }, [changes.entries]);
+
+  const groups = groupChanges(changes.entries, changes.sessions);
+  const toggle = (paths, on) =>
+    setSelected((previous) => {
+      const next = new Set(previous);
+      for (const path of paths) {
+        if (on) {
+          next.add(path);
+        } else {
+          next.delete(path);
+        }
+      }
+      return next;
+    });
+  const chosen = changes.entries.filter((entry) => selected.has(entry.path)).map((entry) => entry.path);
+  const open = (entry) => {
+    if (entry.status === "D") {
+      return;
+    }
+    const key = store.openFile(entry.path, { preview: true });
+    if (key) {
+      store.setViewMode(key, "diff");
+    }
+  };
+
+  let body;
+  if (changes.loading && !changes.entries.length) {
+    body = h("div", { className: "editor-tree-note" }, t("Loading…"));
+  } else if (!changes.complete) {
+    body = h("div", { className: "editor-tree-note" }, t("Too many changes to list here."));
+  } else if (!changes.entries.length) {
+    body = h("div", { className: "editor-tree-note" }, t("No changed files."));
+  } else {
+    body = groups.map((group) => {
+      const paths = group.entries.map((entry) => entry.path);
+      const ticked = paths.filter((path) => selected.has(path)).length;
+      return h(
+        "div",
+        { key: group.id || "none", className: "editor-change-group" },
+        h(
+          "div",
+          { className: "editor-change-group-head" },
+          h(Checkbox, {
+            checked: ticked === paths.length,
+            mixed: ticked > 0 && ticked < paths.length,
+            label: group.id ? group.title || t("Session") : t("Not from a session"),
+            onChange: (on) => toggle(paths, on),
+          }),
+          h(
+            "span",
+            { className: "editor-change-group-title", title: group.title || "" },
+            group.id ? group.title || t("Session") : t("Not from a session")
+          ),
+          h("span", { className: "editor-change-group-count" }, String(paths.length))
+        ),
+        ...group.entries.map((entry) =>
+          h(
+            "div",
+            {
+              key: entry.path,
+              className: [
+                "editor-change-row",
+                `is-status-${statusClass(entry.status)}`,
+                entry.path === activePath ? "is-active" : "",
+              ].filter(Boolean).join(" "),
+              title: entry.path,
+              "data-path": entry.path,
+            },
+            h(Checkbox, {
+              checked: selected.has(entry.path),
+              label: entry.path,
+              onChange: (on) => toggle([entry.path], on),
+            }),
+            h(
+              "button",
+              {
+                type: "button",
+                className: "editor-change-open",
+                disabled: entry.status === "D",
+                onClick: () => open(entry),
+              },
+              h("span", { className: "editor-tree-name" }, baseName(entry.path)),
+              dirName(entry.path) ? h("span", { className: "editor-tree-dir" }, dirName(entry.path)) : null
+            ),
+            h("span", { className: "editor-tree-status" }, entry.status)
+          )
+        )
+      );
+    });
+  }
+
+  return h(
+    React.Fragment,
+    null,
+    h("div", { className: "editor-tree editor-changes" }, body),
+    h(
+      "form",
+      {
+        className: "editor-commit",
+        onSubmit: async (event) => {
+          event.preventDefault();
+          const receipt = await store.commit({ paths: chosen, message });
+          if (receipt) {
+            setMessage("");
+          }
+        },
+      },
+      h("textarea", {
+        className: "editor-commit-message",
+        value: message,
+        rows: 3,
+        placeholder: t("Commit message"),
+        "aria-label": t("Commit message"),
+        onChange: (event) => setMessage(event.target.value),
+      }),
+      commitState.error ? h("pre", { className: "editor-commit-error", role: "alert" }, commitState.error) : null,
+      commitState.last && !commitState.error
+        ? h(
+            "div",
+            { className: "editor-commit-done" },
+            t("Committed {commit}: {subject}", { commit: commitState.last.commit, subject: commitState.last.subject })
+          )
+        : null,
+      h(
+        "button",
+        {
+          type: "submit",
+          className: "editor-button is-primary editor-commit-button",
+          disabled: commitState.committing || !chosen.length || !message.trim(),
+        },
+        commitState.committing
+          ? t("Committing…")
+          : chosen.length === 1
+            ? t("Commit 1 file")
+            : t("Commit {count} files", { count: chosen.length })
+      )
+    )
+  );
+}
+
 function FilePanel({ store, activePath }) {
   const changedOnly = useStore(store, (state) => state.changedOnly);
+  const panelView = useStore(store, (state) => state.panelView);
+  const changeCount = useStore(store, (state) => state.changes.entries.length);
   return h(
     "aside",
     { className: "editor-panel", "aria-label": t("Files") },
     h("div", { className: "editor-panel-top" }, h(LocationChip, { store })),
     h(
+      "div",
+      { className: "editor-panel-views", role: "tablist" },
+      ...[
+        ["files", t("Files"), null],
+        ["changes", t("Changes"), changeCount || null],
+      ].map(([view, label, count]) =>
+        h(
+          "button",
+          {
+            key: view,
+            type: "button",
+            role: "tab",
+            "aria-selected": panelView === view,
+            className: panelView === view ? "editor-panel-view is-selected" : "editor-panel-view",
+            onClick: () => store.setPanelView(view),
+          },
+          label,
+          count ? h("span", { className: "editor-panel-view-count" }, String(count)) : null
+        )
+      )
+    ),
+    panelView === "changes"
+      ? h(ChangesPanel, { store, activePath })
+      : null,
+    panelView === "changes" ? null : h(
       "div",
       { className: "editor-panel-head" },
       h("span", { className: "editor-panel-title" }, t("Files")),
@@ -372,7 +628,7 @@ function FilePanel({ store, activePath }) {
         h("span", { className: "editor-switch-track", "aria-hidden": "true" })
       )
     ),
-    h(
+    panelView === "changes" ? null : h(
       "div",
       { className: "editor-tree", role: "tree" },
       changedOnly
@@ -388,6 +644,7 @@ function docAttention(doc) {
 
 export function TabStrip({ store, root, paths, active, autosave, onBack = null, onCloseRequest, onFocus = null, className = "" }) {
   const docs = useStore(store, (state) => state.docs);
+  const preview = useStore(store, (state) => state.tabsByRoot[root]?.preview || null);
   const [menu, setMenu] = useState(null);
   const stripRef = useRef(null);
   const labels = tabLabels(paths);
@@ -419,7 +676,10 @@ export function TabStrip({ store, root, paths, active, autosave, onBack = null, 
           "div",
           {
             key: path,
-            className: ["editor-tab", path === active ? "is-active" : ""].filter(Boolean).join(" "),
+            className: ["editor-tab", path === active ? "is-active" : "", path === preview ? "is-preview" : ""]
+              .filter(Boolean)
+              .join(" "),
+            onDoubleClick: () => store.pinTab(path, root),
             role: "tab",
             "aria-selected": path === active,
             title: path,
@@ -766,7 +1026,7 @@ export function CloseConfirm({ paths, onCancel, onDiscard, onSave }) {
   );
 }
 
-function Breadcrumb({ path }) {
+function Breadcrumb({ path, changedBy = null, mode = null, onMode = null }) {
   if (!path) {
     return null;
   }
@@ -774,14 +1034,20 @@ function Breadcrumb({ path }) {
   return h(
     "div",
     { className: "editor-path" },
-    ...parts.map((part, index) =>
-      h(
-        React.Fragment,
-        { key: index },
-        index ? h("span", { className: "editor-path-sep" }, "/") : null,
-        h("span", { className: index === parts.length - 1 ? "editor-path-leaf" : "editor-path-part" }, part)
+    h(
+      "span",
+      { className: "editor-path-text" },
+      ...parts.map((part, index) =>
+        h(
+          React.Fragment,
+          { key: index },
+          index ? h("span", { className: "editor-path-sep" }, "/") : null,
+          h("span", { className: index === parts.length - 1 ? "editor-path-leaf" : "editor-path-part" }, part)
+        )
       )
-    )
+    ),
+    changedBy ? h("span", { className: "editor-path-by", title: changedBy }, t("Changed by {session}", { session: changedBy })) : null,
+    mode && onMode ? h(ViewModeSwitch, { mode, onChange: onMode }) : null
   );
 }
 
@@ -802,6 +1068,8 @@ function EditorScreenImpl({ host }) {
   const docs = useStore(store, (state) => state.docs);
   const autosave = useStore(store, (state) => state.autosave);
   const returnThreadId = useStore(store, (state) => state.returnThreadId);
+  const viewModes = useStore(store, (state) => state.viewModes);
+  const changes = useStore(store, (state) => state.changes);
   const cursor = useMemo(() => createStore(() => ({ line: 1, column: 1, selected: 0 })), []);
   const [comparing, setComparing] = useState(null);
   const [confirm, setConfirm] = useState(null);
@@ -812,6 +1080,16 @@ function EditorScreenImpl({ host }) {
   const active = tabs?.active && paths.includes(tabs.active) ? tabs.active : null;
   const activeKey = root && active ? docKey(root, active) : null;
   const doc = activeKey ? docs[activeKey] : null;
+  const mode = activeKey && viewModes[activeKey] === "diff" ? "diff" : "edit";
+  const change = active ? changes.entries.find((entry) => entry.path === active) : null;
+  const changedBy = change?.session
+    ? changes.sessions.find((session) => session.id === change.session)?.title || null
+    : null;
+  useEffect(() => {
+    if (mode === "diff" && activeKey && doc && !doc.loading && !doc.base?.loading) {
+      void store.loadBase(activeKey);
+    }
+  }, [mode, activeKey, doc?.loading, doc?.revision]);
 
   useEffect(() => {
     host.ensureLoaded?.();
@@ -959,7 +1237,14 @@ function EditorScreenImpl({ host }) {
         onBack: returnThreadId && host.backToSession ? () => host.backToSession(returnThreadId) : null,
         onCloseRequest: (targets) => void requestClose(targets),
       }),
-      active && !rootError ? h(Breadcrumb, { path: active }) : null,
+      active && !rootError
+        ? h(Breadcrumb, {
+            path: active,
+            changedBy,
+            mode: doc && !doc.loading && !doc.binary && !doc.tooLarge && !doc.error ? mode : null,
+            onMode: (next) => store.setViewMode(activeKey, next),
+          })
+        : null,
       !rootError && !(comparing && doc && (doc.conflict || doc.overwritten))
         ? h(DocBanners, { store, docKey: activeKey, doc, onCompare: () => setComparing(activeKey) })
         : null,
@@ -986,7 +1271,8 @@ function EditorScreenImpl({ host }) {
           })
         : null,
       body,
-      h(CodeHost, { store, docKey: activeKey, doc, cursor, hidden: Boolean(body || compareDoc) }),
+      !body && !compareDoc && mode === "diff" && doc ? h(DiffView, { doc, base: doc.base, path: doc.path }) : null,
+      h(CodeHost, { store, docKey: activeKey, doc, cursor, hidden: Boolean(body || compareDoc || mode === "diff") }),
       h(StatusLine, { doc, cursor, autosave, language }),
       confirm
         ? h(CloseConfirm, {
