@@ -85,6 +85,15 @@ async fn router_with_history(
     build_router(context, WebAssets::Embedded)
 }
 
+fn git_output(root: &str, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("git runs");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 fn head_subject(root: &str) -> String {
     let out = std::process::Command::new("git")
         .args(["log", "-1", "--format=%s"])
@@ -104,6 +113,29 @@ fn committed_files(root: &str) -> Vec<String> {
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+fn tree_of(root: &str, dir: &str) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "HEAD", dir])
+        .current_dir(root)
+        .output()
+        .expect("git runs");
+    let mut tree: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    tree.sort();
+    tree
+}
+
+fn porcelain(root: &str) -> String {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(root)
+        .output()
+        .expect("git runs");
+    String::from_utf8_lossy(&out.stdout).to_string()
 }
 
 fn session_of<'a>(body: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
@@ -374,11 +406,10 @@ async fn editor_commit_with_a_long_message_and_a_noisy_hook_does_not_hang() {
 }
 
 #[tokio::test]
-async fn a_rename_whose_old_name_was_written_again_needs_that_file_ticked_too() {
+async fn a_rename_whose_old_name_was_written_again_commits_without_that_unticked_file() {
     let (_dir, root) = editor_repo().await;
     git(&root, &["mv", "src/lib.rs", "src/core.rs"]);
     std::fs::write(format!("{root}/src/lib.rs"), "private work\n").unwrap();
-    let before = head_subject(&root);
     let router = trusted_router(&root).await;
     let (status, body) = post_json(
         router,
@@ -386,11 +417,16 @@ async fn a_rename_whose_old_name_was_written_again_needs_that_file_ticked_too() 
         serde_json::json!({ "root": root, "paths": ["src/core.rs"], "message": "Rename", "device_id": "d1" }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(status, StatusCode::OK, "body={body}");
     assert_eq!(
-        head_subject(&root),
-        before,
-        "the unticked file at the old name was not committed"
+        tree_of(&root, "src"),
+        ["src/core.rs"],
+        "the rename is whole, and the file written at the old name is not in it"
+    );
+    assert!(
+        porcelain(&root).contains("?? src/lib.rs"),
+        "{}",
+        porcelain(&root)
     );
 }
 
@@ -433,10 +469,9 @@ async fn a_ticked_file_that_replaced_a_folder_does_not_take_the_folders_unticked
 }
 
 #[tokio::test]
-async fn a_rename_that_only_changes_letter_case_is_committed_or_plainly_refused() {
+async fn a_rename_that_only_changes_letter_case_is_committed() {
     let (_dir, root) = editor_repo().await;
     git(&root, &["mv", "src/lib.rs", "src/Lib.rs"]);
-    let before = head_subject(&root);
     let router = trusted_router(&root).await;
     let (status, body) = post_json(
         router,
@@ -444,36 +479,18 @@ async fn a_rename_that_only_changes_letter_case_is_committed_or_plainly_refused(
         serde_json::json!({ "root": root, "paths": ["src/Lib.rs"], "message": "Capitalise", "device_id": "d1" }),
     )
     .await;
-    if status == StatusCode::OK {
-        assert_eq!(head_subject(&root), "Capitalise");
-    } else {
-        let message = body["error"]["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("letter case"),
-            "the reason is the real one: {body}"
-        );
-        assert_eq!(head_subject(&root), before);
-    }
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(tree_of(&root, "src"), ["src/Lib.rs"]);
 }
 
 #[tokio::test]
-async fn a_rename_whose_old_name_became_a_folder_commits_with_that_folders_files_ticked() {
+async fn a_rename_whose_old_name_became_a_folder_commits_with_or_without_that_folders_files() {
     let (_dir, root) = editor_repo().await;
     git(&root, &["mv", "src/lib.rs", "src/core.rs"]);
     std::fs::create_dir_all(format!("{root}/src/lib.rs")).unwrap();
     std::fs::write(format!("{root}/src/lib.rs/child.txt"), "child\n").unwrap();
+    std::fs::write(format!("{root}/src/lib.rs/later.txt"), "later\n").unwrap();
     let router = trusted_router(&root).await;
-    let (status, body) = post_json(
-        router.clone(),
-        "/api/editor/commit",
-        serde_json::json!({ "root": root, "paths": ["src/core.rs"], "message": "Half", "device_id": "d1" }),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "the folder's file is not ticked: {body}"
-    );
     let (status, body) = post_json(
         router,
         "/api/editor/commit",
@@ -481,17 +498,14 @@ async fn a_rename_whose_old_name_became_a_folder_commits_with_that_folders_files
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body}");
-    let out = std::process::Command::new("git")
-        .args(["ls-tree", "-r", "--name-only", "HEAD", "src"])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    let mut tree: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect();
-    tree.sort();
-    assert_eq!(tree, ["src/core.rs", "src/lib.rs/child.txt"]);
+    assert_eq!(
+        tree_of(&root, "src"),
+        ["src/core.rs", "src/lib.rs/child.txt"]
+    );
+    assert!(
+        porcelain(&root).contains("?? src/lib.rs/later.txt"),
+        "the unticked one stays out"
+    );
 }
 
 #[tokio::test]
@@ -554,4 +568,109 @@ async fn a_ticked_file_does_not_take_an_unticked_file_whose_name_is_not_utf8() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
     assert_eq!(head_subject(&root), before);
+}
+
+#[tokio::test]
+async fn a_ticked_file_never_carries_the_deletion_of_a_file_it_sits_under() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    // `seed.txt` was a tracked file; now it is a folder holding the ticked file.
+    std::fs::remove_file(format!("{root}/seed.txt")).unwrap();
+    std::fs::create_dir_all(format!("{root}/seed.txt/sub")).unwrap();
+    std::fs::write(format!("{root}/seed.txt/sub/child"), "c\n").unwrap();
+    let before = head_subject(&root);
+    let staged_before = git_output(&root, &["diff", "--cached", "--name-only"]);
+
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt/sub/child"], "message": "Child", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the deletion of seed.txt is not ticked: {body}"
+    );
+
+    // From a root below it, the deletion is outside the folder the user may commit in.
+    let sub = format!("{root}/seed.txt/sub");
+    let router = git_context_router(&sub, vec![sub.clone()], vec![sub.clone()]).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": sub, "paths": ["child"], "message": "Child", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(head_subject(&root), before);
+    assert_eq!(
+        git_output(&root, &["diff", "--cached", "--name-only"]),
+        staged_before,
+        "a refused commit leaves what is staged as it was"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_commit_leaves_the_staging_area_as_it_was() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, root) = editor_repo().await;
+    let hook = format!("{root}/.git/hooks/pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let router = trusted_router(&root).await;
+    let (status, _) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["seed.txt", "new.txt"], "message": "x", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(git_output(&root, &["diff", "--cached", "--name-only"]), "");
+}
+
+#[tokio::test]
+async fn a_submodule_moved_to_another_commit_is_committed_as_one_change() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["checkout", "-q", "--", "seed.txt"]);
+    let module = format!("{root}/module");
+    std::fs::create_dir_all(&module).unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@e.com"],
+        vec!["config", "user.name", "T"],
+        vec!["commit", "-q", "--allow-empty", "-m", "one"],
+    ] {
+        git(&module, &args);
+    }
+    git(&root, &["add", "module"]);
+    git(&root, &["commit", "-q", "-m", "add module"]);
+    git(&module, &["commit", "-q", "--allow-empty", "-m", "two"]);
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["module"], "message": "Bump module", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(head_subject(&root), "Bump module");
+}
+
+#[tokio::test]
+async fn a_rename_whose_old_name_is_a_hard_link_commits_both_ticked_files() {
+    let (_dir, root) = editor_repo().await;
+    git(&root, &["mv", "src/lib.rs", "src/core.rs"]);
+    std::fs::hard_link(format!("{root}/src/core.rs"), format!("{root}/src/lib.rs")).unwrap();
+    std::fs::write(format!("{root}/src/core.rs"), "fn linked() {}\n").unwrap();
+    let router = trusted_router(&root).await;
+    let (status, body) = post_json(
+        router,
+        "/api/editor/commit",
+        serde_json::json!({ "root": root, "paths": ["src/core.rs", "src/lib.rs"], "message": "Linked", "device_id": "d1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(tree_of(&root, "src"), ["src/core.rs", "src/lib.rs"]);
 }

@@ -579,25 +579,76 @@ impl AppState {
             validate_repo_relative_path(path)?;
         }
         // Each path must be one changed file: a folder name would take everything under it.
-        let changed = match GitView::open(&workspace).await {
-            GitProbe::Repo(git) => git.changed(&workspace).await.ok_or_else(|| {
-                "git did not list this folder's changes in time; try again".to_string()
-            })?,
+        let (git, changed) = match GitView::open(&workspace).await {
+            GitProbe::Repo(git) => {
+                let changed = git.changed(&workspace).await.ok_or_else(|| {
+                    "git did not list this folder's changes in time; try again".to_string()
+                })?;
+                (git, changed)
+            }
             _ => return Err("this folder is not in a git repository".to_string()),
         };
-        let (chosen, paths) = plan_commit(&workspace, &changed, &input.paths).await?;
-        let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
-        add.extend(chosen.iter().map(String::as_str));
-        let staged = run_git_capture(&workspace, &add).await?;
-        if !staged.status.success() {
-            return Err(git_words(&staged));
+        let plan = plan_commit(&changed, &input.paths)?;
+        // Built in an index of its own, from HEAD plus exactly the ticked changes, so nothing
+        // else staged rides along and a refused commit leaves the user's staging untouched.
+        let index = ScratchIndex::new();
+        let in_scratch = |args: &[&str]| {
+            let mut command = background_git(&workspace);
+            command
+                .env("GIT_INDEX_FILE", index.path())
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            command
+        };
+        let has_head = git_line(&workspace, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            .await
+            .is_some();
+        let seed: &[&str] = if has_head {
+            &["read-tree", "HEAD"]
+        } else {
+            &["read-tree", "--empty"]
+        };
+        apply_changes(&plan, |args| in_scratch(args), Some(seed)).await?;
+        let diff = in_scratch(&[
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+        ])
+        .output()
+        .await
+        .map_err(|error| format!("could not run git diff: {error}"))?;
+        if !diff.status.success() {
+            return Err(git_words(&diff));
         }
-        let mut child = background_git(&workspace)
-            .args(["--literal-pathspecs", "commit", "--file=-", "--"])
-            .args(&paths)
+        let mut touched = 0;
+        for field in diff
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty())
+        {
+            touched += 1;
+            let path = std::str::from_utf8(field)
+                .ok()
+                .and_then(|path| path.strip_prefix(&git.prefix))
+                .filter(|rel| plan.allowed.contains(*rel));
+            if path.is_none() {
+                return Err(format!(
+                    "committing these files would also change {}, which is not ticked",
+                    String::from_utf8_lossy(field)
+                ));
+            }
+        }
+        if touched == 0 {
+            return Err("the ticked files have nothing to commit".to_string());
+        }
+        let mut child = in_scratch(&["commit", "--file=-"])
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("could not run git commit: {error}"))?;
         // Written while the output drains: hooks run before git reads the message, and a
@@ -617,6 +668,20 @@ impl AppState {
         }
         if !output.status.success() {
             return Err(git_words(&output));
+        }
+        // The user's own index catches up with what was committed, as `git commit <paths>`
+        // would leave it; anything else they had staged stays staged.
+        let in_index = |args: &[&str]| {
+            let mut command = background_git(&workspace);
+            command
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            command
+        };
+        if let Err(error) = apply_changes(&plan, |args| in_index(args), None).await {
+            tracing::warn!(%error, "editor commit: committed, but the index did not catch up");
         }
         let commit = git_line(&workspace, &["rev-parse", "--short", "HEAD"])
             .await
@@ -872,67 +937,28 @@ struct Change {
     renamed_from: Option<Option<String>>,
 }
 
-/// What `git add` and `git commit` are given for the ticked `picked` paths: refused when a
-/// path would take a change the user did not tick, or one git cannot commit file by file.
-async fn plan_commit(
-    workspace: &TrustedWorkspace,
-    changed: &ChangedSet,
-    picked: &[String],
-) -> Result<(Vec<String>, Vec<String>), String> {
-    let on_disk = |rel: &str| tokio::fs::symlink_metadata(Path::new(workspace.as_str()).join(rel));
+/// The ticked changes, as git operations: names whose files are gone are removed, the rest
+/// added from the worktree. `allowed` is every root-relative path the commit may change.
+struct CommitPlan {
+    removes: Vec<String>,
+    adds: Vec<String>,
+    allowed: HashSet<String>,
+}
+
+/// Refused when a ticked path would take a change the user did not tick. The final word is
+/// the scratch index's own diff; this only gives the common cases a clear reason first.
+fn plan_commit(changed: &ChangedSet, picked: &[String]) -> Result<CommitPlan, String> {
     let under = |dir: &str, path: &str| path.starts_with(&format!("{dir}/"));
-    let mut chosen: Vec<String> = Vec::new();
-    let mut paths: Vec<String> = Vec::new();
+    let mut plan = CommitPlan {
+        removes: Vec::new(),
+        adds: Vec::new(),
+        allowed: HashSet::new(),
+    };
     for path in picked {
         let change = changed
             .entries
             .get(path)
             .ok_or_else(|| format!("{path} has no change to commit"))?;
-        chosen.push(path.clone());
-        paths.push(path.clone());
-        let source = match &change.renamed_from {
-            None => continue,
-            Some(None) => {
-                return Err(format!(
-                    "{path} was moved here from outside this folder, or from a name that cannot be shown here; commit it with git"
-                ))
-            }
-            Some(Some(source)) => source,
-        };
-        // The old name is already out of the index, so it is committed but not added.
-        let Ok(old) = on_disk(source).await else {
-            paths.push(source.clone());
-            continue;
-        };
-        if same_file(&old, on_disk(path).await.ok().as_ref()) {
-            return Err(format!(
-                "{source} → {path} only changes letter case, which git cannot commit file by file on this disk; commit it with git"
-            ));
-        }
-        if old.is_dir() {
-            // The old name is a folder now: its files carry the rename's deletion with them.
-            if !changed
-                .entries
-                .keys()
-                .any(|other| under(source, other) && picked.contains(other))
-            {
-                return Err(format!(
-                    "{source} was renamed to {path} and is a folder now; tick its files too, or leave the rename out"
-                ));
-            }
-            continue;
-        }
-        // A file written at the old name since is the user's to tick: committing that name
-        // would take its new contents.
-        if !picked.contains(source) {
-            return Err(format!(
-                "{source} was renamed to {path} and then written again; tick {source} too, or leave the rename out"
-            ));
-        }
-        paths.push(source.clone());
-    }
-    // A path that replaced a folder (or the reverse) names every change under it.
-    for path in &chosen {
         if let Some(other) = changed
             .entries
             .keys()
@@ -947,47 +973,99 @@ async fn plan_commit(
                 "committing {path} would also take {other}, whose name cannot be shown here; commit it with git"
             ));
         }
-    }
-    // A file that became a folder is committed through the files in it: git refuses the
-    // folder's own name, and a file inside it already replaces the old file in the commit.
-    let mut kept = Vec::new();
-    for path in &paths {
-        let folder = on_disk(path)
-            .await
-            .map(|meta| meta.is_dir())
-            .unwrap_or(false);
-        if folder {
-            if !paths.iter().any(|other| under(path, other)) {
-                return Err(format!(
-                    "{path} is a folder now; tick the files in it to commit the change"
-                ));
-            }
-            continue;
+        plan.allowed.insert(path.clone());
+        if change.status == "D" {
+            plan.removes.push(path.clone());
+        } else {
+            plan.adds.push(path.clone());
         }
-        kept.push(path.clone());
+        match &change.renamed_from {
+            None => {}
+            Some(None) => {
+                return Err(format!(
+                    "{path} was moved here from outside this folder, or from a name that cannot be shown here; commit it with git"
+                ))
+            }
+            // The rename's old name leaves the commit, whatever is at it on disk now: a
+            // file written there since is the user's to tick on its own.
+            Some(Some(source)) => {
+                plan.allowed.insert(source.clone());
+                if !picked.contains(source) {
+                    plan.removes.push(source.clone());
+                }
+            }
+        }
     }
-    chosen.sort();
-    chosen.dedup();
-    kept.sort();
-    kept.dedup();
-    Ok((chosen, kept))
+    for list in [&mut plan.removes, &mut plan.adds] {
+        list.sort();
+        list.dedup();
+    }
+    Ok(plan)
 }
 
-/// Whether two names reach one file, as a case-only rename does on a case-insensitive disk.
-fn same_file(a: &std::fs::Metadata, b: Option<&std::fs::Metadata>) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        b.is_some_and(|b| a.dev() == b.dev() && a.ino() == b.ino())
+/// Removals first, so a file that became a folder can take the folder's files after it.
+/// `seed` starts a scratch index from HEAD; the user's own index is used as it is.
+async fn apply_changes(
+    plan: &CommitPlan,
+    git: impl Fn(&[&str]) -> tokio::process::Command,
+    seed: Option<&[&str]>,
+) -> Result<(), String> {
+    let mut steps: Vec<Vec<&str>> = Vec::new();
+    if let Some(seed) = seed {
+        steps.push(seed.to_vec());
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (a, b);
-        false
+    if !plan.removes.is_empty() {
+        let mut remove = vec!["update-index", "--force-remove", "--"];
+        remove.extend(plan.removes.iter().map(String::as_str));
+        steps.push(remove);
+    }
+    if !plan.adds.is_empty() {
+        let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
+        add.extend(plan.adds.iter().map(String::as_str));
+        steps.push(add);
+    }
+    for step in steps {
+        let output = git(&step)
+            .output()
+            .await
+            .map_err(|error| format!("could not run git {}: {error}", step[0]))?;
+        if !output.status.success() {
+            return Err(git_words(&output));
+        }
+    }
+    Ok(())
+}
+
+/// A throwaway index file for one commit, removed (with git's lock beside it) when dropped.
+struct ScratchIndex(PathBuf);
+
+impl ScratchIndex {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        Self(std::env::temp_dir().join(format!(
+            "sealwire-commit-{}-{nanos}-{n}.index",
+            std::process::id()
+        )))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
     }
 }
 
-impl GitView {}
+impl Drop for ScratchIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let mut lock = self.0.clone().into_os_string();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(lock);
+    }
+}
 
 async fn read_status(workspace: &TrustedWorkspace) -> Option<Vec<u8>> {
     let mut child = background_git(workspace)
