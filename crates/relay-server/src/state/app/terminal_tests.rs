@@ -1,5 +1,117 @@
 use super::*;
+use base64::Engine as _;
 use serde_json::json;
+
+#[cfg(unix)]
+async fn streaming_fixture() -> (
+    AppState,
+    tempfile::TempDir,
+    String,
+    Arc<crate::terminal::Terminal>,
+) {
+    let (app, dir, thread) = fixture().await;
+    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+    command.args(["-c", "stty -echo; printf READY; exec cat"]);
+    let terminal = crate::terminal::Terminal::spawn(
+        thread.clone(),
+        "local-terminal".to_string(),
+        command,
+        80,
+        24,
+    )
+    .unwrap();
+    app.terminals
+        .lock()
+        .await
+        .insert(thread.clone(), terminal.clone());
+    (app, dir, thread, terminal)
+}
+
+fn stream_input(
+    thread: &str,
+    terminal: &crate::terminal::Terminal,
+) -> crate::terminal::TerminalInput {
+    serde_json::from_value(
+        json!({ "thread_id": thread, "terminal_id": terminal.id, "device_id": "local-terminal" }),
+    )
+    .unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_output_is_pushed_without_read_requests_and_stops_when_scope_is_revoked() {
+    let (app, _dir, thread, terminal) = streaming_fixture().await;
+    let mut frames = app
+        .terminal_stream(stream_input(&thread, &terminal))
+        .await
+        .unwrap();
+    assert!(frames.recv().await.unwrap().unwrap().reset);
+    terminal
+        .write("local-terminal", "STREAM_你好\n", "view", 1)
+        .unwrap();
+    let mut bytes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !String::from_utf8_lossy(&bytes).contains("STREAM_你好") {
+            let frame = frames.recv().await.unwrap().unwrap();
+            bytes.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(frame.data)
+                    .unwrap(),
+            );
+        }
+    })
+    .await
+    .expect("output must wake the stream");
+    while tokio::time::timeout(Duration::from_millis(50), frames.recv())
+        .await
+        .is_ok()
+    {}
+    assert!(
+        tokio::time::timeout(Duration::from_millis(80), frames.recv())
+            .await
+            .is_err(),
+        "idle terminals should not emit empty frames"
+    );
+    let outside = tempfile::tempdir().unwrap();
+    app.relay.write().await.allowed_roots = vec![outside.path().to_string_lossy().to_string()];
+    terminal
+        .write("local-terminal", "MUST_NOT_LEAK\n", "view", 2)
+        .unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(3), frames.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .is_err());
+    terminal.close().unwrap();
+}
+
+#[tokio::test]
+async fn terminal_unsubscribe_is_bound_to_its_device_and_does_not_remove_a_replacement() {
+    let (app, _dir, _) = fixture().await;
+    let old = app
+        .set_remote_terminal_stream("phone", "view", true)
+        .await
+        .unwrap()
+        .unwrap();
+    app.set_remote_terminal_stream("other-phone", "view", false)
+        .await
+        .unwrap();
+    assert!(!*old.borrow());
+    let new = app
+        .set_remote_terminal_stream("phone", "view", true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(*old.borrow());
+    app.remove_remote_terminal_stream("phone", "view", &old)
+        .await;
+    assert_eq!(app.terminal_streams.lock().await.len(), 1);
+    app.set_remote_terminal_stream("phone", "view", false)
+        .await
+        .unwrap();
+    assert!(*new.borrow());
+    assert!(app.terminal_streams.lock().await.is_empty());
+}
 
 async fn fixture() -> (AppState, tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();

@@ -29,6 +29,13 @@ pub struct TerminalInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalStreamInput {
+    pub terminal: TerminalInput,
+    pub subscription_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalFrame {
     pub terminal_id: String,
     pub thread_id: String,
@@ -85,7 +92,7 @@ impl Output {
             offset,
             reset,
             data: STANDARD.encode(bytes),
-            exited: self.exited,
+            exited: self.exited && offset == self.offset,
             exit_code: self.exit_code,
         }
     }
@@ -105,6 +112,7 @@ pub struct Terminal {
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     output: Mutex<Output>,
     exited: tokio::sync::watch::Sender<bool>,
+    changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl Terminal {
@@ -151,9 +159,10 @@ impl Terminal {
                 exit_code: None,
             }),
             exited: tokio::sync::watch::channel(false).0,
+            changed: tokio::sync::watch::channel(0).0,
         });
         let target = Arc::downgrade(&terminal);
-        std::thread::spawn(move || {
+        let output_reader = std::thread::spawn(move || {
             let mut buf = [0; 16 * 1024];
             loop {
                 match reader.read(&mut buf) {
@@ -164,6 +173,7 @@ impl Terminal {
                         };
                         let mut output = target.output.lock().unwrap();
                         output.append(&buf[..len]);
+                        target.changed.send_modify(|revision| *revision += 1);
                         if buf[..len].windows(4).any(|b| b == b"\x1b[6n") {
                             let (row, col) = output.screen.screen().cursor_position();
                             drop(output);
@@ -181,11 +191,17 @@ impl Terminal {
         let target = Arc::downgrade(&terminal);
         std::thread::spawn(move || {
             let result = child.wait();
+            // The child can exit while its final bytes are still in the PTY.
+            // Publish exit only after those bytes have reached the output buffer.
+            if output_reader.join().is_err() {
+                tracing::error!("terminal output reader panicked");
+            }
             if let Some(target) = target.upgrade() {
                 let mut output = target.output.lock().unwrap();
                 output.exited = true;
                 output.exit_code = result.ok().map(|status| status.exit_code());
                 target.exited.send_replace(true);
+                target.changed.send_modify(|revision| *revision += 1);
             }
         });
         Ok(terminal)
@@ -247,6 +263,12 @@ impl Terminal {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
+        {
+            let output = self.output.lock().unwrap();
+            if (output.cols, output.rows) == (cols, rows) {
+                return Ok(());
+            }
+        }
         self.process
             .lock()
             .unwrap()
@@ -257,6 +279,7 @@ impl Terminal {
         output.screen.screen_mut().set_size(rows, cols);
         output.cols = cols;
         output.rows = rows;
+        self.changed.send_modify(|revision| *revision += 1);
         Ok(())
     }
 
@@ -266,6 +289,10 @@ impl Terminal {
             .unwrap()
             .kill()
             .map_err(|error| error.to_string())
+    }
+
+    pub fn subscribe_output(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
     }
 
     pub fn read(&self, offset: Option<u64>) -> TerminalFrame {
@@ -358,7 +385,7 @@ pub async fn run_host() -> Result<(), String> {
     use serde_json::{json, Value};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut input = BufReader::new(tokio::io::stdin()).lines();
-    let mut output = tokio::io::stdout();
+    let output = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
     let mut terminal: Option<Arc<Terminal>> = None;
     let mut presentation_id = String::new();
     loop {
@@ -402,9 +429,31 @@ pub async fn run_host() -> Result<(), String> {
                         100,
                         30,
                     )?;
+                    let mut changes = spawned.subscribe_output();
+                    let stdout = output.clone();
+                    tokio::spawn(async move {
+                        while changes.changed().await.is_ok() {
+                            let mut stdout = stdout.lock().await;
+                            if stdout.write_all(b"{\"event\":\"output\"}\n").await.is_err()
+                                || stdout.flush().await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
                     presentation_id = spawned.id.clone();
                     terminal = Some(spawned);
                     Ok(json!({}))
+                }
+                "status" => {
+                    if cmd
+                        .get("terminal_id")
+                        .is_some_and(|id| id != &presentation_id)
+                    {
+                        return Err("The native terminal changed; attach again".to_string());
+                    }
+                    let terminal = terminal.as_ref().ok_or("Terminal not started")?;
+                    Ok(json!({ "terminal_id": presentation_id, "actor": terminal.actor() }))
                 }
                 "read" | "renew-input" => {
                     let terminal = terminal.as_ref().ok_or("Terminal not started")?;
@@ -437,6 +486,12 @@ pub async fn run_host() -> Result<(), String> {
                     Ok(json!({ "applied": applied }))
                 }
                 "resize" => {
+                    if cmd
+                        .get("terminal_id")
+                        .is_some_and(|id| id != &presentation_id)
+                    {
+                        return Err("The native terminal changed; attach again".to_string());
+                    }
                     let cols = u16::try_from(cmd["cols"].as_u64().ok_or("Missing columns")?)
                         .map_err(|error| error.to_string())?;
                     let rows = u16::try_from(cmd["rows"].as_u64().ok_or("Missing rows")?)
@@ -453,6 +508,7 @@ pub async fn run_host() -> Result<(), String> {
             Ok(result) => json!({ "id": cmd["id"], "ok": true, "result": result }),
             Err(error) => json!({ "id": cmd["id"], "ok": false, "error": error }),
         };
+        let mut output = output.lock().await;
         output
             .write_all(format!("{response}\n").as_bytes())
             .await
@@ -460,6 +516,17 @@ pub async fn run_host() -> Result<(), String> {
         output.flush().await.map_err(|error| error.to_string())?;
     }
     if let Some(terminal) = terminal {
+        if terminal.is_exited() {
+            let mut frame = terminal.read(None);
+            frame.terminal_id = presentation_id;
+            let mut output = output.lock().await;
+            let event = json!({ "event": "exited", "frame": frame });
+            output
+                .write_all(format!("{event}\n").as_bytes())
+                .await
+                .map_err(|error| error.to_string())?;
+            output.flush().await.map_err(|error| error.to_string())?;
+        }
         if !terminal.is_exited() {
             terminal.close()?;
         }

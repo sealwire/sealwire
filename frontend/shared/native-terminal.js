@@ -1,3 +1,4 @@
+import { createTerminalOutput, subscribeLocalTerminal } from "./terminal-output.js";
 import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { sessionTerminalMode, sessionTerminalWait, setSessionTerminalMode, subscribeSessionPresentation } from "./session-presentation.js";
 import { t } from "./i18n.js";
@@ -17,7 +18,7 @@ export function workflowEntries(entries) {
 }
 
 export function createLocalTerminalTransport(apiFetch, getDeviceId) {
-  return async (action, input) => {
+  const transport = async (action, input) => {
     const bodyInput = { ...input, device_id: getDeviceId() };
     const query = action === "read" ? new URLSearchParams(Object.entries(bodyInput).filter(([, value]) => value != null)) : null;
     const response = await apiFetch(`/api/session/terminal/${action}${query ? `?${query}` : ""}`, {
@@ -29,6 +30,8 @@ export function createLocalTerminalTransport(apiFetch, getDeviceId) {
     if (!response.ok || body.ok === false) throw new Error(body.error?.message || t("Terminal request failed"));
     return body.data;
   };
+  transport.subscribe = (input, onFrame, onError) => subscribeLocalTerminal(apiFetch, getDeviceId, input, onFrame, onError);
+  return transport;
 }
 
 export function SessionPresentation({ threadId, provider, nativeTerminalProviders = [], transport, terminalMode, onTerminalMode, activeTurnId, waitForInitialReply = false, children }) {
@@ -57,7 +60,8 @@ function NativeTerminal({ threadId, transport, waitUntilIdle }) {
     let cancelled = false;
     let terminal;
     let observer;
-    let timer;
+    let stopStream;
+    let output;
     let focusTarget;
     let focusHandler;
     let writes = Promise.resolve();
@@ -66,8 +70,7 @@ function NativeTerminal({ threadId, transport, waitUntilIdle }) {
     let sequence = 0;
     const stream = crypto.randomUUID();
     let terminalId;
-    let offset;
-    const report = (error) => { if (!cancelled) setError(error.message || String(error)); };
+    const report = (error) => { if (!cancelled) { stopStream?.(); setError(error.message || String(error)); } };
     const write = (input) => {
       const id = terminalId;
       writes = writes.then(() => transport("input", { thread_id: threadId, terminal_id: id, ...input })).catch((error) => { if (id === terminalId) report(error); });
@@ -82,7 +85,7 @@ function NativeTerminal({ threadId, transport, waitUntilIdle }) {
       if (!terminalId || cancelled) return;
       buffered += data;
       if (/[\r\x03\x1b]/.test(data) || buffered.length >= 4096) flush();
-      else { clearTimeout(inputTimer); inputTimer = setTimeout(flush, 45); }
+      else { clearTimeout(inputTimer); inputTimer = setTimeout(flush, 0); }
     };
     controls.current.close = async () => {
       try {
@@ -114,7 +117,11 @@ function NativeTerminal({ threadId, transport, waitUntilIdle }) {
       const frame = await transport("open", { thread_id: threadId, cols: Math.max(20, Math.min(500, terminal.cols)), rows: Math.max(5, Math.min(200, terminal.rows)) });
       if (cancelled) return;
       terminalId = frame.terminal_id;
-      function apply(frame) {
+      output = createTerminalOutput(terminal, {
+        schedule: (callback) => document.hidden ? { timer: setTimeout(callback, 16) } : { frame: requestAnimationFrame(callback) },
+        cancel: (scheduled) => { if (scheduled.timer != null) clearTimeout(scheduled.timer); else cancelAnimationFrame(scheduled.frame); },
+      });
+      async function apply(frame) {
         if (frame.thread_id !== threadId) throw new Error(t("The terminal session changed"));
         const replaced = frame.terminal_id !== terminalId;
         if (replaced) {
@@ -124,23 +131,26 @@ function NativeTerminal({ threadId, transport, waitUntilIdle }) {
           buffered = "";
           setError("");
         }
-        terminal.resize(frame.cols, frame.rows);
-        if (frame.reset) terminal.reset();
-        if (frame.data) terminal.write(Uint8Array.from(atob(frame.data), (c) => c.charCodeAt(0)));
-        offset = frame.offset;
+        await output.push(frame);
+        if (cancelled) return;
         setExited(frame.exited);
         setStatus(frame.exited ? t("Terminal exited") : t("Live terminal"));
         if (replaced) queueMicrotask(resize);
       }
-      apply(frame);
+      await apply(frame);
+      if (cancelled) return;
       terminal.onData((data) => {
         if (/^\x1b\[[?>]?[\d;]*[cRn]$/.test(data)) return;
         controls.current.send(data);
       });
+      let lastSize = `${frame.cols}:${frame.rows}`;
       function resize() {
         if (cancelled || !terminalId) return;
         const proposed = fit.proposeDimensions();
-        if (proposed) write({ cols: Math.max(20, Math.min(500, proposed.cols)), rows: Math.max(5, Math.min(200, proposed.rows)) });
+        if (proposed && `${proposed.cols}:${proposed.rows}` !== lastSize) {
+          lastSize = `${proposed.cols}:${proposed.rows}`;
+          write({ cols: Math.max(20, Math.min(500, proposed.cols)), rows: Math.max(5, Math.min(200, proposed.rows)) });
+        }
       }
       resize();
       observer = new ResizeObserver(resize);
@@ -149,22 +159,14 @@ function NativeTerminal({ threadId, transport, waitUntilIdle }) {
       focusHandler = resize;
       focusTarget.addEventListener("focusin", focusHandler);
       controls.current.focus = () => terminal.focus();
-      async function poll() {
-        if (cancelled) return;
-        try {
-          const next = await transport("read", { thread_id: threadId, terminal_id: terminalId, offset });
-          if (cancelled) return;
-          apply(next);
-          if (!next.exited) timer = setTimeout(poll, document.hidden ? 1500 : 180);
-        } catch (error) { report(error); }
-      }
-      void poll();
+      stopStream = transport.subscribe({ thread_id: threadId, terminal_id: terminalId }, apply, report);
     }
     void run().catch(report);
     return () => {
       flush();
       cancelled = true;
-      clearTimeout(timer);
+      stopStream?.();
+      output?.dispose();
       clearTimeout(inputTimer);
       controls.current = {};
       observer?.disconnect();

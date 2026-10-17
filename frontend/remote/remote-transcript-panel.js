@@ -1,5 +1,5 @@
+import { createRemoteTerminalTransport } from "./terminal-transport.js";
 import { SessionPresentation, useTerminalMode, workflowEntries } from "../shared/native-terminal.js";
-import { dispatchOrRecover } from "./actions.js";
 import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 import { TranscriptPane } from "../shared/transcript-pane.js";
@@ -23,11 +23,7 @@ import { reviewActivity } from "../shared/review-state.js";
 import { t } from "../shared/i18n.js";
 
 const h = React.createElement;
-const remoteTerminalTransport = async (action, input, relayId) => {
-  const type = { open: "open_terminal", read: "read_terminal", input: "write_terminal", close: "close_terminal" }[action];
-  const result = await dispatchOrRecover(type, { input }, { expectedRelayId: relayId });
-  return result?.terminal;
-};
+
 
 export function RemoteTranscriptPanel({
   currentState,
@@ -60,7 +56,7 @@ export function RemoteTranscriptPanel({
 }) {
   const relayNicknames = useRelayNicknames();
   const relayId = currentState.remoteAuth?.relayId || null;
-  const terminalTransport = useCallback((action, input) => remoteTerminalTransport(action, input, relayId), [relayId]);
+  const terminalTransport = React.useMemo(() => createRemoteTerminalTransport(relayId), [relayId]);
   const transcriptRef = useRef(null);
   const transcriptOptionsRef = useRef(null);
 

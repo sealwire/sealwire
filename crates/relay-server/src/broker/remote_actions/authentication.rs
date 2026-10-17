@@ -176,7 +176,7 @@ pub(super) async fn handle_claim_step(
     let (ok, outcome, error) = settle(state, action_kind, &from_peer_id, result).await;
     let cached = cached_remote_action_result(
         action_kind,
-        snapshot,
+        Some(snapshot),
         outcome,
         error,
         ok,

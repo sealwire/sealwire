@@ -1,13 +1,21 @@
 use super::*;
 use crate::terminal::{Terminal, TerminalFrame, TerminalInput};
+use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::CommandBuilder;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
+pub(super) type RemoteTerminalStreams =
+    Arc<tokio::sync::Mutex<HashMap<(String, String), Arc<tokio::sync::watch::Sender<bool>>>>>;
+
 impl AppState {
-    async fn terminal_scope(&self, thread: &str, device: &str) -> Result<String, String> {
+    pub(crate) async fn terminal_scope(
+        &self,
+        thread: &str,
+        device: &str,
+    ) -> Result<String, String> {
         let thread = self.canonical_session_id(thread).await?;
         let relay = self.relay.read().await;
         if relay.orchestrator_acting_device_is_revoked(device) {
@@ -158,6 +166,113 @@ impl AppState {
             return Err("The native terminal has changed; attach again".to_string());
         }
         Ok(terminal.read(input.offset))
+    }
+
+    pub async fn terminal_stream(
+        &self,
+        mut input: TerminalInput,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<TerminalFrame, String>>, String> {
+        let device = require_device_id(input.device_id.clone())?;
+        let thread = self.terminal_scope(&input.thread_id, &device).await?;
+        let target = self.resolve_session_target(&thread).await?;
+        let mut changes = if target.provider == "claude_code" {
+            target
+                .bridge()
+                .native_terminal_output_events(&target.provider_handle)
+                .await
+                .ok_or("Native terminal output is unavailable")?
+        } else {
+            self.terminals
+                .lock()
+                .await
+                .get(&thread)
+                .ok_or("The native terminal is not open")?
+                .subscribe_output()
+        };
+        self.read_terminal(input.clone()).await?;
+        input.offset = None;
+        let app = self.clone();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            let result: Result<(), String> = async {
+                let mut size = (0, 0);
+                loop {
+                    let frame = app.read_terminal(input.clone()).await?;
+                    input.offset = Some(frame.offset);
+                    input.terminal_id = Some(frame.terminal_id.clone());
+                    let bytes = base64::engine::general_purpose::STANDARD.decode(&frame.data).map_err(|error| error.to_string())?;
+                    let send = frame.reset || frame.exited || !bytes.is_empty() || size != (frame.cols, frame.rows);
+                    size = (frame.cols, frame.rows);
+                    if send {
+                        if bytes.is_empty() {
+                            if sender.send(Ok(frame.clone())).await.is_err() { return Ok(()); }
+                        } else {
+                            for (part, chunk_bytes) in bytes.chunks(24 * 1024).enumerate() {
+                                let mut chunk = frame.clone();
+                                chunk.reset = frame.reset && part == 0;
+                                chunk.exited = frame.exited && (part + 1) * 24 * 1024 >= bytes.len();
+                                chunk.data = base64::engine::general_purpose::STANDARD.encode(chunk_bytes);
+                                if sender.send(Ok(chunk)).await.is_err() { return Ok(()); }
+                            }
+                        }
+                    }
+                    if frame.exited { return Ok(()); }
+                    if !bytes.is_empty() && !frame.reset { continue; }
+                    tokio::select! {
+                        () = sender.closed() => return Ok(()),
+                        changed = changes.changed() => { changed.map_err(|_| "The terminal output stream closed".to_string())?; },
+                        () = tokio::time::sleep(Duration::from_secs(1)) => {},
+                    }
+                    tokio::time::sleep(Duration::from_millis(8)).await;
+                }
+            }.await;
+            if let Err(error) = result {
+                let _ = sender.send(Err(error)).await;
+            }
+        });
+        Ok(receiver)
+    }
+
+    pub(crate) async fn set_remote_terminal_stream(
+        &self,
+        device: &str,
+        id: &str,
+        enabled: bool,
+    ) -> Result<Option<Arc<tokio::sync::watch::Sender<bool>>>, String> {
+        if id.is_empty() || id.len() > 128 {
+            return Err("Invalid terminal subscription id".to_string());
+        }
+        let mut streams = self.terminal_streams.lock().await;
+        let key = (device.to_string(), id.to_string());
+        if let Some(previous) = streams.remove(&key) {
+            previous.send_replace(true);
+        }
+        if !enabled {
+            return Ok(None);
+        }
+        if streams.len() >= 256 || streams.keys().filter(|(owner, _)| owner == device).count() >= 32
+        {
+            return Err("Too many terminal subscriptions".to_string());
+        }
+        let cancel = Arc::new(tokio::sync::watch::channel(false).0);
+        streams.insert(key, cancel.clone());
+        Ok(Some(cancel))
+    }
+
+    pub(crate) async fn remove_remote_terminal_stream(
+        &self,
+        device: &str,
+        id: &str,
+        cancel: &Arc<tokio::sync::watch::Sender<bool>>,
+    ) {
+        let mut streams = self.terminal_streams.lock().await;
+        let key = (device.to_string(), id.to_string());
+        if streams
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, cancel))
+        {
+            streams.remove(&key);
+        }
     }
 
     pub async fn write_terminal(&self, input: TerminalInput) -> Result<(), String> {

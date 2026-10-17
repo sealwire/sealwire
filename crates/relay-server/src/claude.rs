@@ -112,6 +112,7 @@ pub struct ClaudeCodeBridge {
     /// actually running, not beside the one the default path would guess.
     worker_path: String,
     native_events: tokio::sync::broadcast::Sender<Value>,
+    native_output: Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<u64>>>>,
     native_sessions: Mutex<std::collections::HashSet<String>>,
 }
 
@@ -386,12 +387,14 @@ impl ClaudeCodeBridge {
 
         let stdin = Arc::new(Mutex::new(stdin));
         let (native_events, _) = tokio::sync::broadcast::channel(256);
+        let native_output = Arc::new(Mutex::new(HashMap::new()));
         spawn_stdout_reader(
             stdout,
             stdin.clone(),
             pending_responses.clone(),
             state.clone(),
             native_events.clone(),
+            native_output.clone(),
         );
         spawn_stderr_reader(stderr, state.clone());
 
@@ -406,6 +409,7 @@ impl ClaudeCodeBridge {
             cached_models: Arc::new(RwLock::new(None)),
             worker_path: worker_path.to_string(),
             native_events,
+            native_output,
             native_sessions: Mutex::new(std::collections::HashSet::new()),
         };
 
@@ -791,6 +795,20 @@ impl ClaudeCodeBridge {
 
 #[async_trait]
 impl ProviderBridge for ClaudeCodeBridge {
+    async fn native_terminal_output_events(
+        &self,
+        session: &str,
+    ) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(
+            self.native_output
+                .lock()
+                .await
+                .entry(session.to_string())
+                .or_insert_with(|| tokio::sync::watch::channel(0).0)
+                .subscribe(),
+        )
+    }
+
     fn native_terminal_events(&self) -> Option<tokio::sync::broadcast::Receiver<Value>> {
         Some(self.native_events.subscribe())
     }
@@ -1388,6 +1406,7 @@ impl ProviderBridge for ClaudeCodeBridge {
             return Err(format!("session not released: {reason}"));
         }
         self.native_sessions.lock().await.remove(&real_session_id);
+        self.native_output.lock().await.remove(&real_session_id);
         Ok(())
     }
 
@@ -1609,6 +1628,7 @@ fn spawn_stdout_reader(
     pending_responses: PendingResponses,
     state: Arc<RwLock<RelayState>>,
     native_events: tokio::sync::broadcast::Sender<Value>,
+    native_output: Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<u64>>>>,
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -1617,6 +1637,16 @@ fn spawn_stdout_reader(
             match lines.next_line().await {
                 Ok(Some(line)) => {
                     if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                        if value["type"] == "native_terminal_output" {
+                            if let Some(signal) = native_output
+                                .lock()
+                                .await
+                                .get(value["provider_session_id"].as_str().unwrap_or_default())
+                            {
+                                signal.send_modify(|revision| *revision += 1);
+                            }
+                            continue;
+                        }
                         if value["type"] == "native_prompt_requested" {
                             let _ = native_events.send(value);
                             continue;
@@ -8173,6 +8203,7 @@ mod session_binding_boundary_tests {
             Arc::new(Mutex::new(HashMap::new())),
             state,
             tokio::sync::broadcast::channel(16).0,
+            Arc::new(Mutex::new(HashMap::new())),
         );
 
         let exited = timeout(Duration::from_secs(5), child.wait()).await;
@@ -8184,6 +8215,36 @@ mod session_binding_boundary_tests {
             serde_json::from_str(&std::fs::read_to_string(&out).expect("reply file"))
                 .expect("reply json");
         assert_eq!(reply, worker_deny("approval-pipe"));
+    }
+
+    #[tokio::test]
+    async fn native_output_notifications_only_wake_the_matching_provider_handle() {
+        use std::process::Stdio;
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", "printf '%s\\n' '{\"type\":\"native_terminal_output\",\"provider_session_id\":\"worker-handle\"}'; cat >/dev/null"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let (matching, mut matching_rx) = tokio::sync::watch::channel(0);
+        let (other, other_rx) = tokio::sync::watch::channel(0);
+        let signals = Arc::new(Mutex::new(HashMap::from([
+            ("worker-handle".to_string(), matching),
+            ("local-session-id".to_string(), other),
+        ])));
+        let relay = bound_relay().await;
+        spawn_stdout_reader(
+            child.stdout.take().unwrap(),
+            Arc::new(Mutex::new(child.stdin.take().unwrap())),
+            Arc::new(Mutex::new(HashMap::new())),
+            relay,
+            tokio::sync::broadcast::channel(16).0,
+            signals,
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), matching_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*matching_rx.borrow(), 1);
+        assert_eq!(*other_rx.borrow(), 0);
+        child.kill().await.unwrap();
     }
 
     // Same contract as an approval: never parked on whatever session is active.

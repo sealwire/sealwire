@@ -1,3 +1,4 @@
+import { failTerminalSubscriptions, hasTerminalSubscriptions, receiveTerminalPacket } from "../shared/terminal-subscriptions.js";
 import {
   decryptJson,
   encryptJson,
@@ -41,6 +42,9 @@ const OUTCOME_UNKNOWN_MESSAGE = t(
   "It is not known whether this ran: the connection to the relay was lost for too long. Check the session before doing it again."
 );
 
+let terminalDecrypt = Promise.resolve();
+let terminalDecryptBytes = 0;
+
 let onApplySessionSnapshot = () => {};
 let onSyncRemoteSnapshot = async () => {};
 let onApplyTranscriptDelta = () => {};
@@ -55,6 +59,25 @@ export function configureRemoteActions(handlers) {
 
 export async function handleRemoteBrokerPayload(payload) {
   const kind = payload?.kind;
+
+  if (kind === "encrypted_terminal_frame") {
+    if (payload.target_peer_id !== state.socketPeerId || payload.device_id !== state.remoteAuth?.deviceId) return;
+    const relayId = state.remoteAuth?.relayId, peerId = state.socketPeerId;
+    if (!hasTerminalSubscriptions(relayId)) return;
+    const bytes = payload.envelope?.ciphertext?.length || 0;
+    if (terminalDecryptBytes + bytes > 4 * 1024 * 1024) {
+      failTerminalSubscriptions(relayId, new Error(t("Terminal output fell behind; reconnect")));
+      return;
+    }
+    terminalDecryptBytes += bytes;
+    terminalDecrypt = terminalDecrypt.then(async () => {
+      if (state.remoteAuth?.relayId !== relayId || state.socketPeerId !== peerId || !hasTerminalSubscriptions(relayId)) return;
+      const packet = await decryptPayloadWithDeviceTokens(payload.envelope);
+      if (state.remoteAuth?.relayId === relayId && state.socketPeerId === peerId) await receiveTerminalPacket(relayId, packet);
+    }).catch((error) => failTerminalSubscriptions(relayId, error)).finally(() => { terminalDecryptBytes -= bytes; });
+    await terminalDecrypt;
+    return;
+  }
 
   if (kind === "encrypted_transcript_delta") {
     await handleEncryptedTranscriptDelta(payload);
@@ -420,7 +443,8 @@ function logDecryptedTranscriptDelta(delta) {
 /// transcript deltas do: a single workspace diff is tens of frames, and each one was
 /// costing a render on the accepted path even when the reply was for this very surface.
 function isHighVolumeEncryptedPayloadKind(kind) {
-  return kind === "encrypted_transcript_delta"
+  return kind === "encrypted_terminal_frame"
+    || kind === "encrypted_transcript_delta"
     || kind === "encrypted_transcript_event"
     || kind === "encrypted_remote_action_result_chunk"
     || kind === "encrypted_session_snapshot";

@@ -516,6 +516,7 @@ fn build_router(context: AppContext, web_assets: WebAssets) -> Router {
         .route("/api/session/settings", post(update_session_settings))
         .route("/api/session/terminal/open", post(open_terminal))
         .route("/api/session/terminal/read", get(read_terminal))
+        .route("/api/session/terminal/stream", get(stream_terminal))
         .route("/api/session/terminal/input", post(write_terminal))
         .route("/api/session/terminal/close", post(close_terminal))
         .route("/api/session/heartbeat", post(session_heartbeat))
@@ -3065,6 +3066,33 @@ async fn read_terminal(
         .map(|frame| Json(ApiEnvelope::ok(frame)))
         .map_err(bad_request)
 }
+async fn stream_terminal(
+    State(context): State<AppContext>,
+    Query(input): Query<terminal::TerminalInput>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let receiver = context
+        .app
+        .terminal_stream(input)
+        .await
+        .map_err(bad_request)?;
+    let stream = stream::unfold(receiver, |mut receiver| async move {
+        let result = receiver.recv().await?;
+        let value = match result {
+            Ok(frame) => serde_json::to_value(frame).unwrap(),
+            Err(error) => serde_json::json!({ "error": error }),
+        };
+        Some((Ok::<_, Infallible>(format!("{value}\n")), receiver))
+    });
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response())
+}
+
 async fn write_terminal(
     State(context): State<AppContext>,
     Json(input): Json<terminal::TerminalInput>,

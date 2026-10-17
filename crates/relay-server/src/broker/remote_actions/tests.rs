@@ -904,7 +904,7 @@ fn cached_remote_action_result_keeps_canonical_snapshot_for_session_lifecycle() 
     ] {
         let cached = cached_remote_action_result(
             action,
-            snapshot.clone(),
+            Some(snapshot.clone()),
             RemoteActionOutcome::default(),
             None,
             true,
@@ -924,7 +924,7 @@ fn cached_remote_action_result_keeps_canonical_snapshot_for_session_lifecycle() 
 fn cached_remote_action_result_omits_snapshot_for_non_session_lifecycle_actions() {
     let cached = cached_remote_action_result(
         RemoteActionKind::Heartbeat,
-        make_snapshot(),
+        Some(make_snapshot()),
         RemoteActionOutcome::default(),
         None,
         true,
@@ -1289,7 +1289,7 @@ fn cached_remote_action_result_keeps_canonical_threads() {
 
     let cached = cached_remote_action_result(
         RemoteActionKind::ListThreads,
-        make_snapshot(),
+        Some(make_snapshot()),
         RemoteActionOutcome {
             threads: Some(threads.clone()),
             ..RemoteActionOutcome::default()
@@ -3119,7 +3119,7 @@ async fn a_rejected_transcript_cursor_reaches_the_device_as_its_code() {
     let (outcome, error) = failure.into_refusal();
     let cached = cached_remote_action_result(
         RemoteActionKind::FetchThreadTranscript,
-        state.snapshot().await,
+        Some(state.snapshot().await),
         outcome,
         Some(error),
         false,
@@ -3318,4 +3318,39 @@ fn terminal_actions_bind_the_signed_actor_and_keystrokes_do_not_fill_the_workflo
             "phone"
         );
     }
+}
+
+#[test]
+fn terminal_subscription_binds_its_nested_actor_and_fits_the_encrypted_frame_budget() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let request: RemoteActionRequest = serde_json::from_value(serde_json::json!({
+        "type": "watch_terminal", "input": { "subscription_id": "view", "enabled": true,
+            "terminal": { "thread_id": "session", "device_id": "spoofed" } }
+    }))
+    .unwrap();
+    assert!(requires_signed_attempt(request.kind()));
+    assert_eq!(
+        super::request::remote_action_class(request.kind()),
+        crate::state::RequestClass::Read
+    );
+    let bound = request.bind_device("phone".to_string(), "surface", test_origin());
+    assert_eq!(
+        serde_json::to_value(bound).unwrap()["input"]["terminal"]["device_id"],
+        "phone"
+    );
+    let payload = OutboundBrokerPayload::EncryptedTerminalFrame {
+        target_peer_id: "p".repeat(128),
+        device_id: "d".repeat(128),
+        envelope: encrypt_json(
+            "payload-secret",
+            &serde_json::json!({
+                "subscription_id": "s".repeat(128), "sequence": u64::MAX,
+                "terminal": { "terminal_id": "t".repeat(128), "thread_id": "h".repeat(128),
+                    "data": STANDARD.encode(vec![255; 24 * 1024]), "offset": u64::MAX,
+                    "cols": 500, "rows": 200, "exited": false, "reset": true }
+            }),
+        )
+        .unwrap(),
+    };
+    assert!(frame_bytes_for_payload(&payload) < MAX_BROKER_TEXT_FRAME_BYTES);
 }

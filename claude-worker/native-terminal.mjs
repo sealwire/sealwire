@@ -23,11 +23,12 @@ export function requireNativeYolo(cmd) {
   if (cmd.permissionMode !== "bypassPermissions") throw new Error("Claude terminal requires Full access (YOLO). Use Conversation for other permission modes.");
 }
 
-function rpcHost(child) {
+function rpcHost(child, onOutput) {
   let counter = 0;
   const pending = new Map();
   createInterface({ input: child.stdout }).on("line", (line) => {
     const message = JSON.parse(line);
+    if (message.event === "output" || message.event === "exited") { onOutput(message); return; }
     const callback = pending.get(message.id);
     pending.delete(message.id);
     if (callback) message.ok ? callback.resolve(message.result) : callback.reject(new Error(message.error));
@@ -142,11 +143,14 @@ export function createNativeTerminalManager({ emit, reply, fail, releaseSdk, pen
           return { allowed: true, text: entry.current.prompt, turn_id: entry.current.turnId, restoreDraft: true };
         }
         if (e.attachments?.length) return { drop: "Upload attachments through the Sealwire composer so their scope, type and size can be checked." };
-        if (!entry.actor) return { drop: "Send input through a Sealwire device." };
+        // The host records the applied actor before writing bytes, so the prompt
+        // hook cannot race the input acknowledgment or adopt a rejected retry's actor.
+        const { actor } = await entry.host("status");
+        if (!actor || actor === "host" || actor === "sealwire") return { drop: "Send input through a Sealwire device." };
         const id = randomUUID();
         pendingInputs.set(id, { entry, res });
         res.once("close", () => pendingInputs.delete(id));
-        emit({ type: "native_prompt_requested", id, provider_session_id: entry.id, device_id: entry.actor, text: e.text, attachments: e.attachments ?? [] });
+        emit({ type: "native_prompt_requested", id, provider_session_id: entry.id, device_id: actor, text: e.text, attachments: e.attachments ?? [] });
         return;
       }
       case "/step":
@@ -265,15 +269,19 @@ export function createNativeTerminalManager({ emit, reply, fail, releaseSdk, pen
     await writeFile(mcp, JSON.stringify({ mcpServers: cmd.mcpServers ?? {} }), { mode: 0o600 });
     let readyResolve;
     const readyPromise = new Promise((resolve) => { readyResolve = resolve; });
-    const entry = { id, cwd: cmd.cwd, token: randomUUID(), actor: cmd.device_id, config: cmd, dir, queue: [], ready: false, readyResolve, readyPromise, mapping: {}, current: null, managedSeq: 0, waitingSends: new Map(), fileDiffTracker: createFileDiffTracker(cmd.cwd) };
+    const entry = { id, cwd: cmd.cwd, token: randomUUID(), config: cmd, dir, queue: [], ready: false, readyResolve, readyPromise, mapping: {}, current: null, managedSeq: 0, waitingSends: new Map(), fileDiffTracker: createFileDiffTracker(cmd.cwd) };
     entry.progress = createProgressTracker({ emit: (value) => event(entry, value) });
     sessions.set(id, entry);
     const child = spawn(process.env.SEALWIRE_TERMINAL_HOST_BINARY, ["terminal-host"], { stdio: ["pipe", "pipe", "pipe"] });
     entry.child = child;
-    entry.host = rpcHost(child);
+    entry.host = rpcHost(child, (message) => {
+      if (message.event === "exited") { entry.lastFrame = message.frame; entry.exited = true; }
+      emit({ type: "native_terminal_output", provider_session_id: entry.id });
+    });
     child.stderr.on("data", (data) => process.stderr.write(data));
     child.once("exit", () => {
       entry.exited = true;
+      emit({ type: "native_terminal_output", provider_session_id: entry.id });
       for (const cmd of entry.waitingSends.values()) fail(cmd, "Claude exited before accepting the prompt");
       entry.waitingSends.clear();
       if (entry.current) {
@@ -334,6 +342,7 @@ export function createNativeTerminalManager({ emit, reply, fail, releaseSdk, pen
       try { return entry.lastFrame = await entry.host("read", { offset }); }
       catch (error) { if (!entry.exited || !entry.lastFrame) throw error; }
     }
+    if (entry.lastFrame && offset !== entry.lastFrame.offset) return { ...entry.lastFrame, reset: true, exited: true };
     return { ...entry.lastFrame, data: "", reset: false, exited: true };
   }
 
@@ -365,18 +374,16 @@ export function createNativeTerminalManager({ emit, reply, fail, releaseSdk, pen
       }
       case "terminal/read": case "terminal/input": case "terminal/close": case "terminal/control": {
         if (!entry) throw new Error("Claude native runtime is not open");
-        const frame = await readFrame(entry, cmd.offset);
         if (cmd.type === "terminal/read") {
+          const frame = await readFrame(entry, cmd.offset);
           reply(cmd, cmd.terminal_id === frame.terminal_id ? frame : await readFrame(entry));
           return;
         }
-        if (cmd.terminal_id !== frame.terminal_id) throw new Error("The native terminal changed; attach again");
         if (cmd.type === "terminal/control") {
           const escape = cmd.data === "\x1b";
           const needsStop = Boolean(entry.current && !(escape && entry.uiCommandActive));
           // Escape must be last: ESC followed by a control byte becomes an Alt chord.
           const data = cmd.data.includes("\x03") ? needsStop ? "\x15" : "\x15\x1b" : needsStop ? "" : cmd.data;
-          entry.actor = cmd.device_id;
           const result = await entry.host("input", { ...cmd, data });
           reply(cmd, { applied: result.applied, needs_stop: needsStop });
           return;
@@ -386,11 +393,11 @@ export function createNativeTerminalManager({ emit, reply, fail, releaseSdk, pen
             if (!entry.ready && !/^(?:\x1b\[[ABCD]|\r|\n|\t|\x1b)+$/.test(cmd.data)) {
               await Promise.race([entry.readyPromise, new Promise((_, reject) => setTimeout(() => reject(new Error("Finish Claude startup in the terminal before typing a prompt")), 5000).unref())]);
             }
-            entry.actor = cmd.device_id;
             await entry.host("input", cmd);
           }
           if (cmd.cols != null && cmd.rows != null) await entry.host("resize", cmd);
         }
+        if (cmd.type === "terminal/close" && !entry.exited) await entry.host("status", cmd);
         // The CLI owns the running turn; closing its presentation only detaches.
         reply(cmd, {}); return;
       }

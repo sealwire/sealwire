@@ -98,6 +98,13 @@ attachments is explicitly refused rather than silently dropping either.
 
 ## Terminal lifecycle
 
+Output is pushed over one HTTP response locally and signed, encrypted broker
+frames remotely. PTY notifications wake the stream; idle terminals do not issue
+browser read requests. Both transports restore a fresh screen when attached,
+then deliver ordered byte chunks. Rendering batches writes and waits for xterm's
+parser, with bounded queues; an interrupted or overloaded stream asks for a
+reconnect. Typing is sent immediately, with retries retaining the same sequence.
+
 Devices attach to one PTY per session. Resizing or focusing a view updates that
 shared terminal's dimensions. Reconnection restores its current screen; older
 client scrollback is local to that browser. The conversation view retains the

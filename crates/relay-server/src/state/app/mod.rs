@@ -103,6 +103,7 @@ pub(crate) const TASK_REVIEWER_READ_ONLY_MSG: &str =
 pub struct AppState {
     terminals: Arc<tokio::sync::Mutex<HashMap<String, Arc<crate::terminal::Terminal>>>>,
     claude_terminal_routes: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    terminal_streams: terminal::RemoteTerminalStreams,
     relay: Arc<RwLock<RelayState>>,
     /// The private orchestration engines this build registered, if any.
     ///
@@ -454,6 +455,7 @@ impl AppState {
         Self {
             terminals: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             claude_terminal_routes: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            terminal_streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             relay,
             orchestrators: relay_api::Orchestrators::default(),
             team_driver: Arc::new(std::sync::Mutex::new(None)),
@@ -638,6 +640,7 @@ impl AppState {
         let state = Self {
             terminals: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             claude_terminal_routes: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            terminal_streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             relay,
             orchestrators: relay_api::Orchestrators::default(),
             team_driver: Arc::new(std::sync::Mutex::new(None)),

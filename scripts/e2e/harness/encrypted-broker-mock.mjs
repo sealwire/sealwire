@@ -204,7 +204,7 @@ export function installEncryptedMock() {
       const kind = payload.kind;
       const result = kind?.startsWith("remote_") && kind.endsWith("_result") || kind === "remote_action_ack";
       const transcriptEvent = kind?.startsWith("transcript_entry_") || kind === "transcript_resync";
-      if (kind !== "session_snapshot" && kind !== "transcript_delta" && !result && !transcriptEvent) {
+      if (kind !== "session_snapshot" && kind !== "transcript_delta" && kind !== "terminal_frame" && !result && !transcriptEvent) {
         return super.dispatchEvent(event);
       }
       const stored = JSON.parse(localStorage.getItem("agent-relay.remote-state"));
@@ -215,6 +215,7 @@ export function installEncryptedMock() {
         frame.payload = {
           protocol_version: 5,
           kind: kind === "session_snapshot" ? "encrypted_session_snapshot"
+            : kind === "terminal_frame" ? "encrypted_terminal_frame"
             : kind === "transcript_delta" ? "encrypted_transcript_delta"
             : transcriptEvent ? "encrypted_transcript_event" : "encrypted_remote_action_result",
           target_peer_id: this.surfacePeerId,

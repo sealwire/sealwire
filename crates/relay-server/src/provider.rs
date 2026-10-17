@@ -466,6 +466,13 @@ pub trait ProviderBridge: Send + Sync {
         None
     }
 
+    async fn native_terminal_output_events(
+        &self,
+        _session: &str,
+    ) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
+
     fn native_terminal_events(&self) -> Option<tokio::sync::broadcast::Receiver<Value>> {
         None
     }

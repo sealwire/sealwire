@@ -3133,11 +3133,12 @@ async fn publish_payload(
     writer.bind_content_epochs(&mut payload_value);
     let frame_bytes = reserved_publish_frame_len(&payload_value);
     let frame_text = protocol::publish_frame_text(&payload_value);
-    info!(
-        broker_payload = %summary,
-        frame_bytes,
-        "publishing broker payload"
-    );
+    if !matches!(
+        &payload,
+        OutboundBrokerPayload::EncryptedTerminalFrame { .. }
+    ) {
+        info!(broker_payload = %summary, frame_bytes, "publishing broker payload");
+    }
     if frame_bytes > MAX_BROKER_TEXT_FRAME_BYTES {
         // TODO(broker-frame-budget): This warn is only diagnostic. The actual fix should live at
         // this transport boundary: measure the final serialized publish frame, then fall back to a

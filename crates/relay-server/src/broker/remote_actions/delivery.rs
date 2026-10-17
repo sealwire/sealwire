@@ -1001,7 +1001,7 @@ pub(super) fn build_encrypted_remote_action_result_chunk_payloads(
 
 pub(super) fn cached_remote_action_result(
     action: RemoteActionKind,
-    snapshot: SessionSnapshot,
+    snapshot: Option<SessionSnapshot>,
     outcome: RemoteActionOutcome,
     error: Option<String>,
     ok: bool,
@@ -1266,9 +1266,9 @@ struct RemoteActionResultPlaintextRef<'a> {
 
 fn remote_action_result_snapshot(
     action: RemoteActionKind,
-    snapshot: SessionSnapshot,
+    snapshot: Option<SessionSnapshot>,
 ) -> Option<SessionSnapshot> {
-    remote_action_result_allows_snapshot(action).then_some(snapshot)
+    snapshot.filter(|_| remote_action_result_allows_snapshot(action))
 }
 
 pub(super) fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActionResultKind {
@@ -1294,6 +1294,7 @@ pub(super) fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActio
         | RemoteActionKind::SetThreadWorkspace
         | RemoteActionKind::FetchThreadSettings
         | RemoteActionKind::OpenTerminal
+        | RemoteActionKind::WatchTerminal
         | RemoteActionKind::ReadTerminal
         | RemoteActionKind::CloseTerminal
         | RemoteActionKind::WriteTerminal
@@ -1333,7 +1334,7 @@ pub(super) fn remote_action_result_kind(action: RemoteActionKind) -> RemoteActio
     }
 }
 
-fn remote_action_result_allows_snapshot(action: RemoteActionKind) -> bool {
+pub(super) fn remote_action_result_allows_snapshot(action: RemoteActionKind) -> bool {
     matches!(
         action,
         RemoteActionKind::StartSession

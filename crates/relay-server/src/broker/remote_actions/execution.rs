@@ -5,8 +5,9 @@ use tracing::{info, warn};
 
 use super::{
     delivery::{
-        cached_remote_action_result, replay_encrypted_remote_action_result, settle, skip_unpaired,
-        RemoteActionFailure, RemoteActionOutcome,
+        cached_remote_action_result, remote_action_result_allows_snapshot,
+        replay_encrypted_remote_action_result, settle, skip_unpaired, RemoteActionFailure,
+        RemoteActionOutcome,
     },
     request::{remote_action_emits_info_log, RemoteActionRequest},
 };
@@ -101,7 +102,7 @@ pub(super) async fn execute_admitted(
             )
             .await;
     }
-    let result = run_remote_action(
+    let mut result = run_remote_action(
         state,
         admitted.request.clone().bind_device(
             admitted.device_id.clone(),
@@ -111,6 +112,14 @@ pub(super) async fn execute_admitted(
         origin.ingress,
     )
     .await;
+    if result.is_ok() {
+        if let RemoteActionRequest::WatchTerminal { input } = &admitted.request {
+            if let Err(error) = start_terminal_stream(state, writer, &admitted, input.clone()).await
+            {
+                result = Err(RemoteActionFailure::from(error));
+            }
+        }
+    }
     // A write is saved before its result is recorded, so a device is never told "done"
     // about a change a restart would lose.
     let result = match (admitted.class, result) {
@@ -133,7 +142,11 @@ pub(super) async fn execute_admitted(
         class,
         ..
     } = admitted;
-    let snapshot = state.snapshot().await;
+    let snapshot = if remote_action_result_allows_snapshot(action_kind) {
+        Some(state.snapshot().await)
+    } else {
+        None
+    };
     let (ok, outcome, error) = settle(state, action_kind, &from_peer_id, result).await;
     let response_secret = state.paired_device_payload_secret(&device_id).await.ok();
     let cached =
@@ -455,6 +468,16 @@ pub(super) async fn execute_remote_action(
                     ..RemoteActionOutcome::default()
                 })
         }
+        RemoteActionRequest::WatchTerminal { input } => {
+            if input.enabled {
+                state
+                    .read_terminal(input.terminal)
+                    .await
+                    .map(|_| RemoteActionOutcome::default())
+            } else {
+                Ok(RemoteActionOutcome::default())
+            }
+        }
         RemoteActionRequest::WriteTerminal { input } => state
             .write_terminal(input)
             .await
@@ -712,4 +735,73 @@ fn ask_user_answer_error_message(error: AskUserAnswerError) -> String {
         AskUserAnswerError::NoAnswers => "answers must include at least one entry".to_string(),
         AskUserAnswerError::Bridge(message) => message,
     }
+}
+
+async fn start_terminal_stream(
+    state: &AppState,
+    writer: &BrokerWriter,
+    admitted: &AdmittedAttempt,
+    mut input: crate::terminal::TerminalStreamInput,
+) -> Result<(), String> {
+    input.terminal.device_id = Some(admitted.device_id.clone());
+    let Some(cancel) = state
+        .set_remote_terminal_stream(&admitted.device_id, &input.subscription_id, input.enabled)
+        .await?
+    else {
+        return Ok(());
+    };
+    let thread = input.terminal.thread_id.clone();
+    let mut frames = match state.terminal_stream(input.terminal).await {
+        Ok(frames) => frames,
+        Err(error) => {
+            state
+                .remove_remote_terminal_stream(&admitted.device_id, &input.subscription_id, &cancel)
+                .await;
+            return Err(error);
+        }
+    };
+    let state = state.clone();
+    let writer = writer.clone();
+    let device = admitted.device_id.clone();
+    let peer = admitted.from_peer_id.clone();
+    let lease = admitted.origin.lease;
+    tokio::spawn(async move {
+        let mut cancelled = cancel.subscribe();
+        let mut sequence = 0u64;
+        let result: Result<(), String> = async {
+            loop {
+                if *cancelled.borrow() { return Ok(()); }
+                let next = tokio::select! {
+                    _ = cancelled.changed() => return Ok(()),
+                    next = frames.recv() => next,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                        if !state.surface_lease_is_current(&peer, lease).await { return Ok(()); }
+                        continue;
+                    }
+                };
+                let Some(mut frame) = next else { return Ok(()); };
+                if !state.surface_lease_is_current(&peer, lease).await { return Ok(()); }
+                if state.terminal_scope(&thread, &device).await.is_err() { frame = Err("Terminal access is no longer available".to_string()); }
+                let secret = state.paired_device_payload_secret(&device).await?;
+                sequence += 1;
+                let value = match frame {
+                    Ok(frame) => serde_json::json!({ "subscription_id": input.subscription_id, "sequence": sequence, "terminal": frame }),
+                    Err(error) => serde_json::json!({ "subscription_id": input.subscription_id, "sequence": sequence, "error": error }),
+                };
+                let payload = crate::broker::protocol::OutboundBrokerPayload::EncryptedTerminalFrame {
+                    target_peer_id: peer.clone(), device_id: device.clone(),
+                    envelope: crate::broker::crypto::encrypt_json(&secret, &value)?,
+                };
+                crate::broker::publish_payload(&writer, payload).await?;
+                if value.get("error").is_some() || value["terminal"]["exited"] == true { return Ok(()); }
+            }
+        }.await;
+        if let Err(error) = result {
+            tracing::debug!(%error, "terminal subscription ended");
+        }
+        state
+            .remove_remote_terminal_stream(&device, &input.subscription_id, &cancel)
+            .await;
+    });
+    Ok(())
 }

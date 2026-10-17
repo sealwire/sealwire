@@ -13,6 +13,7 @@ struct Host {
     input: ChildStdin,
     output: Lines<BufReader<ChildStdout>>,
     id: u64,
+    events: std::collections::VecDeque<Value>,
 }
 
 impl Host {
@@ -31,6 +32,7 @@ impl Host {
             output: BufReader::new(child.stdout.take().unwrap()).lines(),
             child,
             id: 0,
+            events: std::collections::VecDeque::new(),
         }
     }
 
@@ -41,14 +43,27 @@ impl Host {
             .write_all(format!("{value}\n").as_bytes())
             .await
             .unwrap();
-        let line = tokio::time::timeout(Duration::from_secs(5), self.output.next_line())
-            .await
-            .expect("host reply")
-            .unwrap()
-            .expect("host still running");
-        let reply: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(reply["id"], self.id);
-        reply
+        loop {
+            let line = tokio::time::timeout(Duration::from_secs(5), self.output.next_line())
+                .await
+                .expect("host reply")
+                .unwrap()
+                .expect("host still running");
+            let value: Value = serde_json::from_str(&line).unwrap();
+            if value.get("event").is_some() {
+                self.events.push_back(value);
+                continue;
+            }
+            assert_eq!(value["id"], self.id);
+            return value;
+        }
+    }
+
+    async fn next_event(&mut self) -> Value {
+        if let Some(event) = self.events.pop_front() {
+            return event;
+        }
+        serde_json::from_str(&self.output.next_line().await.unwrap().expect("host event")).unwrap()
     }
 }
 
@@ -70,6 +85,41 @@ async fn cli_exit_ends_the_terminal_host_without_waiting_for_another_command() {
 }
 
 #[tokio::test]
+async fn terminal_host_pushes_output_and_preserves_the_final_screen_on_exit() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = Host::launch(&dir.path().join("unused.db"));
+    host.call(json!({"type":"spawn", "binary":"/bin/sh", "args":["-c", "stty -echo; read line; printf 'PUSH_你好'; read line; printf '\\r\\nFINAL_完了'"], "session":"push", "cwd":dir.path()})).await;
+    host.call(json!({"type":"input", "device_id":"phone", "input_stream_id":"view", "input_seq":1, "data":"first\n"})).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if host.next_event().await["event"] == "output" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("unsolicited output notification");
+    host.call(json!({"type":"input", "device_id":"phone", "input_stream_id":"view", "input_seq":2, "data":"exit\n"})).await;
+    let final_frame = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let value = host.next_event().await;
+            if value["event"] == "exited" {
+                break value["frame"].clone();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(final_frame["exited"], true);
+    let bytes = STANDARD
+        .decode(final_frame["data"].as_str().unwrap())
+        .unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("FINAL_完了"));
+    assert!(host.child.wait().await.unwrap().success());
+}
+
+#[tokio::test]
 async fn renewing_input_rejects_old_retries_and_preserves_the_running_pty() {
     let dir = tempfile::tempdir().unwrap();
     let mut host = Host::launch(&dir.path().join("unused.db"));
@@ -87,9 +137,14 @@ async fn renewing_input_rejects_old_retries_and_preserves_the_running_pty() {
     assert_eq!(renewed["ok"], true);
     let current = renewed["result"]["terminal_id"].clone();
     assert_ne!(current, previous);
-    let stale = host.call(json!({"type":"input", "terminal_id":previous, "device_id":"phone", "input_stream_id":"view-0", "input_seq":1, "data":"STALE\n"})).await;
+    let stale = host.call(json!({"type":"input", "terminal_id":previous, "device_id":"other-device", "input_stream_id":"view-0", "input_seq":1, "data":"STALE\n"})).await;
     assert_eq!(stale["ok"], false);
     assert!(stale["error"].as_str().unwrap().contains("changed"));
+    assert_eq!(
+        host.call(json!({"type":"status", "terminal_id":current}))
+            .await["result"]["actor"],
+        "phone"
+    );
     assert_eq!(host.call(json!({"type":"input", "terminal_id":current, "device_id":"phone", "input_stream_id":"new-view", "input_seq":1, "data":"NEXT\n"})).await["ok"], true);
     let mut screen = String::new();
     for _ in 0..100 {

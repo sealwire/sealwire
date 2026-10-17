@@ -96,14 +96,16 @@ fn only_the_reviewed_functions_read_a_raw_provider_thread_field() {
     );
     // `refresh_workspace_trust` only hands the worker's own handle back to the worker
     // (rule 5); it never addresses `RelayState` with it. `native_terminal_request`
-    // likewise translates its handle before reading settings; its maps retain handles.
+    // likewise translates its handle before reading settings. Output notifications
+    // in `spawn_stdout_reader` only wake a bridge-owned map; they never touch RelayState.
     assert_eq!(
         functions_containing(CLAUDE, r#"["provider_session_id"]"#),
         vec![
             "apply_worker_event",
             "fork_thread",
             "native_terminal_request",
-            "refresh_workspace_trust"
+            "refresh_workspace_trust",
+            "spawn_stdout_reader"
         ],
         "claude.rs: a new reader of a worker event's provider_session_id",
     );

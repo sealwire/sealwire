@@ -904,6 +904,38 @@ test("handleRemoteBrokerPayload decrypts encrypted typed transcript events", asy
   assert.equal(received[0].request_id, "approval-1");
 });
 
+test("terminal push decrypts in order and ignores packets addressed to another device or socket", async () => {
+  installBrowserStubs();
+  const { encryptJson } = await import("./crypto.js");
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { registerTerminalSubscription } = await import("../shared/terminal-subscriptions.js");
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "terminal-relay", brokerUrl: "wss://broker.example.test", brokerChannelId: "room-a",
+    relayPeerId: "terminal-relay", securityMode: "private", deviceId: "terminal-phone",
+    deviceLabel: "Terminal phone", payloadSecret: "payload-secret-1", deviceRefreshMode: "cookie",
+    deviceRefreshToken: null, deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+  });
+  seedSocketState(state, { socketPeerId: "terminal-peer" });
+  const received = [], errors = [];
+  const remove = registerTerminalSubscription("terminal-relay", "view", async (f) => {
+    await new Promise((resolve) => setTimeout(resolve, 5)); received.push(f);
+  }, (error) => errors.push(error.message));
+  const payload = async (sequence, extra = {}) => ({
+    kind: "encrypted_terminal_frame", target_peer_id: "terminal-peer", device_id: "terminal-phone",
+    envelope: await encryptJson("payload-secret-1", { subscription_id: "view", sequence, terminal: { data: String(sequence) } }),
+    ...extra,
+  });
+  await handleRemoteBrokerPayload(await payload(1, { device_id: "other-phone" }));
+  await handleRemoteBrokerPayload(await payload(1, { target_peer_id: "old-peer" }));
+  const one = await payload(1), two = await payload(2);
+  await Promise.all([handleRemoteBrokerPayload(one), handleRemoteBrokerPayload(two)]);
+  assert.deepEqual(received, [{ data: "1" }, { data: "2" }]);
+  assert.deepEqual(errors, []);
+  remove();
+});
+
 test("handleRemoteBrokerPayload decrypts encrypted transcript deltas with delta_kind", async () => {
   installBrowserStubs();
 

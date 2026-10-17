@@ -1365,6 +1365,7 @@ async fn websocket_requests_and_replies_never_reach_room_bystanders() {
         "encrypted_session_snapshot",
         "encrypted_transcript_delta",
         "encrypted_transcript_event",
+        "encrypted_terminal_frame",
     ] {
         relay.send(Message::Text(serde_json::to_string(&ClientMessage::Publish {
             protocol_version: protocol::BROKER_PROTOCOL_VERSION,

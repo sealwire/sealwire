@@ -30,6 +30,17 @@ function snapshot(thread = threads[0], settings = {}) {
   };
 }
 async function routeApi(page) {
+  await page.addInitScript(() => {
+    const realFetch = window.fetch;
+    window.fetch = (input, init) => {
+      if (String(input).includes("/api/session/terminal/stream")) {
+        return Promise.resolve(new Response(new ReadableStream({
+          start(controller) { init.signal.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")), { once: true }); },
+        }), { headers: { "Content-Type": "application/x-ndjson" } }));
+      }
+      return realFetch(input, init);
+    };
+  });
   const starts = [], opens = [], settings = [];
   let live = snapshot();
   const localThreads = [...threads];

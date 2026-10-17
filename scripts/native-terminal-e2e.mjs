@@ -396,6 +396,10 @@ try {
     let context;
     ({ browser, context } = await launchBrowser());
     const page = await context.newPage();
+    const terminalRequests = [];
+    page.on("request", (request) => {
+      if (request.url().includes("/api/session/terminal/")) terminalRequests.push(request.url());
+    });
     await page.addInitScript(() => {
       window.__terminalStyleViolations = [];
       addEventListener("securitypolicyviolation", (event) => { if (event.effectiveDirective.startsWith("style-src")) window.__terminalStyleViolations.push(event.effectiveDirective); });
@@ -455,6 +459,16 @@ try {
       assert.equal((await api("/api/session")).active_controller_device_id, remoteDevice, "native turns must use the signed phone identity");
       assert.equal(requests.length, 3, "phone input must start exactly one turn");
       await sleep(500);
+      const pushFrames = await phone.evaluate(() => window.__agentRelayProtocolFrames.filter((frame) => frame.kind === "encrypted_terminal_frame" && frame.direction === "recv").length);
+      assert.ok(pushFrames > 1, "encrypted terminal output must be pushed after opening");
+      await phone.getByRole("button", { name: "Conversation", exact: true }).click();
+      await phone.getByRole("button", { name: "Terminal", exact: true }).click();
+      await phone.getByText("Live terminal", { exact: true }).waitFor();
+      await phone.waitForFunction((before) => window.__agentRelayProtocolFrames.filter((frame) => frame.kind === "encrypted_terminal_frame" && frame.direction === "recv").length > before, pushFrames);
+      assert.equal(await phone.locator(".native-terminal-error").count(), 0);
+      assert.equal(await phone.evaluate(() => window.__agentRelayProtocolFrames.some((frame) => frame.action === "read_terminal")), false, "remote output must not poll");
+      assert.ok(terminalRequests.some((url) => url.includes("/terminal/stream?")), "local output must have one persistent stream");
+      assert.equal(terminalRequests.some((url) => url.includes("/terminal/read?")), false, "local output must not poll");
       await phone.screenshot({ path: path.join(root, "phone-remote.png"), fullPage: true });
       assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       assert.ok(!broker._logBuffer.join("\n").includes("PHONE_NATIVE_INPUT"), "broker logs must not contain terminal input");

@@ -227,6 +227,15 @@ async function main() {
             const payload = frame.payload;
             const request = payload?.request || {};
             const actionId = payload?.action_id;
+            if (request.type === "watch_terminal") {
+              this.#respond(actionId, { action: request.type, ok: true });
+              if (request.input.enabled) this.#emit({ type: "message", payload: {
+                kind: "terminal_frame", subscription_id: request.input.subscription_id, sequence: 1,
+                terminal: { thread_id: request.input.terminal.thread_id, terminal_id: "mock-pty", offset: 0,
+                  cols: 40, rows: 15, data: "", reset: true, exited: false },
+              } });
+              return;
+            }
             if (["open_terminal", "read_terminal", "write_terminal", "close_terminal"].includes(request.type)) {
               if (request.type === "open_terminal") window.__terminalOpens.push(request.input);
               this.#respond(actionId, { action: request.type, ok: true, terminal: {

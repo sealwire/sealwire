@@ -1,4 +1,8 @@
 export default {
+  "Terminal output sequence changed; reconnect": "终端输出顺序异常，请重新连接",
+  "Terminal output fell behind; reconnect": "终端输出积压，请重新连接",
+  "Terminal output stream ended; reconnect": "终端输出连接已断开，请重新连接",
+  "Terminal output frame is too large": "终端输出帧过大",
   "{provider} terminal": "{provider} 终端",
   "Open in terminal": "在终端中打开",
   "Terminal will open after the current reply": "本次回复结束后将打开终端",

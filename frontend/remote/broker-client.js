@@ -1,4 +1,5 @@
 import { renderLog } from "./session-surface.js";
+import { failTerminalSubscriptions } from "../shared/terminal-subscriptions.js";
 import { classifyBrokerPairingError, expiredPairingMessage } from "./pairing-errors.js";
 import { clearPairingQueryFromUrl, signCredentialRefresh, signCredentialRefreshInit, verifyRelayContent } from "./crypto.js";
 import {
@@ -353,6 +354,7 @@ export async function connectBroker(reason) {
     }
 
     noteClosedSocketDuration(socketOpenedAtMs, selectionKey);
+    failTerminalSubscriptions(connection.relayId, new Error(t("Terminal output stream ended; reconnect")));
     applyRemoteSurfacePatch(createBrokerConnectionPatch({
       relayConnected: false,
       relayConnectionMessage: t("Relay server disconnected. Waiting for it to reconnect."),
@@ -384,6 +386,7 @@ export async function connectBroker(reason) {
 }
 
 export function closeBrokerSocket(resetConnectionState = true) {
+  failTerminalSubscriptions(state.remoteAuth?.relayId, new Error(t("Terminal output stream ended; reconnect")));
   if (!state.socket) {
     if (resetConnectionState) {
       cancelSocketReconnect();
@@ -1042,7 +1045,8 @@ function logInboundBrokerMessage(frame) {
 /// See the note on the matching list in `actions.js`: these arrive in bursts, and one
 /// log line per frame is one full RemoteApp re-render per frame.
 function isHighVolumeBrokerPayloadKind(kind) {
-  return kind === "encrypted_transcript_delta"
+  return kind === "encrypted_terminal_frame"
+    || kind === "encrypted_transcript_delta"
     || kind === "encrypted_remote_action_result_chunk"
     || kind === "encrypted_session_snapshot";
 }

@@ -49,6 +49,11 @@ pub(super) enum InboundBrokerPayload {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum OutboundBrokerPayload {
+    EncryptedTerminalFrame {
+        target_peer_id: String,
+        device_id: String,
+        envelope: EncryptedEnvelope,
+    },
     EncryptedTranscriptDelta {
         target_peer_id: String,
         device_id: String,
@@ -193,6 +198,8 @@ pub(super) fn summarize_outbound_payload(payload: &OutboundBrokerPayload) -> Str
             format!("kind=remote_action_reauthorize action_id={action_id} target_peer_id={target_peer_id}"),
         OutboundBrokerPayload::EncryptedSessionSnapshot { target_peer_id, device_id, .. } =>
             format!("kind=encrypted_session_snapshot target_peer_id={target_peer_id} device_id={device_id}"),
+        OutboundBrokerPayload::EncryptedTerminalFrame { target_peer_id, device_id, .. } =>
+            format!("kind=encrypted_terminal_frame target_peer_id={target_peer_id} device_id={device_id}"),
         OutboundBrokerPayload::EncryptedTranscriptDelta { target_peer_id, device_id, .. } =>
             format!("kind=encrypted_transcript_delta target_peer_id={target_peer_id} device_id={device_id}"),
         OutboundBrokerPayload::EncryptedTranscriptEvent { target_peer_id, device_id, .. } =>

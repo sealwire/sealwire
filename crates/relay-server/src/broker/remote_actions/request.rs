@@ -42,6 +42,9 @@ pub(in crate::broker) enum RemoteActionRequest {
     ReadTerminal {
         input: crate::terminal::TerminalInput,
     },
+    WatchTerminal {
+        input: crate::terminal::TerminalStreamInput,
+    },
     WriteTerminal {
         input: crate::terminal::TerminalInput,
     },
@@ -317,6 +320,7 @@ impl RemoteActionRequest {
             Self::ClaimDevice { .. } => RemoteActionKind::ClaimDevice,
             Self::OpenTerminal { .. } => RemoteActionKind::OpenTerminal,
             Self::ReadTerminal { .. } => RemoteActionKind::ReadTerminal,
+            Self::WatchTerminal { .. } => RemoteActionKind::WatchTerminal,
             Self::WriteTerminal { .. } => RemoteActionKind::WriteTerminal,
             Self::CloseTerminal { .. } => RemoteActionKind::CloseTerminal,
             Self::StartSession { .. } => RemoteActionKind::StartSession,
@@ -397,6 +401,10 @@ impl RemoteActionRequest {
             Self::ReadTerminal { mut input } => {
                 input.device_id = Some(device_id);
                 Self::ReadTerminal { input }
+            }
+            Self::WatchTerminal { mut input } => {
+                input.terminal.device_id = Some(device_id);
+                Self::WatchTerminal { input }
             }
             Self::WriteTerminal { mut input } => {
                 input.device_id = Some(device_id);
@@ -695,6 +703,7 @@ pub(in crate::broker) enum RemoteActionKind {
     ClaimDevice,
     OpenTerminal,
     ReadTerminal,
+    WatchTerminal,
     WriteTerminal,
     CloseTerminal,
     StartSession,
@@ -757,6 +766,7 @@ impl RemoteActionKind {
             Self::ClaimDevice => "claim_device",
             Self::OpenTerminal => "open_terminal",
             Self::ReadTerminal => "read_terminal",
+            Self::WatchTerminal => "watch_terminal",
             Self::WriteTerminal => "write_terminal",
             Self::CloseTerminal => "close_terminal",
             Self::StartSession => "start_session",
@@ -831,6 +841,7 @@ pub(super) fn remote_action_class(action: RemoteActionKind) -> RequestClass {
         | RemoteActionKind::FetchWorkspaceGitContext
         | RemoteActionKind::FetchThreadWorkspace
         | RemoteActionKind::FetchThreadSettings
+        | RemoteActionKind::WatchTerminal
         | RemoteActionKind::ReadTerminal
         | RemoteActionKind::FetchThreadSkills
         | RemoteActionKind::FetchReviews
@@ -865,6 +876,7 @@ pub(super) fn remote_action_emits_info_log(action: RemoteActionKind) -> bool {
             | RemoteActionKind::FetchThreadWorkspace
             | RemoteActionKind::FetchThreadSettings
             | RemoteActionKind::WriteTerminal
+            | RemoteActionKind::WatchTerminal
             | RemoteActionKind::ReadTerminal
             | RemoteActionKind::FetchThreadSkills
             | RemoteActionKind::FetchReviews
