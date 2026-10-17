@@ -102,6 +102,7 @@ async function main() {
           updated_at: 2,
         };
         const snapshot = {
+          native_terminal_providers: ["codex", "claude_code"],
           provider: "codex",
           service_ready: true,
           codex_connected: true,
@@ -162,6 +163,7 @@ async function main() {
           })
         );
 
+        window.__terminalOpens = [];
         window.__projectActions = [];
         window.__setThreadFlagActions = [];
         window.__agentRelaySecretReady = false;
@@ -225,6 +227,14 @@ async function main() {
             const payload = frame.payload;
             const request = payload?.request || {};
             const actionId = payload?.action_id;
+            if (["open_terminal", "read_terminal", "write_terminal", "close_terminal"].includes(request.type)) {
+              if (request.type === "open_terminal") window.__terminalOpens.push(request.input);
+              this.#respond(actionId, { action: request.type, ok: true, terminal: {
+                thread_id: request.input.thread_id, terminal_id: "mock-pty", offset: 0,
+                cols: 40, rows: 15, data: "", reset: request.type === "open_terminal", exited: false,
+              } });
+              return;
+            }
             if (request.type === "heartbeat") {
               this.#respond(actionId, { action: "heartbeat", ok: true, snapshot });
               return;
@@ -526,8 +536,8 @@ async function main() {
     // The Session section's fixed order: Fork, Rename, then the flag toggle (unflagged
     // here, so it reads "Flag for follow-up") — before the Projects section starts.
     assert.deepEqual(
-      sheet.items.slice(0, 3),
-      ["Fork session", "Rename session…", "Flag for follow-up"],
+      sheet.items.slice(0, 4),
+      ["Open in terminal", "Fork session", "Rename session…", "Flag for follow-up"],
       `expected Session section order, got: ${itemText}`
     );
 
@@ -603,8 +613,8 @@ async function main() {
       els.map((b) => b.textContent.trim())
     );
     assert.deepEqual(
-      reopenedItems.slice(0, 3),
-      ["Fork session", "Rename session…", "Unflag"],
+      reopenedItems.slice(0, 4),
+      ["Open in terminal", "Fork session", "Rename session…", "Unflag"],
       `expected the toggle to read "Unflag" after flagging, got: ${reopenedItems.join(" | ")}`
     );
     await page.screenshot({ path: path.join(artifacts.dir, "03-sheet-shows-unflag.png") });
@@ -612,6 +622,13 @@ async function main() {
 
     await page.keyboard.press("Escape");
     await page.waitForSelector("#remote-thread-actions-sheet[open]", { state: "hidden", timeout: TIMEOUT_MS });
+
+    await moreButton.tap();
+    await page.locator("#remote-thread-actions-sheet .thread-actions-item", { hasText: "Open in terminal" }).tap();
+    await page.waitForFunction(() => window.__terminalOpens.length > 0, null, { timeout: TIMEOUT_MS });
+    assert.equal((await page.evaluate(() => window.__terminalOpens))[0].thread_id, THREAD_ID);
+    await page.locator('.session-presentation[data-session-mode="terminal"] .xterm').waitFor();
+    await page.screenshot({ path: path.join(artifacts.dir, "04-phone-terminal.png") });
 
     console.log(
       JSON.stringify(

@@ -254,3 +254,14 @@ test("threadSheetHasActions is false only when every section is empty", () => {
   assert.equal(threadSheetHasActions(null), false);
   assert.equal(threadSheetHasActions([{ kind: "session", items: [{ kind: "fork" }] }]), true);
 });
+
+
+test("terminal action follows the target thread's provider capability", () => {
+  const session = { active_thread_id: "active", provider: "codex", native_terminal_providers: ["codex", "claude_code"] };
+  const threads = [{ id: "other", provider: "claude_code" }, { id: "pi", provider: "pi" }];
+  const other = selectThreadSheet({ threadId: "other", threads, session });
+  assert.equal(other.sections[0].items[0].kind, "terminal");
+  assert.equal(other.thread.id, "other");
+  const pi = selectThreadSheet({ threadId: "pi", threads, session });
+  assert.equal(pi.sections[0].items.some((item) => item.kind === "terminal"), false);
+});

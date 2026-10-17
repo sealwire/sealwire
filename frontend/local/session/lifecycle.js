@@ -1,3 +1,4 @@
+import { setSessionTerminalMode } from "../../shared/session-presentation.js";
 import { transcriptRowKey } from "../../shared/transcript-row-key.js";
 import {
   approvalPolicyInput,
@@ -374,6 +375,7 @@ export function createLifecycleController(ctx) {
           seedDefaults(payload.data);
           applySessionSnapshot(payload.data);
         });
+        if (newThreadId && draft.presentation === "terminal") setSessionTerminalMode(newThreadId, true, "local", draft.provider === "claude_code" && Boolean(String(draft.initialPrompt || "").trim()));
         messageInput.focus();
         await loadThreads("post-start refresh");
       } catch (error) {

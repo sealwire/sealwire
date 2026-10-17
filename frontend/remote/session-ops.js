@@ -1,3 +1,4 @@
+import { setSessionTerminalMode } from "../shared/session-presentation.js";
 import {
   transcriptDeltaIsFromAnotherGeneration,
   transcriptPageIsFromAnotherGeneration,
@@ -1455,7 +1456,8 @@ export async function startRemoteSession(sessionDraftOverride = null) {
   renderLog(`Starting remote session in ${cwd}.`);
 
   try {
-    await dispatchOrRecover("start_session", {
+    const relayId = state.remoteAuth?.relayId;
+    const result = await dispatchOrRecover("start_session", {
       input: {
         cwd,
         initial_prompt: sessionDraft.initialPrompt.trim() || null,
@@ -1471,6 +1473,10 @@ export async function startRemoteSession(sessionDraftOverride = null) {
         project_id: sessionDraft.projectId || null,
       },
     });
+    const threadId = result.snapshot?.active_thread_id;
+    if (threadId && sessionDraft.presentation === "terminal") {
+      setSessionTerminalMode(threadId, true, `remote:${relayId}`, sessionDraft.provider === "claude_code" && Boolean(sessionDraft.initialPrompt.trim()));
+    }
     return { ok: true };
   } catch (error) {
     renderLog(`Remote start failed: ${error.message}`);

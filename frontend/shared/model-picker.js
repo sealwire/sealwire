@@ -19,14 +19,14 @@ const ITEM_SELECTOR =
 // Long enough that a diagonal move into the flyout does not switch provider on the way.
 const HOVER_SWITCH_MS = 120;
 
+const groupKey = (group) => group.id || group.provider;
+
 function initialProvider(groups, selectedProvider) {
   const choosable = groups.filter((group) => !group.direct);
-  return (
-    choosable.find((group) => group.provider === selectedProvider)?.provider
-    || choosable.find((group) => group.options.some((option) => option.selected))?.provider
-    || choosable[0]?.provider
-    || ""
-  );
+  const selected = choosable.find((group) => group.options.some((option) => option.selected))
+    || choosable.find((group) => group.provider === selectedProvider)
+    || choosable[0];
+  return selected ? groupKey(selected) : "";
 }
 
 function providerRowNode(menu, provider) {
@@ -75,12 +75,13 @@ function ModelRow({ onChoose, option, query = "", lead = null, shownLabel = opti
       className: "context-menu-button model-picker-option" + (option.selected ? " is-selected" : ""),
       "data-provider": option.provider || undefined,
       "data-value": option.value,
+      "data-presentation": option.presentation,
       onClick: () => onChoose(option),
       role: "menuitemradio",
       type: "button",
     },
     lead || h(MenuGlyph, { className: "context-menu-lead", svg: option.selected ? CHECK_SVG : "" }),
-    h("span", { className: "context-menu-label" }, query ? highlightMatch(option.label, query) : shownLabel),
+    h("span", { className: "context-menu-label" }, query ? highlightMatch(shownLabel, query) : shownLabel),
     option.tag ? h("span", { className: "context-menu-hint" }, option.tag) : null
   );
 }
@@ -230,7 +231,7 @@ export function ModelPicker({
     requestFocus("models");
   };
 
-  const activeGroup = groups.find((group) => group.provider === active && !group.direct) || null;
+  const activeGroup = groups.find((group) => groupKey(group) === active && !group.direct) || null;
   // A thread's composer can only move within its own provider: no provider level.
   const single = groups.length === 1 && !groups[0].direct;
   const results = query ? searchModelOptions(groups, query) : [];
@@ -356,7 +357,7 @@ export function ModelPicker({
     const same = [...layer.querySelectorAll("[data-value], [data-provider-row]")].find((node) =>
       last.row
         ? node.dataset.providerRow === last.row
-        : node.dataset.value === last.value && (node.dataset.provider || "") === last.provider
+        : node.dataset.value === last.value && (node.dataset.provider || "") === last.provider && (node.dataset.presentation || "") === last.presentation
     );
     const panel = last.inModels && !drill ? flyoutRef.current : menu;
     const target =
@@ -381,6 +382,7 @@ export function ModelPicker({
       inModels: Boolean(flyoutRef.current?.contains(node)),
       node,
       provider: node.dataset?.provider || "",
+      presentation: node.dataset?.presentation || "",
       row: node.dataset?.providerRow || "",
       value: node.dataset?.value,
     };
@@ -448,8 +450,8 @@ export function ModelPicker({
   };
 
   const providerRow = (group) => {
-    const isActive = group.provider === active && !query;
-    const isCurrent = group.provider === provider;
+    const isActive = groupKey(group) === active && !query;
+    const isCurrent = group.options.some((option) => option.selected);
     return h(
       "button",
       {
@@ -459,19 +461,19 @@ export function ModelPicker({
           "context-menu-button model-picker-provider"
           + (isActive && showFlyout ? " is-highlighted" : "")
           + (isCurrent ? " is-current" : ""),
-        "data-provider-row": group.provider,
-        key: group.provider,
-        onClick: () => enterProvider(group.provider),
+        "data-provider-row": groupKey(group),
+        key: groupKey(group),
+        onClick: () => enterProvider(groupKey(group)),
         onFocus: () => {
-          if (!drill) setActive(group.provider);
+          if (!drill) setActive(groupKey(group));
         },
         onMouseEnter: () => {
-          if (drill || group.provider === active) return;
+          if (drill || groupKey(group) === active) return;
           clearHover();
           hoverTimer.current = setTimeout(() => {
             const flyout = flyoutRef.current;
             const focusWasInModels = flyout?.contains(flyout.ownerDocument.activeElement);
-            setActive(group.provider);
+            setActive(groupKey(group));
             if (focusWasInModels) requestFocus("provider");
           }, HOVER_SWITCH_MS);
         },
@@ -494,7 +496,7 @@ export function ModelPicker({
         "aria-checked": option.selected ? "true" : "false",
         className: "context-menu-button model-picker-direct" + (option.selected ? " is-selected" : ""),
         "data-value": option.value,
-        key: group.provider,
+        key: groupKey(group),
         onClick: () => choose(option, group),
         role: "menuitemradio",
         type: "button",
@@ -535,10 +537,11 @@ export function ModelPicker({
       results.length
         ? results.map((option) =>
             h(ModelRow, {
-              key: `${option.provider}:${option.value}`,
+              key: `${option.provider}:${option.presentation || "conversation"}:${option.value}`,
               lead: single ? null : providerMarkSlot(option.provider, { className: "model-picker-mark" }),
               onChoose: choose,
               option,
+              shownLabel: option.presentation === "terminal" ? `${option.label} · ${t("Terminal")}` : option.label,
               query,
             })
           )
@@ -550,8 +553,8 @@ export function ModelPicker({
       ...ModelList({
         group: activeGroup,
         onChoose: (option) => choose(option, activeGroup),
-        onToggleOther: () => toggleOther(activeGroup.provider),
-        otherOpen: otherOpen.has(activeGroup.provider),
+        onToggleOther: () => toggleOther(groupKey(activeGroup)),
+        otherOpen: otherOpen.has(groupKey(activeGroup)),
       }),
     ];
   } else if (drill && drilled && activeGroup) {
@@ -579,8 +582,8 @@ export function ModelPicker({
       ...ModelList({
         group: activeGroup,
         onChoose: (option) => choose(option, activeGroup),
-        onToggleOther: () => toggleOther(activeGroup.provider),
-        otherOpen: otherOpen.has(activeGroup.provider),
+        onToggleOther: () => toggleOther(groupKey(activeGroup)),
+        otherOpen: otherOpen.has(groupKey(activeGroup)),
       }),
     ];
   } else {
@@ -673,15 +676,15 @@ export function ModelPicker({
                 "aria-label": t("{provider} models", { provider: activeGroup.label }),
                 className: "context-menu context-menu-submenu model-picker-flyout",
                 "data-provider": activeGroup.provider,
-                key: activeGroup.provider,
+                key: groupKey(activeGroup),
                 ref: flyoutRef,
                 role: "menu",
               },
               ModelList({
                 group: activeGroup,
                 onChoose: (option) => choose(option, activeGroup),
-                onToggleOther: () => toggleOther(activeGroup.provider),
-                otherOpen: otherOpen.has(activeGroup.provider),
+                onToggleOther: () => toggleOther(groupKey(activeGroup)),
+                otherOpen: otherOpen.has(groupKey(activeGroup)),
               })
             )
           : null

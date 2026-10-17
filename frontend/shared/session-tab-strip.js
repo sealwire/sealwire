@@ -283,6 +283,8 @@ export function SessionTabStrip({
   onTogglePin = null,
   onMove = null,
   onNewTab = null,
+  onOpenTerminal = null,
+  nativeTerminalProviders = [],
   // `onRename(threadId, name)` — `name` is the raw box contents; the caller normalizes
   // (blank means "reset to the agent's own title"). Absent → tabs are not renamable and
   // no rename affordance is advertised at all.
@@ -782,6 +784,8 @@ export function SessionTabStrip({
       items,
       menu,
       onBeginRename: onRename ? beginRename : null,
+      onOpenTerminal,
+      nativeTerminalProviders,
       onClose,
       onCloseTabs,
       onDismiss: closeMenu,
@@ -792,7 +796,7 @@ export function SessionTabStrip({
 
 // The tab's right-click menu: this tab's own actions first, then the closing ones —
 // the grouping a browser uses. Closing a tab never deletes the session.
-function TabMenu({ items, menu, onBeginRename, onClose, onCloseTabs, onDismiss, onTogglePin }) {
+function TabMenu({ items, menu, onBeginRename, onOpenTerminal, nativeTerminalProviders, onClose, onCloseTabs, onDismiss, onTogglePin }) {
   const item = items.find((entry) => entry.tabId === menu.tabId);
   if (!item) {
     return null;
@@ -803,6 +807,9 @@ function TabMenu({ items, menu, onBeginRename, onClose, onCloseTabs, onDismiss, 
     action();
   };
   const own = [
+    onOpenTerminal && item.threadId && nativeTerminalProviders.includes(item.provider)
+      ? h(MenuItem, { key: "terminal", label: t("Open in terminal"), onSelect: run(() => onOpenTerminal(item.threadId)) })
+      : null,
     onBeginRename && item.threadId
       ? h(MenuItem, {
           hint: "F2",

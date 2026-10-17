@@ -149,7 +149,7 @@ test("choosing a model reports the provider WITH it, in one selection", () => {
   click(providerRow(view.host, "Codex"));
   click(flyoutRow(view.host, "GPT-5.5"));
 
-  assert.deepEqual(view.modelSelections, [{ model: "gpt-5.5", provider: "codex" }]);
+  assert.deepEqual(view.modelSelections, [{ model: "gpt-5.5", provider: "codex", presentation: "conversation" }]);
   assert.deepEqual(view.changes, [], "and NOT as loose field changes");
   assert.equal(view.host.querySelector(".model-picker-menu"), null, "and the menu closes");
   view.cleanup();
@@ -161,7 +161,7 @@ test("a same-provider model still names its provider, so the pair is never parti
   click(flyoutRow(view.host, "Sonnet 4.5"));
 
   assert.deepEqual(view.modelSelections, [
-    { model: "claude-sonnet-4-5", provider: "claude_code" },
+    { model: "claude-sonnet-4-5", provider: "claude_code", presentation: "conversation" },
   ]);
   view.cleanup();
 });
@@ -246,7 +246,7 @@ test("requireInitialPrompt gates Claude, and both hosts opt out of it", () => {
   view.render({ fields: baseFields({ initialPrompt: "ship it" }) });
   assert.equal(view.host.querySelector("#test-dialog-start").disabled, false);
 
-  view.render({ fields: baseFields({ provider: "codex", model: "gpt-5.5" }) });
+  view.render({ fields: baseFields({ provider: "codex", model: "gpt-5.5", presentation: "conversation" }) });
   assert.equal(
     view.host.querySelector("#test-dialog-start").disabled,
     false,
@@ -518,4 +518,18 @@ test("the footer names the directory the session will actually run in", () => {
     /Runs in ~\/git\/agent-relay/
   );
   view.cleanup();
+});
+
+test("Claude terminal is selected atomically and refuses a draft without YOLO", () => {
+  const view = mount({ nativeTerminalProviders: ["codex", "claude_code"] });
+  try {
+    openPill(view.host, "model");
+    click(providerRow(view.host, "Claude terminal"));
+    click(flyoutRow(view.host, "Sonnet 4.5"));
+    assert.deepEqual(view.modelSelections, [{ provider: "claude_code", model: "claude-sonnet-4-5", presentation: "terminal" }]);
+    view.render({ fields: baseFields({ presentation: "terminal", approvalPolicy: "on-request", sandbox: "workspace-write" }), requireInitialPrompt: false });
+    assert.equal(view.host.querySelector("#test-dialog-start").disabled, true);
+    view.render({ fields: baseFields({ presentation: "terminal", approvalPolicy: "bypass", sandbox: "danger-full-access" }), requireInitialPrompt: false });
+    assert.equal(view.host.querySelector("#test-dialog-start").disabled, false);
+  } finally { view.cleanup(); }
 });

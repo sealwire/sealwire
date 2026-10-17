@@ -1,3 +1,4 @@
+import { setSessionTerminalMode, terminalLaunchSelection } from "../shared/session-presentation.js";
 import { transcriptRowKey } from "../shared/transcript-row-key.js";
 import React, {
   useCallback,
@@ -1007,6 +1008,7 @@ function RemoteApp() {
     providerModels: remoteUi.providerModels,
   });
   const sessionPanelModel = {
+    nativeTerminalProviders: (currentState.realSession || session)?.native_terminal_providers || [],
     fields: remoteLaunch.fields,
     effortOptions: remoteLaunch.effortOptions,
     labels: {
@@ -1961,6 +1963,11 @@ function RemoteApp() {
   const closeActionsSheet = () => setActionsSheetThreadId(null);
   const actionsSheetOpen = Boolean(actionsSheetThreadId);
 
+  function openThreadTerminal(threadId) {
+    setSessionTerminalMode(threadId, true, `remote:${currentState.remoteAuth?.relayId}`);
+    return handleResumeThread(threadId, { preview: false });
+  }
+
   function handleThreadSheetAction(item) {
     const threadId = actionsSheetThreadId;
     // Read the session BEFORE closing the sheet — `actionsSheetThread` is derived from
@@ -1969,6 +1976,9 @@ function RemoteApp() {
     // Close first: every branch either opens another dialog or awaits the network, and
     // leaving the sheet up over the fork dialog would stack two modals.
     closeActionsSheet();
+    if (item.kind === "terminal") {
+      return openThreadTerminal(threadId);
+    }
     // The projects known BEFORE the action — the create branch diffs against these to
     // recover the new project's id.
     const before = remoteProjects.projects;
@@ -2389,10 +2399,7 @@ function RemoteApp() {
           void runThreadRefresh("manual refresh");
         },
         onResumeThread: handleResumeThread,
-        // Right-click keeps its long-standing shortcut straight to the fork dialog on
-        // the desktop-sized remote view; the sheet below is the entry that also works
-        // on touch, where `contextmenu` never fires.
-        onContextThread: handleOpenForkDialog,
+        onContextThread: openActionsSheet,
         onThreadActions: openActionsSheet,
         threadFilter,
         onSetThreadFilter: setThreadFilter,
@@ -2500,6 +2507,8 @@ function RemoteApp() {
         // than an empty one.
         currentState.remotePointerClass === "desktop"
           ? h(SessionTabStrip, {
+              nativeTerminalProviders: (currentState.realSession || session)?.native_terminal_providers || [],
+              onOpenTerminal: openThreadTerminal,
               items: sessionTabItems,
               // Derived from the VIEWED thread, with no fallback to the workspace's
               // remembered focus or to active_thread_id. A fallback is how the strip
@@ -3133,7 +3142,7 @@ function RemoteSidebar({
     ),
     h(SessionPanel, {
         model: sessionPanelModel,
-        onSelectModel({ provider, model }) {
+        onSelectModel({ provider, model, presentation = "conversation" }) {
           // One patch: effort is per MODEL, and the second of two sequential
           // callbacks would still be reading the previous render's catalogue.
           const uiState = remoteUiState;
@@ -3144,6 +3153,7 @@ function RemoteSidebar({
               : {};
           updateSessionDraft({
             ...patch,
+            ...terminalLaunchSelection(provider, presentation),
             effort: resolveReasoningEffortValue(catalog, model, patch.effort ?? uiState.sessionDraft.effort, provider),
             model,
             provider,

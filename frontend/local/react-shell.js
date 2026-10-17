@@ -274,6 +274,7 @@ function ThreadContextMenu() {
       h(
         "div",
         { className: "context-menu-items", id: "thread-context-menu-items" },
+        h(MenuRow, { hidden: true, id: "terminal-thread-button", label: t("Open in terminal") }),
         h(MenuRow, { id: "fork-thread-button", label: t("Fork session") }),
         h(MenuRow, { id: "rename-thread-button", label: t("Rename…"), hint: "F2" }),
         h(MenuRow, { id: "flag-thread-button", label: t("Flag for follow-up") }),

@@ -47,3 +47,14 @@ test("only advertised runtimes offer the native terminal view", () => {
   assert.match(render("claude_code", ["codex", "claude_code"]), /Session view/);
   assert.equal(render("fake"), "workflow card");
 });
+
+test("a busy Claude conversation waits before attaching its native terminal", () => {
+  const html = renderToStaticMarkup(React.createElement(SessionPresentation, {
+    threadId: "busy", provider: "claude_code", nativeTerminalProviders: ["claude_code"],
+    transport: () => { throw new Error("must not open during SDK turn"); },
+    terminalMode: true, activeTurnId: "turn", waitForInitialReply: true, onTerminalMode() {},
+  }, "workflow card"));
+  assert.match(html, /Terminal will open after the current reply/);
+  assert.match(html, /workflow card/);
+  assert.doesNotMatch(html, /Close terminal|Terminal keys/);
+});

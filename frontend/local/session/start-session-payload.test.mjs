@@ -369,3 +369,25 @@ test("onAccepted does not fire for a refused start", async () => {
 
   assert.equal(accepted, false);
 });
+
+
+test("terminal launch selects the accepted new thread without duplicating its first prompt", async () => {
+  const { sessionTerminalMode, setSessionTerminalMode, terminalLaunchSelection } = await import("../../shared/session-presentation.js");
+  setSessionTerminalMode("thread-new", false);
+  const draft = { ...defaultDraft(), ...terminalLaunchSelection("claude_code", "terminal") };
+  const view = buildController({ draft, respond: () => acceptance() });
+  const result = await view.controller.startSession();
+  assert.equal(result.ok, true);
+  assert.equal(sessionTerminalMode("thread-new"), true);
+  assert.equal(view.startRequests().length, 1);
+  const body = view.startRequests()[0].body;
+  assert.equal(body.initial_prompt, "ship the thing");
+  assert.equal(body.provider, "claude_code");
+  assert.equal(body.approval_policy, "bypass");
+  assert.equal(body.sandbox, "danger-full-access");
+  assert.equal(body.presentation, undefined);
+  setSessionTerminalMode("thread-new", false);
+  const refused = buildController({ draft, respond: rejection });
+  await refused.controller.startSession();
+  assert.equal(sessionTerminalMode("thread-new"), false);
+});

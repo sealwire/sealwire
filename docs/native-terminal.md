@@ -1,5 +1,15 @@
 # Native terminal sessions
 
+To create a terminal session, choose **Codex terminal** or **Claude terminal**
+in the New session model menu, then pick a model and start. Claude terminal
+launches explicitly select **Full access (YOLO)** in the dialog. An empty prompt
+opens an idle terminal; when Claude is already answering the initial prompt, the
+terminal connects after that reply finishes.
+
+For an existing session, right-click its sidebar row or tab and choose **Open in
+terminal**. On a phone, use the session row’s **⋯** actions. This keeps the same
+session and its permissions. Use **Conversation** above the terminal to switch back.
+
 Codex sessions offer **Conversation / Terminal** views on desktop and remote
 clients. Both views address the same Sealwire session and provider history.
 Codex attaches its native TUI to the existing app-server.

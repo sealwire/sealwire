@@ -1205,3 +1205,21 @@ test("Enter while an input method is composing does not commit the rename", () =
     view.cleanup();
   }
 });
+
+test("Open in terminal targets the right-clicked tab and follows advertised providers", () => {
+  const opened = [];
+  const view = mount({
+    items: ITEMS.map((item, index) => ({ ...item, provider: index === 2 ? "pi" : "codex" })),
+    focusedTabId: "tab-a", nativeTerminalProviders: ["codex"],
+    onOpenTerminal: (threadId) => opened.push(threadId),
+  });
+  try {
+    contextMenu(tabEl(view.host, "tab-b"));
+    const action = [...document.querySelectorAll('[role="menuitem"]')].find((node) => node.textContent.includes("Open in terminal"));
+    assert.ok(action);
+    click(action);
+    assert.deepEqual(opened, ["t2"]);
+    contextMenu(tabEl(view.host, "tab-c"));
+    assert.equal([...document.querySelectorAll('[role="menuitem"]')].some((node) => node.textContent.includes("Open in terminal")), false);
+  } finally { view.cleanup(); }
+});

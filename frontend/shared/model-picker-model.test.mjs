@@ -732,3 +732,19 @@ test("typing searches every provider's models, older ones included", () => {
     ["claude-sonnet-4-5"]
   );
 });
+
+
+test("launch terminal choices retain real providers and select only one presentation", async () => {
+  const { launchModelPickerProps, searchModelOptions } = await import("./model-picker-model.js");
+  const props = launchModelPickerProps({
+    providers: ["codex", "claude_code", "pi"], nativeTerminalProviders: ["codex", "claude_code"],
+    providerModels: { codex: [{ model: "luna", display_name: "Luna" }] },
+    selectedProvider: "codex", selectedModel: "luna", presentation: "terminal",
+  });
+  assert.deepEqual(props.groups.map((group) => group.id || group.provider), ["codex", "codex:terminal", "claude_code", "claude_code:terminal", "pi"]);
+  const selected = props.groups.flatMap((group) => group.options.filter((option) => option.selected));
+  assert.equal(selected.length, 1);
+  assert.deepEqual([selected[0].provider, selected[0].value, selected[0].presentation], ["codex", "luna", "terminal"]);
+  assert.equal(searchModelOptions(props.groups, "terminal")[0].presentation, "terminal");
+  assert.equal(launchModelPickerProps({ providers: ["codex"] }).groups.length, 1);
+});

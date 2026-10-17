@@ -1,3 +1,4 @@
+import { setSessionTerminalMode, terminalLaunchSelection } from "./shared/session-presentation.js";
 import { createLocalTerminalTransport } from "./shared/native-terminal.js";
 import {
   appShell,
@@ -22,6 +23,7 @@ import {
   directoryForm,
   forkSessionDialogRoot,
   forkThreadButton,
+  terminalThreadButton,
   goConsoleHomeButton,
   launchSettingsModal,
   loadDirectoryButton,
@@ -2651,6 +2653,21 @@ flagThreadButton?.addEventListener("click", () => {
   void toggleThreadFlagFromContextMenu();
 });
 
+function openThreadTerminal(threadId) {
+  setSessionTerminalMode(threadId, true);
+  void viewThreadById(threadId, {
+    context: selectOwningContext({ threadId, threadProjectId: state.threadProjectId || {} }),
+    preview: false,
+  });
+}
+
+terminalThreadButton?.addEventListener("click", () => {
+  const threadId = readThreadListContextMenu(state.threadListStore).threadId;
+  closeThreadContextMenu();
+  if (!threadId) return;
+  openThreadTerminal(threadId);
+});
+
 forkThreadButton?.addEventListener("click", () => {
   const threadId = readThreadListContextMenu(state.threadListStore).threadId;
   if (threadId) {
@@ -3836,7 +3853,7 @@ function defaultModelForProviderCatalog(provider) {
 
 // One step, because effort is per MODEL: a Codex `xhigh` carried onto a Claude
 // model that offers only high/max is honoured by the relay, not corrected.
-function handleLaunchModelSelection({ provider, model }) {
+function handleLaunchModelSelection({ provider, model, presentation = "conversation" }) {
   const ui = state.localUiStore.getState();
   const previousProvider = readLocalUiState(state.localUiStore).sessionDraft?.provider || "";
   if (provider && provider !== previousProvider) {
@@ -3848,6 +3865,9 @@ function handleLaunchModelSelection({ provider, model }) {
     void refreshProviderCatalogs(state.session || {});
   }
   ui.setSessionDraftField("model", model);
+  for (const [field, value] of Object.entries(terminalLaunchSelection(provider, presentation))) {
+    ui.setSessionDraftField(field, value);
+  }
 
   const draft = readLocalUiState(state.localUiStore).sessionDraft || {};
   const models = state.providerModels[provider] || [];
@@ -4447,6 +4467,10 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
   // make a working Codex archive vanish on a slow list.
   const contextProvider =
     contextThread?.provider || (isActive ? state.session?.provider : "") || "";
+  if (terminalThreadButton) {
+    terminalThreadButton.hidden = !(state.session?.native_terminal_providers || []).includes(contextProvider);
+    terminalThreadButton.disabled = batchSize > 1;
+  }
   archiveThreadButton.hidden =
     Boolean(contextProvider)
     && !providerSupportsArchive({
@@ -5197,6 +5221,7 @@ function renderLaunchSessionDialog() {
         model,
         provider,
       },
+      nativeTerminalProviders: state.session?.native_terminal_providers || [],
       gitContext: state.launchGitContext,
       id: "launch-start-session-dialog",
       initialPromptAttachmentsId: "start-prompt-attachments",
@@ -5344,6 +5369,9 @@ function openStartSessionDialog({ projectId = undefined } = {}) {
   } else if (!draft.model) {
     ui.setSessionDraftField("model", defaultModelForProviderCatalog(provider));
   }
+  if (!(state.session?.native_terminal_providers || []).includes(provider)) {
+    ui.setSessionDraftField("presentation", "conversation");
+  }
   settleLaunchDraftFromCatalog(provider);
   void refreshLaunchGitContext(
     readLocalUiState(state.localUiStore).sessionDraft?.cwd || ""
@@ -5426,6 +5454,8 @@ function renderSessionTabs() {
 
   sessionTabsRootHandle.render(
     React.createElement(SessionTabStrip, {
+      nativeTerminalProviders: state.session?.native_terminal_providers || [],
+      onOpenTerminal: openThreadTerminal,
       items,
       // The highlight means "this session is on screen", and the ONLY thing that puts
       // a session on screen is the view route: with no `?thread=` the renderer shows

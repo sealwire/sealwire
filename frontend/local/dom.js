@@ -67,6 +67,7 @@ export const sidebarTaskListMount = document.querySelector("#sidebar-task-list")
 export const sidebarTeamsListMount = document.querySelector("#sidebar-teams-list");
 export const startTaskDialogMount = document.querySelector("#start-task-dialog-mount");
 export const threadContextMenu = document.querySelector("#thread-context-menu");
+export const terminalThreadButton = document.querySelector("#terminal-thread-button");
 export const forkThreadButton = document.querySelector("#fork-thread-button");
 export const archiveThreadButton = document.querySelector("#archive-thread-button");
 export const renameThreadButton = document.querySelector("#rename-thread-button");

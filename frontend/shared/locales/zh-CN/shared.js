@@ -1,4 +1,7 @@
 export default {
+  "{provider} terminal": "{provider} 终端",
+  "Open in terminal": "在终端中打开",
+  "Terminal will open after the current reply": "本次回复结束后将打开终端",
   "Terminal graphics were interrupted; reconnect": "终端显示已中断，请重新连接",
   "This browser cannot render the terminal": "此浏览器无法显示终端",
   "Close terminal": "关闭终端",

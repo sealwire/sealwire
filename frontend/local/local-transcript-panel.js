@@ -41,7 +41,7 @@ export function LocalTranscriptPanel({
 }) {
   // Filtered HERE, before the scroll bookkeeping below — a withdrawn row must
   // not anchor "latest user message" scrolling any more than it may render.
-  const [terminalMode, setTerminalMode] = useTerminalMode(activeThreadId, "local", session?.native_terminal_providers?.includes(session?.provider) === true);
+  const [terminalMode, setTerminalMode, waitForInitialReply] = useTerminalMode(activeThreadId, "local", session?.native_terminal_providers?.includes(session?.provider) === true, session?.active_turn_id);
   const entries = visibleTranscriptEntries(terminalMode ? workflowEntries(rawEntries) : rawEntries);
   const loaderRef = useRef(null);
   // Ref-latched so a changing onLoadOlderTranscript identity never forces the
@@ -192,5 +192,6 @@ export function LocalTranscriptPanel({
     loaderRef.current?.sync(historyKey);
   });
 
-  return h(SessionPresentation, { threadId: viewingConversation ? activeThreadId : null, provider: session?.provider, nativeTerminalProviders: session?.native_terminal_providers, transport: terminalTransport, terminalMode, onTerminalMode: setTerminalMode }, content);
+  return h(SessionPresentation, { threadId: viewingConversation ? activeThreadId : null, provider: session?.provider, nativeTerminalProviders: session?.native_terminal_providers,
+    activeTurnId: session?.active_turn_id, waitForInitialReply, transport: terminalTransport, terminalMode, onTerminalMode: setTerminalMode }, content);
 }

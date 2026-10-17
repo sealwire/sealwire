@@ -67,7 +67,7 @@ export function RemoteTranscriptPanel({
   const approval = sessionView?.approval || null;
   // Filtered HERE, before the scroll bookkeeping below — a withdrawn row must
   // not anchor "latest user message" scrolling any more than it may render.
-  const [terminalMode, setTerminalMode] = useTerminalMode(session?.active_thread_id, `remote:${relayId}`, session?.native_terminal_providers?.includes(session?.provider) === true);
+  const [terminalMode, setTerminalMode, waitForInitialReply] = useTerminalMode(session?.active_thread_id, `remote:${relayId}`, session?.native_terminal_providers?.includes(session?.provider) === true, session?.active_turn_id);
   const entries = visibleTranscriptEntries(terminalMode ? workflowEntries(session?.transcript) : session?.transcript);
   const hydrationLoading = Boolean(
     session?.transcript_truncated
@@ -281,6 +281,7 @@ export function RemoteTranscriptPanel({
           h("button", { type: "button", onClick: () => void viewRemoteThread(session.active_thread_id) }, t("Retry"))
         )
       : null,
-    h("div", { className: "chat-thread", id: "remote-transcript", ref: transcriptRef }, h(SessionPresentation, { threadId: session?.active_thread_id, provider: session?.provider, nativeTerminalProviders: session?.native_terminal_providers, transport: terminalTransport, terminalMode, onTerminalMode: setTerminalMode }, body))
+    h("div", { className: "chat-thread", id: "remote-transcript", ref: transcriptRef }, h(SessionPresentation, { threadId: session?.active_thread_id, provider: session?.provider, nativeTerminalProviders: session?.native_terminal_providers,
+    activeTurnId: session?.active_turn_id, waitForInitialReply, transport: terminalTransport, terminalMode, onTerminalMode: setTerminalMode }, body))
   );
 }

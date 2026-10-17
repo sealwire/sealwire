@@ -296,6 +296,7 @@ async function main() {
             `thread-project-${index}`, project.id,
           ]));
           const snapshot = {
+            native_terminal_providers: ["codex", "claude_code"],
             provider: "codex",
             service_ready: true,
             codex_connected: true,
@@ -374,6 +375,8 @@ async function main() {
           // Counted so a failure can say whether the page ever ASKED for the
           // catalogue — "never asked" and "asked and dropped it" are different bugs.
           window.__brokerCalls = [];
+          window.__terminalStarts = [];
+          window.__terminalOpens = [];
 
           class FakeWebSocket extends EventTarget {
             static OPEN = 1;
@@ -454,7 +457,28 @@ async function main() {
                 return;
               }
               if (request.type === "start_session") {
-                respond({ action: "start_session", ok: false, error: refusal });
+                if (request.input.cwd.includes("outside-roots")) {
+                  respond({ action: "start_session", ok: false, error: refusal });
+                  return;
+                }
+                window.__terminalStarts.push(request.input);
+                Object.assign(snapshot, {
+                  active_thread_id: `${threadId}-terminal`, provider: request.input.provider,
+                  provider_connected: true,
+                  provider_status: [{ provider: request.input.provider, connected: true, status: "connected" }],
+                  model: request.input.model, approval_policy: request.input.approval_policy,
+                  sandbox: request.input.sandbox, available_models: claudeModels,
+                });
+                Object.assign(threadSummary, { id: snapshot.active_thread_id, provider: request.input.provider });
+                respond({ kind: "remote_session_result", action: "start_session", ok: true, snapshot });
+                return;
+              }
+              if (["open_terminal", "read_terminal", "write_terminal", "close_terminal"].includes(request.type)) {
+                if (request.type === "open_terminal") window.__terminalOpens.push(request.input);
+                respond({ action: request.type, ok: true, terminal: {
+                  thread_id: request.input.thread_id, terminal_id: "mock-pty", offset: 0, cols: 40, rows: 15,
+                  data: "", reset: request.type === "open_terminal", exited: false,
+                } });
               }
             }
             close() {
@@ -632,6 +656,21 @@ async function main() {
           `[${name}] tapping the visible edge of ${edge.label} chooses it`
         );
       }
+      await page.locator("#remote-start-session-dialog-model").click();
+      const backToProviders = page.locator(".model-picker-back");
+      if (await backToProviders.isVisible()) await backToProviders.click();
+      for (const provider of ["codex", "claude_code"]) {
+        const row = page.locator(`[data-provider-row="${provider}:terminal"]`);
+        await row.scrollIntoViewIfNeeded();
+        const label = await row.locator(".context-menu-label").evaluate((node) => ({ width: node.clientWidth, scroll: node.scrollWidth }));
+        assert.ok(label.width > 0 && label.scroll <= label.width + 1, JSON.stringify(label));
+      }
+      await page.screenshot({ path: path.join(os.tmpdir(), `remote-terminal-choices-${name}.png`) });
+      await page.locator('[data-provider-row="claude_code:terminal"]').click();
+      await page.locator('.model-picker-layer [data-provider="claude_code"][data-value="claude-sonnet-4-5"]').click();
+      assert.match(await page.locator("#remote-start-session-dialog-approval").textContent(), /Full access/);
+      assert.match(await page.locator("#remote-start-session-dialog-model").textContent(), /Terminal/);
+      logStep(`${name} terminal selection preserves model and shows YOLO`);
       const workspace = await openWorkspacePanel(page, { touch: profile.hasTouch });
       logStep(`${name} workspace panel`, workspace);
 
@@ -662,6 +701,20 @@ async function main() {
       const shot = path.join(os.tmpdir(), `remote-start-refusal-${name}.png`);
       await page.screenshot({ path: shot });
       logStep(`${name} refused start`, { box: refusal.box, shot });
+
+      await fillStartSessionDialog(page, {
+        dialogId: "remote-start-session-dialog", cwd: "/tmp/e2e-model-picker", approvalPolicy: null, timeout: TIMEOUT_MS,
+      });
+      await page.waitForFunction(() => window.__terminalOpens.length > 0, null, { timeout: TIMEOUT_MS });
+      const launched = await page.evaluate(() => ({ starts: window.__terminalStarts, opens: window.__terminalOpens }));
+      assert.equal(launched.starts.length, 1);
+      assert.equal(launched.starts[0].provider, "claude_code");
+      assert.equal(launched.starts[0].model, "claude-sonnet-4-5");
+      assert.equal(launched.starts[0].approval_policy, "bypass");
+      assert.equal(launched.opens[0].thread_id, `${THREAD_ID}-terminal`);
+      await page.locator('.session-presentation[data-session-mode="terminal"] .xterm').waitFor();
+      await page.screenshot({ path: path.join(os.tmpdir(), `remote-terminal-launched-${name}.png`) });
+      logStep(`${name} terminal started on the acknowledged session`);
 
       logStep(`${name} PASS`);
       await page.close();

@@ -1,17 +1,15 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { sessionTerminalMode, sessionTerminalWait, setSessionTerminalMode, subscribeSessionPresentation } from "./session-presentation.js";
 import { t } from "./i18n.js";
 
 const h = React.createElement;
-const modes = new Map();
-
-export function useTerminalMode(threadId, scope = "local", capable = true) {
-  const key = `${scope}:${threadId}`;
-  const [selection, setSelection] = useState(null);
-  const enabled = selection && selection.key === key ? selection.enabled : modes.get(key) === true;
-  return [capable && enabled, (enabled) => {
-    modes.set(key, enabled);
-    setSelection({ key, enabled });
-  }];
+export function useTerminalMode(threadId, scope = "local", capable = true, activeTurnId = null) {
+  const enabled = useSyncExternalStore(subscribeSessionPresentation, () => sessionTerminalMode(threadId, scope), () => false);
+  const waiting = useSyncExternalStore(subscribeSessionPresentation, () => sessionTerminalWait(threadId, scope), () => false);
+  useEffect(() => {
+    if (waiting && !activeTurnId) setSessionTerminalMode(threadId, enabled, scope);
+  }, [waiting, activeTurnId, threadId, scope, enabled]);
+  return [capable && enabled, (enabled) => setSessionTerminalMode(threadId, enabled, scope), waiting];
 }
 
 export function workflowEntries(entries) {
@@ -33,27 +31,29 @@ export function createLocalTerminalTransport(apiFetch, getDeviceId) {
   };
 }
 
-export function SessionPresentation({ threadId, provider, nativeTerminalProviders = [], transport, terminalMode, onTerminalMode, children }) {
+export function SessionPresentation({ threadId, provider, nativeTerminalProviders = [], transport, terminalMode, onTerminalMode, activeTurnId, waitForInitialReply = false, children }) {
   if (!threadId || !nativeTerminalProviders.includes(provider) || !transport) return children;
   return h("div", { className: "session-presentation", "data-session-mode": terminalMode ? "terminal" : "conversation" },
     h("div", { className: "session-presentation-controls", role: "group", "aria-label": t("Session view") },
       h("button", { type: "button", "aria-pressed": !terminalMode, onClick: () => onTerminalMode(false) }, t("Conversation")),
       h("button", { type: "button", "aria-pressed": terminalMode, onClick: () => onTerminalMode(true) }, t("Terminal"))),
     terminalMode && provider === "claude_code" ? h("p", { className: "native-terminal-policy", role: "note" }, t("Claude terminal requires Full access (YOLO). Shell commands run directly.")) : null,
-    terminalMode ? h(NativeTerminal, { key: threadId, threadId, transport }) : null,
+    terminalMode ? h(NativeTerminal, { key: threadId, threadId, transport, waitUntilIdle: waitForInitialReply && Boolean(activeTurnId) }) : null,
     children);
 }
 
-function NativeTerminal({ threadId, transport }) {
+function NativeTerminal({ threadId, transport, waitUntilIdle }) {
+  const [waitingForIdle, setWaitingForIdle] = useState(waitUntilIdle);
+  useEffect(() => { if (!waitUntilIdle) setWaitingForIdle(false); }, [waitUntilIdle]);
   const mount = useRef(null);
   const controls = useRef({});
   const [running, setRunning] = useState(true);
   const [exited, setExited] = useState(false);
   const [error, setError] = useState("");
-  const [status, setStatus] = useState(t("Connecting terminal…"));
+  const [status, setStatus] = useState(waitUntilIdle ? t("Terminal will open after the current reply") : t("Connecting terminal…"));
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    if (!running) return;
+    if (!running || waitingForIdle) return;
     let cancelled = false;
     let terminal;
     let observer;
@@ -171,14 +171,14 @@ function NativeTerminal({ threadId, transport }) {
       focusTarget?.removeEventListener("focusin", focusHandler);
       terminal?.dispose();
     };
-  }, [threadId, transport, attempt, running]);
+  }, [threadId, transport, attempt, running, waitingForIdle]);
   const reconnect = () => { setRunning(true); setAttempt((n) => n + 1); };
   return h("section", { className: "native-terminal", "aria-label": t("Native agent terminal") },
     h("div", { className: "native-terminal-toolbar" },
       h("span", { className: "native-terminal-status", role: "status" }, status),
-      running && !exited ? h("button", { type: "button", onClick: () => controls.current.close?.() }, t("Close terminal")) : h("button", { type: "button", onClick: reconnect }, t("Reconnect"))),
+      waitingForIdle ? null : running && !exited ? h("button", { type: "button", onClick: () => controls.current.close?.() }, t("Close terminal")) : h("button", { type: "button", onClick: reconnect }, t("Reconnect"))),
     h("div", { className: "native-terminal-screen", ref: mount }),
-    running && !exited ? h("div", { className: "native-terminal-keys", "aria-label": t("Terminal keys") },
+    !waitingForIdle && running && !exited ? h("div", { className: "native-terminal-keys", "aria-label": t("Terminal keys") },
       ...[["Esc", "\x1b"], ["Tab", "\t"], ["Ctrl+C", "\x03"], ["Enter", "\r"]].map(([label, data]) => h("button", { type: "button", key: label, onClick: () => { controls.current.send?.(data); controls.current.focus?.(); } }, label))) : null,
     error ? h("div", { className: "native-terminal-error", role: "alert" },
       h("span", null, error),

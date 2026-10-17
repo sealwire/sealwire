@@ -165,6 +165,7 @@ export function SessionPanel({
     providers: model.providers,
     providerModels: model.providerModels,
     modelsStatus: model.modelsStatus,
+    nativeTerminalProviders: model.nativeTerminalProviders,
     approvalOptions: model.approvalOptions,
     effortOptions,
     projects: model.projects,

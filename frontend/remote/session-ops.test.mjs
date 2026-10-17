@@ -9694,3 +9694,69 @@ test("a skill-only send reaches the relay with the skill's name and path beside 
   state.socket = null;
   state.pendingActions.clear();
 });
+
+test("terminal remote start selects the result thread in its own relay scope", async () => {
+  activeBrowser || installBrowserStubs();
+
+  const { state, saveRemoteAuth } = await import("./state.js");
+  const { handleRemoteBrokerPayload } = await import("./actions.js");
+  const { startRemoteSession } = await import("./session-ops.js");
+
+  seedRemoteAuth(state, saveRemoteAuth, {
+    relayId: "relay-1",
+    brokerUrl: "wss://broker.example.test",
+    brokerChannelId: "room-a",
+    relayPeerId: "relay-1",
+    securityMode: "private",
+    deviceId: "device-1",
+    deviceLabel: "Primary Phone",
+    payloadSecret: "payload-secret-1",
+    deviceRefreshMode: "cookie",
+    deviceRefreshToken: null,
+    deviceJoinTicket: "device-ws-token",
+    deviceJoinTicketExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    sessionClaim: "session-claim-1",
+    sessionClaimExpiresAt: null,
+  });
+  seedSocketState(state, { socketConnected: true, socketPeerId: "surface-peer-1" });
+  state.pendingActions.clear();
+
+  const { sessionTerminalMode, setSessionTerminalMode } = await import("../shared/session-presentation.js");
+  setSessionTerminalMode("native-new", false, "remote:relay-1");
+  state.socket = {
+    relayPeerId: state.pairingTicket?.relay_peer_id ?? state.remoteAuth?.relayPeerId,
+    readyState: 1,
+    send(raw) {
+      const frame = decodeActionFrame(raw);
+      if (frame.payload?.request?.type !== "start_session") {
+        return;
+      }
+      setImmediate(() =>
+        deliverEncryptedTestPayload(handleRemoteBrokerPayload, {
+          kind: "remote_session_result",
+          action_id: frame.payload.action_id,
+          action: "start_session",
+          ok: true,
+          snapshot: { active_thread_id: "native-new" },
+        })
+      );
+    },
+  };
+
+  const result = await startRemoteSession({
+    approvalPolicy: "bypass",
+    provider: "claude_code",
+    presentation: "terminal",
+    cwd: "/tmp/demo",
+    effort: "medium",
+    initialPrompt: "",
+    model: "gpt-5.4",
+    projectId: null,
+    sandbox: "workspace-write",
+  });
+
+  assert.deepEqual(result, { ok: true });
+  assert.equal(sessionTerminalMode("native-new", "remote:relay-1"), true);
+  assert.equal(sessionTerminalMode("native-new", "remote:other-relay"), false);
+  assert.equal(sessionTerminalMode("native-new"), false);
+});

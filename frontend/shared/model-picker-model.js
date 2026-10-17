@@ -100,6 +100,25 @@ export function modelPickerProps({
   };
 }
 
+export function launchModelPickerProps({ nativeTerminalProviders = [], presentation = "conversation", ...input } = {}) {
+  const props = modelPickerProps(input);
+  return {
+    ...props,
+    tag: presentation === "terminal" ? t("Terminal") : null,
+    groups: props.groups.flatMap((group) => {
+      const normal = { ...group, options: group.options.map((option) => ({ ...option, presentation: "conversation", selected: option.selected && presentation !== "terminal" })) };
+      if (!nativeTerminalProviders.includes(group.provider)) return [normal];
+      return [normal, {
+        ...group,
+        id: `${group.provider}:terminal`,
+        label: t("{provider} terminal", { provider: group.label }),
+        hint: group.provider === "claude_code" ? "YOLO" : "TUI",
+        options: group.options.map((option) => ({ ...option, presentation: "terminal", selected: option.selected && presentation === "terminal" })),
+      }];
+    }),
+  };
+}
+
 // The logo beside the chip names the provider, so the text is the model alone.
 export function selectedModelChip({
   providerModels = {},

@@ -61,6 +61,7 @@
     "test": "node --test claude-worker/*.test.mjs frontend/*.test.mjs frontend/desktop/*.test.mjs frontend/shared/*.test.mjs frontend/local/*.test.mjs frontend/local/editor/*.test.mjs frontend/local/session/*.test.mjs frontend/local/transcript/*.test.mjs frontend/remote/*.test.mjs frontend/remote/__tests__/*.test.mjs frontend/remote/transcript/*.test.mjs scripts/*.test.mjs scripts/e2e/*.test.mjs scripts/e2e/harness/*.test.mjs && vite build",
     "test:native-terminal": "node scripts/native-terminal-e2e.mjs",
     "test:native-terminal:live": "node scripts/native-terminal-workflows-live.mjs",
+    "test:browser:terminal-entrypoints": "node scripts/browser-terminal-entrypoints-e2e.mjs",
     "test:browser:native-terminal": "npm run build && NATIVE_TERMINAL_BROWSER=1 NATIVE_TERMINAL_REMOTE=1 node scripts/native-terminal-e2e.mjs",
     "test:harness": "node --test scripts/e2e/harness/*.test.mjs",
     "test:message-drop-harness": "cargo test -p relay-server replay_harness -- --nocapture && cargo test -p relay-server compact_for_broker_trims_many_file_changes_without_clearing_transcript -- --nocapture",

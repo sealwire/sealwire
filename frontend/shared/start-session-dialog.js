@@ -6,7 +6,7 @@ import { ProjectPicker } from "./project-picker.js";
 import { SettingPill } from "./setting-pill.js";
 import { WorkspacePicker } from "./workspace-picker.js";
 import { abbreviateHomePath } from "./workspace-chip-model.js";
-import { modelPickerProps } from "./model-picker-model.js";
+import { launchModelPickerProps } from "./model-picker-model.js";
 import {
   PromptCard,
   SessionContextBar,
@@ -28,6 +28,7 @@ export function StartSessionDialog({
   initialPromptAttachmentsId = null,
   attachControl = null,
   modelsStatus = "ready",
+  nativeTerminalProviders = [],
   onCreateProject = null,
   onFieldChange = null,
   onOpenModelPicker = null,
@@ -51,10 +52,12 @@ export function StartSessionDialog({
   const cwd = fields.cwd || "";
   const provider = fields.provider || "";
   const isClaudeCode = provider === "claude_code";
-  const requiresInitialPrompt = requireInitialPrompt && isClaudeCode;
+  const claudeTerminal = isClaudeCode && fields.presentation === "terminal";
+  const requiresInitialPrompt = requireInitialPrompt && isClaudeCode && !claudeTerminal;
+  const invalidTerminalPermissions = claudeTerminal && (fields.approvalPolicy !== "bypass" || !["workspace-write", "danger-full-access"].includes(fields.sandbox));
   const hasInitialPrompt = Boolean(fields.initialPrompt?.trim());
   const startDisabled =
-    startPending || !cwd.trim() || (requiresInitialPrompt && !hasInitialPrompt);
+    startPending || invalidTerminalPermissions || !cwd.trim() || (requiresInitialPrompt && !hasInitialPrompt);
 
   const [startError, setStartError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
@@ -178,7 +181,9 @@ export function StartSessionDialog({
           })
         : null,
       attachControl,
-      hint: requiresInitialPrompt
+      hint: claudeTerminal
+        ? t("Claude terminal requires Full access (YOLO). Shell commands run directly.")
+        : requiresInitialPrompt
         ? t("Claude Code starts when you send the first prompt")
         : t("Leave empty to start idle"),
       id: `${id}-start-prompt`,
@@ -195,8 +200,10 @@ export function StartSessionDialog({
       SettingPillRow,
       { key: "pills" },
       h(ModelPicker, {
-        ...modelPickerProps({
+        ...launchModelPickerProps({
           offerProviderDefault: true,
+          nativeTerminalProviders,
+          presentation: fields.presentation,
           providerModels,
           providers,
           selectedModel: fields.model || "",
@@ -211,7 +218,7 @@ export function StartSessionDialog({
             return;
           }
           setStartError("");
-          onSelectModel?.({ model: value, provider: option.provider || provider });
+          onSelectModel?.({ model: value, provider: option.provider || provider, presentation: option.presentation });
         },
       }),
       h(SettingPill, {

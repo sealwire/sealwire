@@ -58,6 +58,7 @@ export function providerSupportsArchive({ provider = "", capabilities = [] } = {
  */
 export function buildThreadSheetSections({
   forkBlocked = false,
+  nativeTerminal = false,
   renamed = false,
   flagged = false,
   projects = [],
@@ -95,6 +96,8 @@ export function buildThreadSheetSections({
       ],
     },
   ];
+
+  if (nativeTerminal) sections[0].items.unshift({ kind: "terminal", label: t("Open in terminal") });
 
   // Only offered once there is an override to remove. Listing it on a session that
   // still shows the agent's own title would be a control that provably does nothing.
@@ -159,6 +162,7 @@ export function selectThreadSheet({
     return { thread: null, sections: [], hasActions: false };
   }
   const sections = buildThreadSheetSections({
+    nativeTerminal: (session?.native_terminal_providers || []).includes(thread.provider),
     // The rule the relay enforces and local's menu mirrors — a BACKGROUND thread can be
     // mid-turn too, so this is not just "is the active session running".
     forkBlocked: threadIsBusyForFork(thread, session),
