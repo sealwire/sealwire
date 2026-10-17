@@ -3565,9 +3565,15 @@ mod tests {
             )]),
         );
         let (bridge, state) = bridge_with_scenarios("bypass", harness.clone()).await;
-        // This test asserts transcript deltas are queued for the broker, so a broker
-        // must be configured — otherwise deltas are dropped at enqueue (local-only).
-        state.write().await.broker_configured = true;
+        // Deltas are queued for the broker only when a broker is configured and a phone
+        // is online on this thread.
+        {
+            let mut relay = state.write().await;
+            relay.broker_configured = true;
+            relay.connect_paired_surface_for_test("phone", "peer-phone", "");
+            relay.set_watched_threads("peer-phone", "phone", vec![ACTIVE_THREAD.to_string()]);
+            relay.pending_broker_messages.clear();
+        }
 
         bridge
             .start_turn(ACTIVE_THREAD, "scripted", "fake-echo", "medium", &[])

@@ -6343,25 +6343,8 @@ mod watched_threads {
     use crate::protocol::{LocalTranscriptEvent, TranscriptResyncReason};
 
     /// Bring a paired device online as a broker target.
-    fn online_paired_device(relay: &mut RelayState, device_id: &str, peer_id: &str) {
-        relay.paired_devices.insert(
-            device_id.to_string(),
-            PairedDevice {
-                device_id: device_id.to_string(),
-                label: device_id.to_string(),
-                payload_secret: format!("secret-{device_id}"),
-                device_verify_key: TEST_VERIFY_KEY_B64.to_string(),
-                created_at: 0,
-                last_seen_at: None,
-                last_peer_id: Some(peer_id.to_string()),
-                broker_join_ticket_expires_at: None,
-                path_scope: Vec::new(),
-                pairing_broker: None,
-            },
-        );
-        relay.mark_surface_peer_online(peer_id);
-        relay.bind_surface_peer_to_device(device_id, peer_id);
-        relay.register_broker_surface(peer_id);
+    pub(super) fn online_paired_device(relay: &mut RelayState, device_id: &str, peer_id: &str) {
+        relay.connect_paired_surface_for_test(device_id, peer_id, TEST_VERIFY_KEY_B64);
     }
 
     fn activate(relay: &mut RelayState, thread_id: &str, device_id: &str) {
@@ -6589,6 +6572,7 @@ mod watched_threads {
     fn a_watched_background_thread_streams_its_deltas() {
         let mut relay = test_state();
         relay.broker_configured = true;
+        online_paired_device(&mut relay, "device-a", "device-a");
         activate(&mut relay, "thread-active", "device-a");
         relay.set_watched_threads(
             "device-a",
@@ -6648,6 +6632,7 @@ mod watched_threads {
     fn a_watched_background_thread_streams_command_output() {
         let mut relay = test_state();
         relay.broker_configured = true;
+        online_paired_device(&mut relay, "device-a", "device-a");
         activate(&mut relay, "thread-active", "device-a");
         relay.set_watched_threads(
             "device-a",
@@ -6690,6 +6675,7 @@ mod watched_threads {
     fn a_watched_background_user_message_asks_watchers_to_resync() {
         let mut relay = test_state();
         relay.broker_configured = true;
+        online_paired_device(&mut relay, "device-a", "device-a");
         activate(&mut relay, "thread-active", "device-a");
         relay.set_watched_threads(
             "device-a",
@@ -6725,6 +6711,7 @@ mod watched_threads {
     fn starting_to_watch_a_background_thread_asks_for_a_resync_at_its_revision() {
         let mut relay = test_state();
         relay.broker_configured = true;
+        online_paired_device(&mut relay, "device-a", "device-a");
         activate(&mut relay, "thread-active", "device-a");
         relay.bg_upsert_user_message(
             "thread-background",
@@ -6775,6 +6762,7 @@ mod watched_threads {
     fn watching_the_active_thread_asks_for_no_resync() {
         let mut relay = test_state();
         relay.broker_configured = true;
+        online_paired_device(&mut relay, "device-a", "device-a");
         activate(&mut relay, "thread-active", "device-a");
         relay.upsert_user_message(
             "user-1".to_string(),
@@ -6916,6 +6904,130 @@ mod watched_threads {
             relay.pending_broker_messages.is_empty(),
             "the broker queue must still stay empty without a broker"
         );
+    }
+
+    /// The local page watching a thread is not a reason to queue for the broker: it was
+    /// already served by the tee, and the publisher would only drop the frame.
+    #[test]
+    fn a_thread_no_remote_surface_watches_queues_nothing_for_the_broker() {
+        let mut relay = test_state();
+        relay.broker_configured = true;
+        activate(&mut relay, "thread-active", "device-a");
+        let mut deltas = relay.subscribe_transcript_events();
+
+        provider_enqueues_active_delta(&mut relay, "item-1", "hello");
+
+        assert_eq!(
+            deltas
+                .try_recv()
+                .expect("the local page must still stream")
+                .into_delta()
+                .delta,
+            "hello"
+        );
+        assert!(
+            queued_delta_thread_ids(&relay).is_empty(),
+            "no remote surface watches this thread, got: {:?}",
+            queued_delta_thread_ids(&relay)
+        );
+    }
+
+    #[test]
+    fn a_resync_for_a_thread_no_remote_surface_watches_queues_nothing() {
+        let mut relay = test_state();
+        relay.broker_configured = true;
+        activate(&mut relay, "thread-active", "device-a");
+        relay.set_watched_threads(
+            "device-a",
+            "device-a",
+            vec!["thread-background".to_string()],
+        );
+
+        relay.bg_upsert_user_message(
+            "thread-background",
+            "user-1".to_string(),
+            "delegated question".to_string(),
+            "turn-1".to_string(),
+            100,
+        );
+
+        assert!(
+            queued_resyncs(&relay).is_empty(),
+            "only the local page watches, got: {:?}",
+            queued_resyncs(&relay)
+        );
+    }
+
+    #[test]
+    fn a_thread_a_remote_surface_watches_still_queues_for_the_broker() {
+        let mut relay = test_state();
+        relay.broker_configured = true;
+        online_paired_device(&mut relay, "phone", "peer-phone");
+        activate(&mut relay, "thread-active", "phone");
+        relay.set_watched_threads("peer-phone", "phone", vec!["thread-active".to_string()]);
+
+        provider_enqueues_active_delta(&mut relay, "item-1", "hello");
+
+        assert_eq!(
+            queued_delta_thread_ids(&relay),
+            vec!["thread-active".to_string()]
+        );
+    }
+
+    /// What makes skipping safe: the watch-start resync names the revision the skipped
+    /// frames reached, and the next delta builds on exactly that revision.
+    #[test]
+    fn a_phone_that_starts_watching_resyncs_past_the_frames_it_was_not_sent() {
+        let mut relay = test_state();
+        relay.broker_configured = true;
+        online_paired_device(&mut relay, "phone", "peer-phone");
+        activate(&mut relay, "thread-active", "phone");
+        relay.set_watched_threads("peer-phone", "phone", vec!["thread-active".to_string()]);
+        relay.set_watched_threads("local-page", "phone", vec!["thread-background".to_string()]);
+        let mut local = relay.subscribe_transcript_events();
+        relay.pending_broker_messages.clear();
+
+        relay.bg_append_agent_delta("thread-background", "item-1", "before ", "turn-1", 100);
+        assert_eq!(
+            local
+                .try_recv()
+                .expect("the local page streams it")
+                .into_delta()
+                .delta,
+            "before "
+        );
+        assert!(
+            relay.pending_broker_messages.is_empty(),
+            "the phone is not on this thread yet"
+        );
+
+        relay.set_watched_threads(
+            "peer-phone",
+            "phone",
+            vec!["thread-active".to_string(), "thread-background".to_string()],
+        );
+        let watched_at = thread_revision(&relay, "thread-background");
+        relay.bg_append_agent_delta("thread-background", "item-1", "after", "turn-1", 101);
+
+        assert_eq!(
+            queued_resyncs(&relay),
+            vec![(
+                "thread-background".to_string(),
+                watched_at,
+                TranscriptResyncReason::WatchStarted,
+            )]
+        );
+        let deltas: Vec<(u64, String)> = relay
+            .pending_broker_messages
+            .iter()
+            .filter_map(|message| match message {
+                BrokerPendingMessage::TranscriptDelta(delta) => {
+                    Some((delta.base_revision, delta.delta.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec![(watched_at, "after".to_string())]);
     }
 
     /// A watched BACKGROUND thread reaches local subscribers too — that is what lets
@@ -7316,6 +7428,7 @@ mod watched_threads {
     fn a_command_delta_publishes_the_separator_the_relay_inserted() {
         let mut relay = test_state();
         relay.broker_configured = true;
+        online_paired_device(&mut relay, "device-a", "device-a");
         activate(&mut relay, "thread-active", "device-a");
         relay.set_watched_threads(
             "device-a",
@@ -8912,6 +9025,7 @@ mod row_identity_tests {
     fn a_published_delta_names_the_row_and_the_run_that_minted_it() {
         let mut relay = test_state();
         relay.broker_configured = true;
+        super::watched_threads::online_paired_device(&mut relay, "phone", "peer-phone");
         let thread = "thread-wire-delta";
         relay.active_thread_id = Some(thread.to_string());
         let generation = relay.transcript_generation.clone();

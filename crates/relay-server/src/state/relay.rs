@@ -6840,6 +6840,13 @@ so {} never got it — hand over again when you are ready.",
                 return;
             }
         }
+        if let Some(thread_id) = message.transcript_thread_id() {
+            // Safe to skip: a phone that opens this thread later re-reads its tail. The
+            // publisher still re-checks, for a phone that opens it while the frame waits.
+            if self.broker_targets_for_thread(thread_id).is_empty() {
+                return;
+            }
+        }
         if let BrokerPendingMessage::TranscriptResync(resync) = &message {
             if self.merge_into_queued_resync(resync) {
                 return;
@@ -7719,6 +7726,13 @@ mod tests {
                 .ensure_runtime_for_thread(thread_id)
                 .transcript_revision = *revision;
         }
+        relay.connect_paired_surface_for_test("phone", "peer-phone", "");
+        relay.set_watched_threads(
+            "peer-phone",
+            "phone",
+            threads.iter().map(|(id, _)| id.to_string()).collect(),
+        );
+        relay.pending_broker_messages.clear();
         relay
     }
 

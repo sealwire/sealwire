@@ -1419,6 +1419,37 @@ fn browser_url(broker_url: &str) -> Url {
 }
 
 #[cfg(test)]
+impl RelayState {
+    /// A paired device online over the broker, the only kind of surface broker frames
+    /// are queued for.
+    pub(crate) fn connect_paired_surface_for_test(
+        &mut self,
+        device_id: &str,
+        peer_id: &str,
+        device_verify_key: &str,
+    ) {
+        self.paired_devices.insert(
+            device_id.to_string(),
+            PairedDevice {
+                device_id: device_id.to_string(),
+                label: device_id.to_string(),
+                payload_secret: format!("secret-{device_id}"),
+                device_verify_key: device_verify_key.to_string(),
+                created_at: 0,
+                last_seen_at: None,
+                last_peer_id: Some(peer_id.to_string()),
+                broker_join_ticket_expires_at: None,
+                path_scope: Vec::new(),
+                pairing_broker: None,
+            },
+        );
+        self.mark_surface_peer_online(peer_id);
+        self.bind_surface_peer_to_device(device_id, peer_id);
+        self.register_broker_surface(peer_id);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     // The phone shows this while it waits and the operator compares the two before approving.
     // The literal is duplicated in `frontend/remote/crypto.test.mjs`.
