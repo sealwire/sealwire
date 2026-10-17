@@ -122,6 +122,8 @@ async function runCase(browser, origin, mobile, locale) {
       const visible = await row.locator(".context-menu-label").evaluate((node) => ({ width: node.clientWidth, scroll: node.scrollWidth, text: node.textContent }));
       assert.ok(visible.width > 0 && visible.scroll <= visible.width + 1, JSON.stringify(visible));
       assert.match(visible.text, /terminal|终端/i);
+      await row.locator(".provider-terminal-badge").waitFor({ state: "visible" });
+      assert.equal(await page.locator(`[data-provider-row="${provider}"] .provider-terminal-badge`).count(), 0);
     }
     const shot = path.join(os.tmpdir(), `sealwire-terminal-launch-${mobile ? "phone" : "desktop"}-${locale}.png`);
     await page.screenshot({ path: shot });
@@ -141,8 +143,16 @@ async function runCase(browser, origin, mobile, locale) {
     assert.equal(calls.starts[0].sandbox, "danger-full-access");
     assert.equal(calls.starts[0].initial_prompt, mobile ? "Initial prompt exactly once" : null);
     assert.equal(calls.opens[0].thread_id, "created-1");
-    // The currently mounted transcript must react to a context-menu mode request.
-    await page.locator('.session-presentation-controls button[aria-pressed="false"]').click();
+    const conversationLabel = locale.startsWith("zh") ? "在对话中打开" : "Open in conversation";
+    await page.locator('.session-tab[data-thread-id="created-1"] .provider-terminal-badge').waitFor();
+    await page.locator('.session-tab[data-thread-id="created-1"]').click({ button: "right" });
+    const menuLabels = await page.getByRole("menuitem").allTextContents();
+    assert.match(menuLabels[0], /Rename|重命名/);
+    assert.equal(menuLabels[1], conversationLabel);
+    await page.screenshot({ path: path.join(os.tmpdir(), `sealwire-terminal-tab-menu-${locale}.png`) });
+    await page.getByRole("menuitem", { name: conversationLabel, exact: true }).click();
+    await page.locator('.session-presentation[data-session-mode="conversation"]').waitFor();
+    assert.equal(await page.locator('.session-tab[data-thread-id="created-1"] .provider-terminal-badge').count(), 0);
     await page.locator('.session-tab[data-thread-id="created-1"]').click({ button: "right" });
     const terminalLabel = locale.startsWith("zh") ? "在终端中打开" : "Open in terminal";
     await page.getByRole("menuitem", { name: terminalLabel, exact: true }).click();
@@ -159,6 +169,27 @@ async function runCase(browser, origin, mobile, locale) {
     assert.equal(calls.starts[1].initial_prompt, "Codex first prompt once");
     assert.equal(calls.opens.at(-1).thread_id, "created-2");
     await showSidebar(page);
+    if (!mobile) {
+      const createdRow = page.locator('#threads-list [data-thread-id="created-2"]');
+      await createdRow.locator(".provider-terminal-badge").waitFor();
+      await createdRow.click({ button: "right" });
+      assert.equal(await page.locator("#terminal-thread-button .context-menu-label").textContent(), conversationLabel);
+      const rowOrder = await page.locator("#thread-context-menu-items > button").evaluateAll((nodes) => nodes.map((node) => node.id));
+      assert.equal(rowOrder.indexOf("terminal-thread-button"), rowOrder.indexOf("rename-thread-button") + 1);
+      await page.screenshot({ path: path.join(os.tmpdir(), `sealwire-terminal-sidebar-menu-${locale}.png`) });
+      const badge = await createdRow.locator(".provider-terminal-badge").evaluate((node) => {
+        const bounds = node.getBoundingClientRect();
+        const mark = node.parentElement.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return { width: bounds.width, height: bounds.height, right: bounds.right - mark.right, bottom: bounds.bottom - mark.bottom, color: style.color, background: style.backgroundColor };
+      });
+      assert.ok(badge.width >= 10 && badge.height >= 8 && badge.right > 0 && badge.bottom > 0, JSON.stringify(badge));
+      assert.equal(badge.color, "rgb(105, 237, 159)");
+      await page.locator("#terminal-thread-button").click();
+      await page.locator('.session-presentation[data-session-mode="conversation"]').waitFor();
+      await showSidebar(page);
+      assert.equal(await createdRow.locator(".provider-terminal-badge").count(), 0);
+    }
     await page.locator('#threads-list [data-thread-id="restricted"]').click({ button: "right" });
     await page.locator("#terminal-thread-button").click();
     await page.locator(".native-terminal-error").waitFor();

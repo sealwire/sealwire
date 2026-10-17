@@ -10,8 +10,11 @@
 
 import React from "react";
 import { providerIconSvg } from "./provider-icons.js";
+import { useSessionTerminalMode } from "./session-presentation.js";
+import { t } from "./i18n.js";
 
 const h = React.createElement;
+const TERMINAL_BADGE = '<span class="provider-terminal-badge" aria-hidden="true"><svg viewBox="0 0 12 10" fill="none"><path d="m2 2.5 2.5 2.5L2 7.5M6 7.5h3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
 
 // Two namespaces name the same vendor. Sessions/threads carry an *agent* id
 // ("claude_code", "codex"), but a model catalog entry carries the *vendor* that
@@ -42,14 +45,15 @@ export function providerIconKey(provider) {
  * @param {string} className the surface's own class for the mark slot
  * @returns {object|null} a React element, or null when no icon ships for this provider
  */
-export function providerMark(provider, className = "provider-mark") {
+export function providerMark(provider, className = "provider-mark", { terminal = false } = {}) {
   const key = providerIconKey(provider);
   const icon = providerIconSvg(key);
   if (!icon) return null;
   return h("span", {
-    className,
+    className: className + (terminal ? " has-terminal-badge" : ""),
     "data-provider": key,
-    dangerouslySetInnerHTML: { __html: icon },
+    title: terminal ? t("Terminal") : undefined,
+    dangerouslySetInnerHTML: { __html: icon + (terminal ? TERMINAL_BADGE : "") },
   });
 }
 
@@ -64,17 +68,21 @@ export function providerMark(provider, className = "provider-mark") {
  * @param {{className?: string, id?: string|null}} [options]
  * @returns {object} a React element, never null
  */
-export function providerMarkSlot(provider, { className = "provider-mark", id = null } = {}) {
+export function providerMarkSlot(provider, { className = "provider-mark", id = null, terminal = false } = {}) {
   const key = providerIconKey(provider);
   const icon = providerIconSvg(key);
   return h("span", {
-    className,
+    className: className + (terminal && icon ? " has-terminal-badge" : ""),
     id: id || undefined,
     "aria-hidden": "true",
     // Only set when an icon actually rendered: CSS keys the per-vendor colour
     // and the leading-padding rule off the presence of this attribute.
     ...(icon ? { "data-provider": key } : null),
-    dangerouslySetInnerHTML: { __html: icon || "" },
+    dangerouslySetInnerHTML: { __html: (icon || "") + (terminal && icon ? TERMINAL_BADGE : "") },
   });
 }
 
+export function SessionProviderMark({ provider, threadId, presentationScope = "local", className }) {
+  const terminal = useSessionTerminalMode(threadId, presentationScope);
+  return providerMark(provider, className, { terminal });
+}

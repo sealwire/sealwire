@@ -1206,19 +1206,35 @@ test("Enter while an input method is composing does not commit the rename", () =
   }
 });
 
-test("Open in terminal targets the right-clicked tab and follows advertised providers", () => {
+test("presentation action follows the clicked tab and updates its badge in the correct relay", async () => {
+  const { setSessionTerminalMode } = await import("./session-presentation.js");
   const opened = [];
   const view = mount({
     items: ITEMS.map((item, index) => ({ ...item, provider: index === 2 ? "pi" : "codex" })),
     focusedTabId: "tab-a", nativeTerminalProviders: ["codex"],
-    onOpenTerminal: (threadId) => opened.push(threadId),
+    presentationScope: "remote:mode-menu-test",
+    onRename: () => {},
+    onOpenTerminal: (threadId, enabled) => {
+      opened.push([threadId, enabled]);
+      setSessionTerminalMode(threadId, enabled, "remote:mode-menu-test");
+    },
   });
   try {
     contextMenu(tabEl(view.host, "tab-b"));
     const action = [...document.querySelectorAll('[role="menuitem"]')].find((node) => node.textContent.includes("Open in terminal"));
     assert.ok(action);
     click(action);
-    assert.deepEqual(opened, ["t2"]);
+    assert.deepEqual(opened, [["t2", true]]);
+    assert.ok(tabEl(view.host, "tab-b").querySelector(".provider-terminal-badge"));
+    act(() => setSessionTerminalMode("t1", true, "remote:another-relay"));
+    assert.equal(tabEl(view.host, "tab-a").querySelector(".provider-terminal-badge"), null);
+    contextMenu(tabEl(view.host, "tab-b"));
+    const actions = [...document.querySelectorAll('[role="menuitem"]')];
+    assert.match(actions[0].textContent, /Rename/);
+    assert.match(actions[1].textContent, /Open in conversation/);
+    click(actions[1]);
+    assert.deepEqual(opened, [["t2", true], ["t2", false]]);
+    assert.equal(tabEl(view.host, "tab-b").querySelector(".provider-terminal-badge"), null);
     contextMenu(tabEl(view.host, "tab-c"));
     assert.equal([...document.querySelectorAll('[role="menuitem"]')].some((node) => node.textContent.includes("Open in terminal")), false);
   } finally { view.cleanup(); }

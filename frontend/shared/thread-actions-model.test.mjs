@@ -260,7 +260,12 @@ test("terminal action follows the target thread's provider capability", () => {
   const session = { active_thread_id: "active", provider: "codex", native_terminal_providers: ["codex", "claude_code"] };
   const threads = [{ id: "other", provider: "claude_code" }, { id: "pi", provider: "pi" }];
   const other = selectThreadSheet({ threadId: "other", threads, session });
-  assert.equal(other.sections[0].items[0].kind, "terminal");
+  assert.deepEqual(other.sections[0].items.slice(0, 3).map((item) => item.kind), ["fork", "rename", "terminal"]);
+  assert.equal(other.sections[0].items[2].label, "Open in terminal");
+  assert.equal(other.sections[0].items[2].terminalMode, true);
+  const terminal = selectThreadSheet({ threadId: "other", threads, session, terminalMode: true });
+  assert.equal(terminal.sections[0].items[2].label, "Open in conversation");
+  assert.equal(terminal.sections[0].items[2].terminalMode, false);
   assert.equal(other.thread.id, "other");
   const pi = selectThreadSheet({ threadId: "pi", threads, session });
   assert.equal(pi.sections[0].items.some((item) => item.kind === "terminal"), false);

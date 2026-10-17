@@ -1,0 +1,24 @@
+.has-terminal-badge {
+  position: relative;
+  overflow: visible;
+}
+
+.has-terminal-badge .provider-terminal-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -3px;
+  display: flex;
+  width: 11px;
+  height: 9px;
+  border: 1px solid #31865b;
+  border-radius: 2px;
+  background: #08140e;
+  color: #69ed9f;
+  box-shadow: 0 0 0 1px var(--surface-1);
+  pointer-events: none;
+}
+
+.has-terminal-badge .provider-terminal-badge svg {
+  width: 100%;
+  height: 100%;
+}

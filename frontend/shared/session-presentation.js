@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from "react";
+
 const modes = new Map();
 const waitingForInitialReply = new Set();
 const listeners = new Set();
@@ -21,6 +23,10 @@ export function setSessionTerminalMode(threadId, enabled, scope = "local", waitF
 export function subscribeSessionPresentation(listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+export function useSessionTerminalMode(threadId, scope = "local") {
+  return useSyncExternalStore(subscribeSessionPresentation, () => sessionTerminalMode(threadId, scope), () => false);
 }
 
 export function terminalLaunchSelection(provider, presentation = "conversation") {

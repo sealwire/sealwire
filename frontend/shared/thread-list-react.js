@@ -21,7 +21,7 @@ import { providerLabel } from "./provider-labels.js";
 // The row's agent mark. A provider we ship no mark for leaves the slot EMPTY
 // rather than borrowing another vendor's logo, which would mislabel the session
 // — same rule the transcript avatar and the session tab follow.
-import { providerMark } from "./provider-mark.js";
+import { SessionProviderMark } from "./provider-mark.js";
 import { ProjectTagIcon, WorkspaceFolderIcon } from "./panel-icons.js";
 import { selectThreadDot } from "./thread-dot.js";
 import { InlineTitleEditor } from "./inline-title-editor.js";
@@ -65,6 +65,7 @@ function flagGlyph() {
 }
 
 export function ThreadGroupList({
+  presentationScope = "local",
   activeThreadId = null,
   collapsedGroupCwds = new Set(),
   collapsible = false,
@@ -181,6 +182,7 @@ export function ThreadGroupList({
             },
           },
           h(ThreadListRow, {
+            presentationScope,
             activeThreadId,
             contextMenuThreadId,
             formatThreadMeta,
@@ -213,6 +215,7 @@ export function ThreadGroupList({
 }
 
 function ThreadListRow({
+  presentationScope,
   activeThreadId,
   contextMenuThreadId,
   formatThreadMeta,
@@ -261,6 +264,7 @@ function ThreadListRow({
 
   if (row.type === "thread") {
     return h(ThreadGroupItem, {
+      presentationScope,
       active: activeThreadId === row.thread.id,
       activity: threadActivity?.get?.(row.thread.id) || null,
       attentionKind: threadAttention?.get?.(row.thread.id) || null,
@@ -660,6 +664,7 @@ export function ThreadGroupHeader({
 }
 
 export function ThreadGroupItem({
+  presentationScope = "local",
   active,
   activity = null,
   attentionKind = null,
@@ -705,7 +710,7 @@ export function ThreadGroupItem({
     h(
       "span",
       { className: "conversation-lead", "aria-hidden": "true" },
-      providerMark(thread.provider)
+      h(SessionProviderMark, { provider: thread.provider, threadId: thread.id, presentationScope })
     ),
     h(
       "span",

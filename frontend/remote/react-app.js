@@ -1,4 +1,4 @@
-import { setSessionTerminalMode, terminalLaunchSelection } from "../shared/session-presentation.js";
+import { sessionTerminalMode, setSessionTerminalMode, terminalLaunchSelection, useSessionTerminalMode } from "../shared/session-presentation.js";
 import { transcriptRowKey } from "../shared/transcript-row-key.js";
 import React, {
   useCallback,
@@ -1932,12 +1932,15 @@ function RemoteApp() {
   // Remote's only reachable session-actions entry on a phone: `contextmenu` never
   // fires for a touch long-press, so before this the row's right-click binding was
   // dead on iOS and fork was reachable only from a transcript message.
+  const presentationScope = `remote:${currentState.remoteAuth?.relayId}`;
+  const actionsSheetTerminalMode = useSessionTerminalMode(actionsSheetThreadId, presentationScope);
   const selectSheetFor = (threadId) => {
     // A row reached through search is routinely absent from the authoritative list; with
     // a bare lookup its "⋯" would report no actions and do nothing.
     const visible = findVisible(threadId);
     return selectThreadSheet({
       threadId,
+      terminalMode: threadId === actionsSheetThreadId ? actionsSheetTerminalMode : sessionTerminalMode(threadId, presentationScope),
       threads: visible ? [visible, ...(currentState.threads || [])] : currentState.threads,
       session,
       projects: remoteProjects.projects,
@@ -1963,8 +1966,8 @@ function RemoteApp() {
   const closeActionsSheet = () => setActionsSheetThreadId(null);
   const actionsSheetOpen = Boolean(actionsSheetThreadId);
 
-  function openThreadTerminal(threadId) {
-    setSessionTerminalMode(threadId, true, `remote:${currentState.remoteAuth?.relayId}`);
+  function openThreadTerminal(threadId, enabled = true) {
+    setSessionTerminalMode(threadId, enabled, presentationScope);
     return handleResumeThread(threadId, { preview: false });
   }
 
@@ -1977,7 +1980,7 @@ function RemoteApp() {
     // leaving the sheet up over the fork dialog would stack two modals.
     closeActionsSheet();
     if (item.kind === "terminal") {
-      return openThreadTerminal(threadId);
+      return openThreadTerminal(threadId, item.terminalMode);
     }
     // The projects known BEFORE the action — the create branch diffs against these to
     // recover the new project's id.
@@ -2507,6 +2510,7 @@ function RemoteApp() {
         // than an empty one.
         currentState.remotePointerClass === "desktop"
           ? h(SessionTabStrip, {
+              presentationScope,
               nativeTerminalProviders: (currentState.realSession || session)?.native_terminal_providers || [],
               onOpenTerminal: openThreadTerminal,
               items: sessionTabItems,
@@ -3215,6 +3219,7 @@ function RemoteSidebar({
         "div",
         { className: "conversation-list", id: "remote-threads-list" },
         h(ThreadGroupList, {
+          presentationScope: `remote:${currentState.remoteAuth?.relayId}`,
           activeThreadId: threadsModel.activeThreadId,
           collapsedGroupCwds: threadListUi?.collapsedGroupCwds || new Set(),
           // Both group kinds fold away — a project header carries its collapse

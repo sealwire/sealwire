@@ -542,11 +542,11 @@ async function main() {
     // The session lives in Alpha, and the sheet must say so rather than just listing it.
     assert.deepEqual(sheet.current, ["Alpha project"], `expected Alpha marked current, got ${itemText}`);
 
-    // The Session section's fixed order: Fork, Rename, then the flag toggle (unflagged
+    // The Session section's fixed order: Fork, Rename, view, then flag (unflagged
     // here, so it reads "Flag for follow-up") — before the Projects section starts.
     assert.deepEqual(
       sheet.items.slice(0, 4),
-      ["Open in terminal", "Fork session", "Rename session…", "Flag for follow-up"],
+      ["Fork session", "Rename session…", "Open in terminal", "Flag for follow-up"],
       `expected Session section order, got: ${itemText}`
     );
 
@@ -623,7 +623,7 @@ async function main() {
     );
     assert.deepEqual(
       reopenedItems.slice(0, 4),
-      ["Open in terminal", "Fork session", "Rename session…", "Unflag"],
+      ["Fork session", "Rename session…", "Open in terminal", "Unflag"],
       `expected the toggle to read "Unflag" after flagging, got: ${reopenedItems.join(" | ")}`
     );
     await page.screenshot({ path: path.join(artifacts.dir, "03-sheet-shows-unflag.png") });
@@ -638,6 +638,14 @@ async function main() {
     assert.equal((await page.evaluate(() => window.__terminalOpens))[0].thread_id, THREAD_ID);
     await page.locator('.session-presentation[data-session-mode="terminal"] .xterm').waitFor();
     await page.screenshot({ path: path.join(artifacts.dir, "04-phone-terminal.png") });
+    if (await page.locator("#remote-nav-toggle-button").getAttribute("aria-expanded") === "false") await page.locator("#remote-nav-toggle-button").click();
+    await page.locator(`${rowSelector} .provider-terminal-badge`).waitFor({ state: "visible" });
+    await moreButton.tap();
+    await page.locator("#remote-thread-actions-sheet .thread-actions-item", { hasText: "Open in conversation" }).waitFor();
+    await page.screenshot({ path: path.join(artifacts.dir, "05-phone-return-to-conversation.png") });
+    await page.locator("#remote-thread-actions-sheet .thread-actions-item", { hasText: "Open in conversation" }).tap();
+    await page.locator('.session-presentation[data-session-mode="conversation"]').waitFor();
+    assert.equal(await page.locator(`${rowSelector} .provider-terminal-badge`).count(), 0);
 
     console.log(
       JSON.stringify(

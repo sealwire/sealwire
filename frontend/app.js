@@ -1,4 +1,4 @@
-import { setSessionTerminalMode, terminalLaunchSelection } from "./shared/session-presentation.js";
+import { sessionTerminalMode, setSessionTerminalMode, terminalLaunchSelection } from "./shared/session-presentation.js";
 import { createLocalTerminalTransport } from "./shared/native-terminal.js";
 import {
   appShell,
@@ -2653,8 +2653,8 @@ flagThreadButton?.addEventListener("click", () => {
   void toggleThreadFlagFromContextMenu();
 });
 
-function openThreadTerminal(threadId) {
-  setSessionTerminalMode(threadId, true);
+function openThreadTerminal(threadId, enabled = true) {
+  setSessionTerminalMode(threadId, enabled);
   void viewThreadById(threadId, {
     context: selectOwningContext({ threadId, threadProjectId: state.threadProjectId || {} }),
     preview: false,
@@ -2665,7 +2665,7 @@ terminalThreadButton?.addEventListener("click", () => {
   const threadId = readThreadListContextMenu(state.threadListStore).threadId;
   closeThreadContextMenu();
   if (!threadId) return;
-  openThreadTerminal(threadId);
+  openThreadTerminal(threadId, !sessionTerminalMode(threadId));
 });
 
 forkThreadButton?.addEventListener("click", () => {
@@ -4470,6 +4470,7 @@ function openThreadContextMenu(threadId, clientX, clientY, orderedThreadIds = []
   if (terminalThreadButton) {
     terminalThreadButton.hidden = !(state.session?.native_terminal_providers || []).includes(contextProvider);
     terminalThreadButton.disabled = batchSize > 1;
+    setMenuRowLabel(terminalThreadButton, sessionTerminalMode(threadId) ? t("Open in conversation") : t("Open in terminal"));
   }
   archiveThreadButton.hidden =
     Boolean(contextProvider)

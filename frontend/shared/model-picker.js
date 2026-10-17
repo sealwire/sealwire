@@ -143,6 +143,7 @@ function ModelList({ group, otherOpen, onChoose, onToggleOther }) {
 }
 
 export function ModelPicker({
+  terminal = false,
   ariaLabel = t("Model"),
   className = "",
   disabled = false,
@@ -481,7 +482,7 @@ export function ModelPicker({
         role: "menuitem",
         type: "button",
       },
-      providerMarkSlot(group.provider, { className: "model-picker-mark" }),
+      providerMarkSlot(group.provider, { className: "model-picker-mark", terminal: group.terminal }),
       h("span", { className: "context-menu-label" }, group.label),
       group.hint ? h("span", { className: "context-menu-hint" }, group.hint) : null,
       h(MenuGlyph, { className: "context-menu-chevron", svg: CHEVRON_RIGHT_SVG })
@@ -574,7 +575,7 @@ export function ModelPicker({
             type: "button",
           },
           h(MenuGlyph, { className: "context-menu-chevron model-picker-back-caret", svg: CHEVRON_RIGHT_SVG }),
-          providerMarkSlot(activeGroup.provider, { className: "model-picker-mark" }),
+          providerMarkSlot(activeGroup.provider, { className: "model-picker-mark", terminal: activeGroup.terminal }),
           h("span", { className: "context-menu-label" }, activeGroup.label)
         ),
         h("div", { className: "context-menu-separator", key: "back-sep", role: "separator" })
@@ -633,7 +634,7 @@ export function ModelPicker({
         type: "button",
       },
       h("span", { className: "sr-only" }, t("{label}: ", { label: ariaLabel })),
-      providerMarkSlot(provider, { className: "model-picker-trigger-mark" }),
+      providerMarkSlot(provider, { className: "model-picker-trigger-mark", terminal }),
       h("span", { className: "setting-pill-value" }, value),
       tag ? h("span", { className: "setting-pill-tag" }, tag) : null,
       h(MenuGlyph, { className: "model-picker-caret", svg: CHEVRON_DOWN_SVG })

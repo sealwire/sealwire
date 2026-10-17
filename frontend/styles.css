@@ -3,6 +3,7 @@
 @import "./delegate-cards.css";
 @import "./goal-cards.css";
 @import "./fork-cards.css";
+@import "./shared/provider-mark.css";
 
 :root {
   color-scheme: dark;

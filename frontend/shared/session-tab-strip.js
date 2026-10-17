@@ -6,7 +6,8 @@ import { ContextMenu, MenuItem, MenuSeparator } from "./context-menu-react.js";
 import { selectThreadDot } from "./thread-dot.js";
 // The idle slot's content. A provider we ship no mark for leaves it empty rather
 // than borrowing another vendor's logo, which would mislabel the session.
-import { providerMark } from "./provider-mark.js";
+import { SessionProviderMark } from "./provider-mark.js";
+import { useSessionTerminalMode } from "./session-presentation.js";
 import {
   REORDER_HOLD_MS,
   createStripGesture,
@@ -107,6 +108,7 @@ export function PinGlyph({ filled }) {
 }
 
 function SessionTab({
+  presentationScope,
   item,
   focused,
   isDragging,
@@ -173,7 +175,7 @@ function SessionTab({
             { className: "session-tab-lead", "aria-hidden": "true" },
             dot
               ? h("span", { className: dot.className })
-              : providerMark(item.provider, "session-tab-provider")
+              : h(SessionProviderMark, { provider: item.provider, threadId: item.threadId, presentationScope, className: "session-tab-provider" })
           ),
           h(InlineTitleEditor, {
             className: "session-tab-title-input",
@@ -219,7 +221,7 @@ function SessionTab({
             { className: "session-tab-lead", "aria-hidden": "true" },
             dot
               ? h("span", { className: dot.className })
-              : providerMark(item.provider, "session-tab-provider")
+              : h(SessionProviderMark, { provider: item.provider, threadId: item.threadId, presentationScope, className: "session-tab-provider" })
           ),
           h("span", { className: "session-tab-title" }, item.title),
           dot ? h("span", { className: "sr-only" }, dot.label) : null
@@ -273,6 +275,7 @@ function tabIdAt(node) {
 }
 
 export function SessionTabStrip({
+  presentationScope = "local",
   items = [],
   focusedTabId = null,
   onFocus = null,
@@ -749,6 +752,7 @@ export function SessionTabStrip({
     },
     ...items.map((item) =>
       h(SessionTab, {
+        presentationScope,
         key: item.tabId,
         item,
         focused: item.tabId === focusedTabId,
@@ -781,6 +785,7 @@ export function SessionTabStrip({
         )
       : null,
     menu ? h(TabMenu, {
+      presentationScope,
       items,
       menu,
       onBeginRename: onRename ? beginRename : null,
@@ -796,8 +801,9 @@ export function SessionTabStrip({
 
 // The tab's right-click menu: this tab's own actions first, then the closing ones —
 // the grouping a browser uses. Closing a tab never deletes the session.
-function TabMenu({ items, menu, onBeginRename, onOpenTerminal, nativeTerminalProviders, onClose, onCloseTabs, onDismiss, onTogglePin }) {
+function TabMenu({ presentationScope, items, menu, onBeginRename, onOpenTerminal, nativeTerminalProviders, onClose, onCloseTabs, onDismiss, onTogglePin }) {
   const item = items.find((entry) => entry.tabId === menu.tabId);
+  const terminalMode = useSessionTerminalMode(item?.threadId, presentationScope);
   if (!item) {
     return null;
   }
@@ -807,9 +813,6 @@ function TabMenu({ items, menu, onBeginRename, onOpenTerminal, nativeTerminalPro
     action();
   };
   const own = [
-    onOpenTerminal && item.threadId && nativeTerminalProviders.includes(item.provider)
-      ? h(MenuItem, { key: "terminal", label: t("Open in terminal"), onSelect: run(() => onOpenTerminal(item.threadId)) })
-      : null,
     onBeginRename && item.threadId
       ? h(MenuItem, {
           hint: "F2",
@@ -817,6 +820,9 @@ function TabMenu({ items, menu, onBeginRename, onOpenTerminal, nativeTerminalPro
           label: t("Rename…"),
           onSelect: run(() => onBeginRename(item.tabId)),
         })
+      : null,
+    onOpenTerminal && item.threadId && nativeTerminalProviders.includes(item.provider)
+      ? h(MenuItem, { key: "terminal", label: terminalMode ? t("Open in conversation") : t("Open in terminal"), onSelect: run(() => onOpenTerminal(item.threadId, !terminalMode)) })
       : null,
     onTogglePin
       ? h(MenuItem, {
