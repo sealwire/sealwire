@@ -3193,7 +3193,7 @@ fn parse_inbound_payload_ignores_non_action_payloads() {
 
 #[tokio::test]
 async fn targeted_publish_splits_repeated_peers_and_batch_limits_without_losing_order() {
-    let (writer, mut frames, _trains) = writer::test_writer();
+    let (writer, mut frames, _trains, _terminal_rx) = writer::test_writer();
     let messages = (0..MAX_TARGETED_MESSAGES_PER_PUBLISH + 3)
         .map(|index| {
             let target_peer_id = if index < 2 {
@@ -8180,7 +8180,7 @@ async fn bring_paired_phone_online(state: &AppState) {
 }
 
 async fn published_snapshot_payloads(state: &AppState) -> Vec<serde_json::Value> {
-    let (writer, mut now_rx, _train_rx) = super::writer::test_writer();
+    let (writer, mut now_rx, _train_rx, _terminal_rx) = super::writer::test_writer();
     publish_snapshot(&writer, state)
         .await
         .expect("snapshot publish should succeed");
@@ -8412,7 +8412,7 @@ async fn a_snapshot_target_read_before_a_re_pair_gets_nothing_scoped_by_the_re_p
     let session_cwd = canonical(&session_dir);
     let (state, relay) =
         folder_limited_phone_state_and_relay(&canonical(&phone_dir), &session_cwd).await;
-    let (writer, mut now_rx, _train_rx) = super::writer::test_writer();
+    let (writer, mut now_rx, _train_rx, _terminal_rx) = super::writer::test_writer();
 
     // Holding the lock parks the publish on its target read, so the re-pair queued behind
     // it lands after the targets are read and before the snapshot is scoped.
@@ -8661,7 +8661,7 @@ async fn bound_action_retries_wait_and_replay_without_reexecuting_the_provider()
     };
     let list = serde_json::json!({"type": "list_threads", "query": {"limit": 5}});
     let original = encrypted_action_frame("surface-a", "original", list.clone());
-    let (writer, mut replies, _trains) = super::writer::test_writer_with_identity();
+    let (writer, mut replies, _trains, _terminal_rx) = super::writer::test_writer_with_identity();
     let first = {
         let state = state.clone();
         let writer = writer.clone();
@@ -8751,7 +8751,7 @@ async fn an_unsigned_send_message_is_dropped_before_reservation() {
     let dir = tempfile::TempDir::new().expect("tmpdir");
     let (state, relay) =
         encrypted_broker_state_parts(&dir.path().to_string_lossy(), HashMap::new()).await;
-    let (writer, mut replies, _trains) = super::writer::test_writer_with_identity();
+    let (writer, mut replies, _trains, _terminal_rx) = super::writer::test_writer_with_identity();
     let origin = {
         let mut relay = relay.write().await;
         relay.mark_surface_peer_online("surface-a");
@@ -8803,7 +8803,7 @@ async fn invalid_action_binding_cannot_change_device_or_claim_state() {
     let dir = tempfile::TempDir::new().expect("tmpdir");
     let (state, relay) =
         encrypted_broker_state_parts(&dir.path().to_string_lossy(), HashMap::new()).await;
-    let (writer, mut replies, _trains) = super::writer::test_writer_with_identity();
+    let (writer, mut replies, _trains, _terminal_rx) = super::writer::test_writer_with_identity();
     let origin = {
         let mut relay = relay.write().await;
         relay.mark_surface_peer_online("surface-a");
@@ -8973,7 +8973,7 @@ async fn a_second_phone_on_a_taken_pairing_qr_is_told_to_use_a_new_one() {
         ticket
     };
     let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
-    let (writer, mut now_rx, _train_rx) = super::writer::test_writer();
+    let (writer, mut now_rx, _train_rx, _terminal_rx) = super::writer::test_writer();
 
     for (peer, seed, device) in [
         ("surface-first", 1_u8, "phone-first"),
@@ -9087,7 +9087,7 @@ async fn a_second_phone_on_a_decided_pairing_qr_is_told_to_use_a_new_one() {
             ticket
         };
         let state = AppState::from_parts(relay.clone(), HashMap::new(), change_tx);
-        let (writer, mut now_rx, _train_rx) = super::writer::test_writer();
+        let (writer, mut now_rx, _train_rx, _terminal_rx) = super::writer::test_writer();
         let request = |seed, device| {
             signed_pairing_request(&ticket.pairing_id, &ticket.pairing_secret, seed, device)
         };

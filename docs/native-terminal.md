@@ -103,7 +103,28 @@ frames remotely. PTY notifications wake the stream; idle terminals do not issue
 browser read requests. Both transports restore a fresh screen when attached,
 then deliver ordered byte chunks. Rendering batches writes and waits for xterm's
 parser, with bounded queues; an interrupted or overloaded stream asks for a
-reconnect. Typing is sent immediately, with retries retaining the same sequence.
+reconnect. Typing sends immediately when the input channel is idle. While awaiting
+an acknowledgement, later keystrokes merge into the next ordered packet; retries
+retain the same sequence. Standalone control keys stay separate for workflow stop
+checks.
+
+Remote terminal output has a separate bounded writer queue, below ordinary
+messages and heartbeat pings. Across all terminal views on one relay connection,
+it sends at most 40 frames/second; a slow socket applies backpressure to terminal
+producers rather than filling the ordinary queue. The PTY buffer can replace old
+output with a current-screen reset when a view falls behind.
+
+The broker's default surface publish allowance is 3600 messages/minute per device,
+shared across tabs. Its 8 MiB/minute byte allowance, 2 MiB burst allowance and
+64 KiB frame cap are unchanged. The relay allowance stays at 36000 messages/minute
+and 512 MiB/minute. Updating the relay alone does not update a deployed broker:
+deploy the broker and remote frontend updates too, and check any explicit
+`RELAY_BROKER_PUBLISH_RATE_LIMIT_PER_MINUTE` override. Lower operator-configured
+limits still apply and can refuse traffic.
+
+When setting the surface allowance explicitly, also set
+`RELAY_BROKER_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE=36000`; an unset relay override
+inherits the explicit generic setting.
 
 Devices attach to one PTY per session. Resizing or focusing a view updates that
 shared terminal's dimensions. Reconnection restores its current screen; older

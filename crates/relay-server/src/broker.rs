@@ -256,6 +256,7 @@ pub(crate) const PUBLIC_RELAY_REGISTRATION_SCHEMA_VERSION: u32 = 1;
 const PUBLIC_RELAY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 const SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS: u64 = 500;
 const TRANSCRIPT_DELTA_PUBLISH_WINDOW_MILLIS: u64 = 100;
+const MAX_DELTAS_PER_DRAIN: usize = 50;
 const BROKER_MESSAGE_HANDLER_SLOW_WARN_MILLIS: u128 = 1_000;
 /// How far the router may fall behind the socket before the session is ended. It only
 /// routes, so filling this means something is badly wrong rather than merely slow.
@@ -2831,7 +2832,6 @@ async fn publish_transcript_delta_batch(
     state: &AppState,
     deltas: Vec<PendingTranscriptPublish>,
 ) -> Result<Vec<PendingTranscriptPublish>, String> {
-    const MAX_DELTAS_PER_DRAIN: usize = 50;
     let mut deltas = coalesce_transcript_deltas(deltas);
     let remaining = if deltas.len() > MAX_DELTAS_PER_DRAIN {
         deltas.split_off(MAX_DELTAS_PER_DRAIN)
@@ -3152,7 +3152,14 @@ async fn publish_payload(
             "broker payload exceeds websocket text frame limit before send"
         );
     }
-    writer.send_now(Message::Text(frame_text)).await
+    if matches!(
+        &payload,
+        OutboundBrokerPayload::EncryptedTerminalFrame { .. }
+    ) {
+        writer.send_terminal(Message::Text(frame_text)).await
+    } else {
+        writer.send_now(Message::Text(frame_text)).await
+    }
 }
 
 /// Serialize a payload into the frame the writer will send, without sending it.

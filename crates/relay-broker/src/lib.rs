@@ -97,15 +97,15 @@ const DEFAULT_JOIN_IP_RATE_LIMIT_PER_MINUTE: usize = 120;
 /// Pairing tickets one relay may mint a minute; someone pairing devices by hand needs
 /// well under 20.
 const DEFAULT_PAIRING_TICKET_RATE_LIMIT_PER_MINUTE: usize = 30;
-/// Publish allowance for a surface peer: a browser tab sending user-driven actions.
-const DEFAULT_PUBLISH_RATE_LIMIT_PER_MINUTE: usize = 240;
+// A terminal sends individual keys and resize events; byte budgets still bound abuse.
+const DEFAULT_PUBLISH_RATE_LIMIT_PER_MINUTE: usize = 3_600;
 /// Publish allowance for a relay peer, which is first-party and not traffic-shaped by
 /// this limiter.
 ///
 /// Derived from what a relay can legitimately emit rather than guessed. Transcript
 /// deltas drain on a 100ms timer and publish one frame each, up to
 /// `MAX_DELTAS_PER_DRAIN = 50` per drain — 500 a second — and every watched thread
-/// streams at once, so a busy relay is nowhere near a surface's 4-a-second budget.
+/// streams at once, in addition to terminal output and chunked replies.
 ///
 /// Going over is silent: the broker drops the frame and keeps the socket open. A
 /// dropped transcript delta the client can repair (it notices the gap and refetches);
@@ -121,14 +121,11 @@ const DEFAULT_PUBLISH_RATE_LIMIT_PER_MINUTE: usize = 240;
 /// What it does NOT bound is bytes — see [`DEFAULT_RELAY_PUBLISH_BYTES_PER_MINUTE`] for
 /// the budget that does. The two are complementary: this one stops a peer spinning on
 /// tiny frames, that one stops a peer moving gigabytes in a handful of large ones.
-const DEFAULT_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE: usize = 36_000;
+pub const DEFAULT_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE: usize = 36_000;
 
 /// Byte allowance for a surface peer, per minute.
 ///
-/// A surface's frame budget already caps it at 240 frames of at most 64KiB, i.e. ~15MiB
-/// a minute. This sits below that so the byte dimension is a real constraint rather than
-/// arithmetic that can never bind, and far above what a surface actually sends: user
-/// actions and pairing envelopes are single-digit KiB.
+/// Bounds large frames independently of the allowance for frequent terminal input.
 const DEFAULT_PUBLISH_BYTES_PER_MINUTE: usize = 8 * 1024 * 1024;
 /// Burst allowance for a surface peer — see [`DEFAULT_RELAY_PUBLISH_BURST_BYTES`].
 const DEFAULT_PUBLISH_BURST_BYTES: usize = 2 * 1024 * 1024;

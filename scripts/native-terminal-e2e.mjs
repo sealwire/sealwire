@@ -110,6 +110,8 @@ const ticketSecret = "native-terminal-isolated-broker-fixture";
 const stripInherited = (key) => /^(CODEX|CLAUDE|ANTHROPIC|OPENAI|SEALWIRE|RELAY|AGENT_PROVIDERS|PORT$)/.test(key);
 const broker = brokerPort ? spawnManagedProcess("native-terminal-broker", path.resolve("target/debug/relay-broker"), [], {
   BIND_HOST: "127.0.0.1", PORT: String(brokerPort), RELAY_BROKER_AUTH_MODE: "self_hosted", RELAY_BROKER_TICKET_SECRET: ticketSecret,
+  ...(process.env.NATIVE_TERMINAL_SURFACE_PUBLISH_LIMIT ? { RELAY_BROKER_PUBLISH_RATE_LIMIT_PER_MINUTE: process.env.NATIVE_TERMINAL_SURFACE_PUBLISH_LIMIT } : {}),
+  RELAY_BROKER_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE: "36000",
 }, { stripInherited }) : null;
 const relay = spawnManagedProcess("native-terminal-relay", path.resolve("target/debug/relay-server"), [], {
   ...(brokerPort ? { RELAY_BROKER_URL: `ws://127.0.0.1:${brokerPort}`, RELAY_BROKER_PUBLIC_URL: `ws://127.0.0.1:${brokerPort}`, RELAY_BROKER_AUTH_MODE: "self_hosted", RELAY_BROKER_CHANNEL_ID: "native-terminal-fixture", RELAY_BROKER_PEER_ID: "native-terminal-fixture", RELAY_BROKER_TICKET_SECRET: ticketSecret } : {}),
@@ -435,6 +437,18 @@ try {
       await page.setViewportSize({ width: 1280, height: 900 });
       const pairing = await startPairingFromLocalPage(page, { lanIp: "127.0.0.1", brokerPort, timeoutMs: 30000 });
       const phone = await context.newPage();
+      const phoneWire = { inputs: 0, terminalFrames: 0, rateLimited: 0 };
+      phone.on("websocket", (socket) => {
+        socket.on("framesent", ({ payload }) => {
+          const frame = JSON.parse(String(payload));
+          if (frame.payload?.action === "write_terminal") phoneWire.inputs++;
+        });
+        socket.on("framereceived", ({ payload }) => {
+          const frame = JSON.parse(String(payload));
+          if (frame.payload?.kind === "encrypted_terminal_frame") phoneWire.terminalFrames++;
+          if (frame.type === "error" && frame.code === "rate_limited") phoneWire.rateLimited++;
+        });
+      });
       await phone.setViewportSize({ width: 390, height: 844 });
       await phone.goto(pairing);
       await approvePairing(page, 30000);
@@ -448,6 +462,24 @@ try {
       await phone.getByRole("button", { name: "Terminal", exact: true }).click();
       await phone.getByText("Live terminal", { exact: true }).waitFor();
       await phone.locator(".native-terminal .xterm-helper-textarea").focus();
+      if (process.env.NATIVE_TERMINAL_PRESSURE === "1") {
+        const started = Date.now(), inputsBefore = phoneWire.inputs;
+        for (let batch = 0; batch < 13; batch++) {
+          await phone.keyboard.type("x".repeat(100), { delay: 50 });
+          assert.equal(phoneWire.rateLimited, 0, "continuous typing must not exhaust the device's broker quota");
+          assert.equal(await phone.locator(".native-terminal-error").count(), 0, await phone.locator(".native-terminal-error").allTextContents());
+          console.log(JSON.stringify({ terminalPressureKeys: (batch + 1) * 100 }));
+        }
+        const pressure = { keys: 1300, requests: phoneWire.inputs - inputsBefore, elapsedMs: Date.now() - started, ...phoneWire };
+        assert.ok(pressure.elapsedMs >= 65000);
+        assert.ok(pressure.requests >= 1000);
+        assert.ok(pressure.requests * 60000 / pressure.elapsedMs > 240);
+        await fs.writeFile(path.join(root, "pressure.json"), JSON.stringify(pressure, null, 2));
+        console.log(JSON.stringify({ pressure }));
+        await phone.getByRole("button", { name: "Ctrl+C", exact: true }).click();
+        await sleep(500);
+        await phone.locator(".native-terminal .xterm-helper-textarea").focus();
+      }
       await phone.keyboard.insertText("Reply to PHONE_NATIVE_INPUT with a short marker.");
       await sleep(600);
       await phone.getByRole("button", { name: "Enter", exact: true }).click();
@@ -459,18 +491,19 @@ try {
       assert.equal((await api("/api/session")).active_controller_device_id, remoteDevice, "native turns must use the signed phone identity");
       assert.equal(requests.length, 3, "phone input must start exactly one turn");
       await sleep(500);
-      const pushFrames = await phone.evaluate(() => window.__agentRelayProtocolFrames.filter((frame) => frame.kind === "encrypted_terminal_frame" && frame.direction === "recv").length);
+      const pushFrames = phoneWire.terminalFrames;
       assert.ok(pushFrames > 1, "encrypted terminal output must be pushed after opening");
       await phone.getByRole("button", { name: "Conversation", exact: true }).click();
       await phone.getByRole("button", { name: "Terminal", exact: true }).click();
       await phone.getByText("Live terminal", { exact: true }).waitFor();
-      await phone.waitForFunction((before) => window.__agentRelayProtocolFrames.filter((frame) => frame.kind === "encrypted_terminal_frame" && frame.direction === "recv").length > before, pushFrames);
+      await until(() => phoneWire.terminalFrames > pushFrames, "fresh encrypted output after reconnecting");
       assert.equal(await phone.locator(".native-terminal-error").count(), 0);
       assert.equal(await phone.evaluate(() => window.__agentRelayProtocolFrames.some((frame) => frame.action === "read_terminal")), false, "remote output must not poll");
       assert.ok(terminalRequests.some((url) => url.includes("/terminal/stream?")), "local output must have one persistent stream");
       assert.equal(terminalRequests.some((url) => url.includes("/terminal/read?")), false, "local output must not poll");
       await phone.screenshot({ path: path.join(root, "phone-remote.png"), fullPage: true });
       assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      assert.equal(phoneWire.rateLimited, 0);
       assert.ok(!broker._logBuffer.join("\n").includes("PHONE_NATIVE_INPUT"), "broker logs must not contain terminal input");
       if (claude && process.env.NATIVE_TERMINAL_MODEL_UI === "1") {
         const prior = await api("/api/session/terminal/open", { thread_id: thread });
@@ -488,6 +521,8 @@ try {
         assert.notEqual(next.terminal_id, prior.terminal_id);
         assert.equal((await api("/api/session")).active_controller_device_id, remoteDevice);
         assert.equal(await phone.locator(".native-terminal-error").count(), 0);
+        const fit = await phone.locator(".native-terminal-screen").evaluate((node) => ({ available: node.clientWidth, terminal: node.querySelector(".xterm-screen").getBoundingClientRect().width }));
+        assert.ok(fit.available > 0 && fit.terminal > 0 && fit.terminal <= fit.available + 1, `reconfigured terminal must fit the phone: ${JSON.stringify(fit)}`);
         await phone.screenshot({ path: path.join(root, "phone-model-change.png"), fullPage: true });
         assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       }
@@ -527,6 +562,7 @@ try {
   await fs.writeFile(path.join(root, "requests-summary.json"), JSON.stringify(requests.map((r) => ({ model: r.model, last: (r.messages || []).filter((m) => m.role === "user").at(-1)?.content?.filter?.((b) => b.type === "text").at(-1)?.text })), null, 2));
   await fs.writeFile(path.join(root, "terminal.ansi"), output);
   await fs.writeFile(path.join(root, "relay.log"), relay._logBuffer.join("\n"));
+  if (broker) await fs.writeFile(path.join(root, "broker.log"), broker._logBuffer.join("\n"));
   await browser?.close();
   await stopManagedProcess(relay);
   await stopManagedProcess(broker);

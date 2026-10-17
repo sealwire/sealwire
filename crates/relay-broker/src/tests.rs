@@ -6471,6 +6471,53 @@ async fn websocket_publish_rate_limit_rejects_messages_without_closing_socket() 
     }
 }
 
+#[tokio::test]
+async fn default_surface_publish_budget_carries_a_minute_of_terminal_typing() {
+    let address = spawn_app_with(
+        BrokerJoinVerifier::SelfHosted(test_join_ticket_key()),
+        BrokerHardeningConfig::default(),
+        SecurityHeadersConfig::default(),
+    )
+    .await;
+    let relay_url = websocket_url(
+        address,
+        "typing-room",
+        protocol::PeerRole::Relay,
+        Some("relay-1"),
+        JoinTicketClaims::relay_join("typing-room", "relay-1", &seeded_relay_verify_key()),
+    );
+    let (mut relay, _) = connect_async(&relay_url).await.unwrap();
+    next_server_message(&mut relay).await;
+    let phone_url = websocket_url(
+        address,
+        "typing-room",
+        protocol::PeerRole::Surface,
+        None,
+        JoinTicketClaims::device_surface_join("typing-room", "phone", None),
+    );
+    let (mut phone, _) = connect_async(&phone_url).await.unwrap();
+    next_server_message(&mut phone).await;
+    next_server_message(&mut relay).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for index in 0..1_300 {
+            let request = ClientMessage::Publish { protocol_version: protocol::BROKER_PROTOCOL_VERSION,
+                payload: json!({ "kind": "encrypted_remote_action", "target_peer_id": "relay-1", "action": "write_terminal",
+                    "envelope": { "nonce": "n".repeat(32), "ciphertext": "c".repeat(1024) }, "action_id": index }) };
+            phone.send(Message::Text(serde_json::to_string(&request).unwrap())).await.unwrap();
+            match next_server_message(&mut relay).await {
+                ServerMessage::Message { payload, .. } => assert_eq!(payload["action_id"], index),
+                other => panic!("terminal input was not forwarded: {other:?}"),
+            }
+        }
+    }).await.expect("all terminal inputs must reach the relay without a quota disconnect");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), next_server_message(&mut phone))
+            .await
+            .is_err(),
+        "no rate-limit error may be pending"
+    );
+}
+
 /// The frame cap used to be checked only after the WebSocket layer had buffered the whole
 /// message, up to its 64 MiB default, so every seated socket could pin that much memory.
 #[tokio::test]

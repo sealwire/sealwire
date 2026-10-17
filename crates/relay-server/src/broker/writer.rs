@@ -46,6 +46,10 @@ use crate::state::AppState;
 /// deep queue costs little and keeps the read loop free.
 const NOW_QUEUE_CAPACITY: usize = 512;
 
+// Terminal bursts must not fill the ordinary queue ahead of Stop and approvals.
+const TERMINAL_QUEUE_CAPACITY: usize = 1;
+pub(super) const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(25);
+
 /// Chunk trains waiting to start.
 ///
 /// One, on purpose. A train is a whole action reply — a workspace diff can be megabytes
@@ -132,6 +136,7 @@ impl SurfacePresence for AppState {
 pub(super) struct BrokerWriter {
     ping_tx: mpsc::Sender<Message>,
     now_tx: mpsc::Sender<Message>,
+    terminal_tx: mpsc::Sender<Message>,
     train_tx: mpsc::Sender<TrainFrame>,
     /// Signs relay payloads when they leave the socket. Absent only for tests that
     /// inspect the queue before a writer task exists.
@@ -156,6 +161,13 @@ impl BrokerWriter {
     /// Enqueue one ordinary frame.
     pub(super) async fn send_now(&self, message: Message) -> Result<(), String> {
         self.now_tx
+            .send(message)
+            .await
+            .map_err(|_| "broker writer task has stopped".to_string())
+    }
+
+    pub(super) async fn send_terminal(&self, message: Message) -> Result<(), String> {
+        self.terminal_tx
             .send(message)
             .await
             .map_err(|_| "broker writer task has stopped".to_string())
@@ -251,12 +263,21 @@ pub(super) fn spawn_broker_writer(
 ) -> (BrokerWriter, oneshot::Receiver<String>, BrokerWriterGuard) {
     let (ping_tx, ping_rx) = mpsc::channel(PING_QUEUE_CAPACITY);
     let (now_tx, now_rx) = mpsc::channel(NOW_QUEUE_CAPACITY);
+    let (terminal_tx, terminal_rx) = mpsc::channel(TERMINAL_QUEUE_CAPACITY);
     let (train_tx, train_rx) = mpsc::channel(TRAIN_QUEUE_CAPACITY);
     let (error_tx, error_rx) = oneshot::channel();
     let signer = std::sync::Arc::clone(&content);
     let task = tokio::spawn(async move {
-        if let Err(error) =
-            drive_writer_with_signer(ping_rx, now_rx, train_rx, sink, presence, Some(signer)).await
+        if let Err(error) = drive_writer_with_signer(
+            ping_rx,
+            now_rx,
+            train_rx,
+            terminal_rx,
+            sink,
+            presence,
+            Some(signer),
+        )
+        .await
         {
             // Nobody left to tell is fine: it means the session already ended.
             let _ = error_tx.send(error);
@@ -266,6 +287,7 @@ pub(super) fn spawn_broker_writer(
         BrokerWriter {
             ping_tx,
             now_tx,
+            terminal_tx,
             train_tx,
             content: Some(content),
         },
@@ -302,20 +324,24 @@ pub(super) fn test_writer() -> (
     BrokerWriter,
     mpsc::Receiver<Message>,
     mpsc::Receiver<TrainFrame>,
+    mpsc::Receiver<Message>,
 ) {
     let (ping_tx, _ping_rx) = mpsc::channel(PING_QUEUE_CAPACITY);
     let (now_tx, now_rx) = mpsc::channel(NOW_QUEUE_CAPACITY);
+    let (terminal_tx, terminal_rx) = mpsc::channel(TERMINAL_QUEUE_CAPACITY);
     let (train_tx, train_rx) = mpsc::channel(TRAIN_QUEUE_CAPACITY);
     std::mem::forget(_ping_rx);
     (
         BrokerWriter {
             ping_tx,
             now_tx,
+            terminal_tx,
             train_tx,
             content: None,
         },
         now_rx,
         train_rx,
+        terminal_rx,
     )
 }
 
@@ -329,14 +355,15 @@ pub(super) fn test_writer_with_identity() -> (
     BrokerWriter,
     mpsc::Receiver<Message>,
     mpsc::Receiver<TrainFrame>,
+    mpsc::Receiver<Message>,
 ) {
-    let (mut writer, now_rx, train_rx) = test_writer();
+    let (mut writer, now_rx, train_rx, terminal_rx) = test_writer();
     writer.content = Some(std::sync::Arc::new(super::RelayContentCrypto::new(
         ed25519_dalek::SigningKey::from_bytes(&TEST_RELAY_CONTENT_SEED),
         "relay-stalled".to_string(),
         "room-stalled".to_string(),
     )));
-    (writer, now_rx, train_rx)
+    (writer, now_rx, train_rx, terminal_rx)
 }
 
 /// Sign a relay publish as it is written. Control frames (pings, the join proof) pass
@@ -376,6 +403,7 @@ fn seal_outbound(
 }
 
 /// The scheduling policy, generic over where frames go and where presence comes from.
+#[cfg(test)]
 pub(super) async fn drive_writer<S: FrameSink, P: SurfacePresence>(
     ping_rx: mpsc::Receiver<Message>,
     now_rx: mpsc::Receiver<Message>,
@@ -383,13 +411,16 @@ pub(super) async fn drive_writer<S: FrameSink, P: SurfacePresence>(
     sink: S,
     presence: P,
 ) -> Result<(), String> {
-    drive_writer_with_signer(ping_rx, now_rx, train_rx, sink, presence, None).await
+    let (terminal_tx, terminal_rx) = mpsc::channel(TERMINAL_QUEUE_CAPACITY);
+    drop(terminal_tx);
+    drive_writer_with_signer(ping_rx, now_rx, train_rx, terminal_rx, sink, presence, None).await
 }
 
 pub(super) async fn drive_writer_with_signer<S: FrameSink, P: SurfacePresence>(
     mut ping_rx: mpsc::Receiver<Message>,
     mut now_rx: mpsc::Receiver<Message>,
     mut train_rx: mpsc::Receiver<TrainFrame>,
+    mut terminal_rx: mpsc::Receiver<Message>,
     mut sink: S,
     presence: P,
     signer: Option<std::sync::Arc<super::RelayContentCrypto>>,
@@ -413,6 +444,9 @@ pub(super) async fn drive_writer_with_signer<S: FrameSink, P: SurfacePresence>(
     // is the orderly path, not the guarantee.
     let mut now_closed = false;
     let mut train_closed = false;
+    let mut terminal_closed = false;
+    let mut terminal_frame = None;
+    let mut next_terminal_at = Instant::now();
 
     loop {
         // 0. Heartbeat pings first, unconditionally. They keep the session alive and
@@ -490,65 +524,52 @@ pub(super) async fn drive_writer_with_signer<S: FrameSink, P: SurfacePresence>(
             Err(mpsc::error::TryRecvError::Empty) => {}
         }
 
-        // 4. Wait for whichever comes first.
-        if let Some(deadline) = next_chunk_at {
-            if now_closed {
-                // Nothing more can arrive; just pace out what we accepted.
-                sleep_until(deadline).await;
-                continue;
+        if terminal_frame.is_none() {
+            match terminal_rx.try_recv() {
+                Ok(message) => terminal_frame = Some(message),
+                Err(mpsc::error::TryRecvError::Disconnected) => terminal_closed = true,
+                Err(mpsc::error::TryRecvError::Empty) => {}
             }
-            tokio::select! {
-                biased;
-                received = ping_rx.recv() => {
-                    if let Some(ping) = received {
-                        write_broker_frame(&mut sink, signer.as_deref(), ping).await?;
-                    }
-                }
-                received = now_rx.recv() => match received {
-                    Some(message) => {
-                                write_broker_frame(&mut sink, signer.as_deref(), message).await?;
-                    }
-                    None => now_closed = true,
-                },
-                () = sleep_until(deadline) => {}
-            }
+        }
+        if terminal_frame.is_some() && next_terminal_at <= Instant::now() {
+            write_broker_frame(&mut sink, signer.as_deref(), terminal_frame.take().unwrap())
+                .await?;
+            next_terminal_at = Instant::now() + TERMINAL_FRAME_INTERVAL;
             continue;
         }
-
-        // No train resident. Once both channels are closed there is nothing left to do.
-        if now_closed && train_closed {
+        if now_closed
+            && train_closed
+            && terminal_closed
+            && train.is_empty()
+            && terminal_frame.is_none()
+        {
             return Ok(());
         }
-
-        // Every waiting path below must keep listening for pings. The idle wait is the
-        // one the relay spends almost all its time in, so a version of this select
-        // without the ping arm does not merely delay a heartbeat — it never notices one
-        // until some other frame happens to wake the loop, and the session tears itself
-        // down over a connection that was fine.
+        let deadline = next_chunk_at
+            .into_iter()
+            .chain(terminal_frame.as_ref().map(|_| next_terminal_at))
+            .min();
         tokio::select! {
             biased;
-            received = ping_rx.recv() => {
+            received = ping_rx.recv(), if !ping_rx.is_closed() => {
                 if let Some(ping) = received {
                     write_broker_frame(&mut sink, signer.as_deref(), ping).await?;
                 }
             }
             received = now_rx.recv(), if !now_closed => match received {
-                Some(message) => {
-                    write_broker_frame(&mut sink, signer.as_deref(), message).await?;
-                }
+                Some(message) => write_broker_frame(&mut sink, signer.as_deref(), message).await?,
                 None => now_closed = true,
             },
-            received = train_rx.recv(), if !train_closed => match received {
-                Some(frame) => accept_train(
-                    frame,
-                    &mut train,
-                    &mut train_interval,
-                    &mut train_watch_target,
-                    &mut next_chunk_at,
-                    last_chunk_at,
-                ),
+            received = train_rx.recv(), if train.is_empty() && !train_closed => match received {
+                Some(frame) => accept_train(frame, &mut train, &mut train_interval,
+                    &mut train_watch_target, &mut next_chunk_at, last_chunk_at),
                 None => train_closed = true,
             },
+            received = terminal_rx.recv(), if terminal_frame.is_none() && !terminal_closed => match received {
+                Some(message) => terminal_frame = Some(message),
+                None => terminal_closed = true,
+            },
+            () = async { if let Some(at) = deadline { sleep_until(at).await; } }, if deadline.is_some() => {},
         }
     }
 }

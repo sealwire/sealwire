@@ -72,7 +72,7 @@ fn signed_test_payload(
     request: serde_json::Value,
     sid: &str,
 ) -> serde_json::Value {
-    let (writer, _, _) = super::super::writer::test_writer_with_identity();
+    let (writer, _, _, _terminal_rx) = super::super::writer::test_writer_with_identity();
     super::super::request_auth::test_signed_request(
         &ed25519_dalek::SigningKey::from_bytes(&[31; 32]),
         &writer.request_binding().unwrap(),
@@ -111,7 +111,8 @@ async fn deliver_as(
     else {
         panic!("not an action payload");
     };
-    let (writer, mut replies, _trains) = super::super::writer::test_writer_with_identity();
+    let (writer, mut replies, _trains, _terminal_rx) =
+        super::super::writer::test_writer_with_identity();
     // Boxed: the handler's future is too large for a test thread's stack in debug builds.
     Box::pin(handle_encrypted_remote_action(
         state,
@@ -741,7 +742,7 @@ async fn claim_completion_is_checked_before_cache_and_isolated_per_connection() 
 #[tokio::test]
 async fn broker_presence_cannot_authenticate_a_device_and_rejoins_drop_its_binding() {
     let (state, relay, _) = device_proof_test_state().await;
-    let (writer, _replies, _trains) = super::super::writer::test_writer();
+    let (writer, _replies, _trains, _terminal_rx) = super::super::writer::test_writer();
     super::super::handle_server_message(
         &state,
         &writer,
@@ -2407,7 +2408,7 @@ async fn queueing_a_chunk_train_does_not_block_the_read_loop() {
     relay.write().await.mark_surface_peer_online("surface-1");
     let state = AppState::from_parts(relay, HashMap::new(), change_tx);
 
-    let (writer, _now_queue, mut queued) = super::super::writer::test_writer();
+    let (writer, _now_queue, mut queued, _terminal_rx) = super::super::writer::test_writer();
     let chunks = workspace_diff_chunks("surface-1", 21);
 
     let started_at = tokio::time::Instant::now();
@@ -3236,7 +3237,7 @@ fn encrypted_actions_require_the_authenticated_action_id() {
 
 /// What the phone reads in its reply to `action-1`, sealed with `response_secret`.
 async fn reply_text(state: &AppState, response_secret: Option<&str>) -> String {
-    let (writer, mut now_queue, _queued) = super::super::writer::test_writer();
+    let (writer, mut now_queue, _queued, _terminal_rx) = super::super::writer::test_writer();
     publish_remote_action_result_private(
         state,
         &writer,

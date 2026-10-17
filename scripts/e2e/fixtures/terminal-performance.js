@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Terminal } from "@xterm/xterm";
 import { SessionPresentation } from "../../../frontend/shared/native-terminal.js";
 
-const metrics = window.__metrics = { reads: 0, resizeWrites: 0, latencies: [], parseTimes: [], writes: 0, bytes: 0 };
+const metrics = window.__metrics = { reads: 0, resizeWrites: 0, latencies: [], parseTimes: [], writes: 0, bytes: 0, inputRequests: 0, inputChunks: [], sent: "" };
 const pressed = [];
 const delay = Number(new URLSearchParams(location.search).get("delay"));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -25,14 +25,14 @@ Terminal.prototype.write = function (data, callback) {
     callback?.();
   });
 };
-let onFrame, offset = 0;
-const frame = (data = "") => ({ terminal_id: "bench", thread_id: "bench", offset: offset += data.length, cols: 90, rows: 25, data: btoa(data), reset: false, exited: false });
+let onFrame, offset = 0, cols = 90, rows = 25;
+const frame = (data = "") => ({ terminal_id: "bench", thread_id: "bench", offset: offset += data.length, cols, rows, data: btoa(data), reset: false, exited: false });
 const transport = async (action, input) => {
   if (delay) await sleep(delay);
   if (action === "open") return frame();
   if (action === "input") {
-    if (input.data) void onFrame(frame(input.data));
-    if (input.cols) metrics.resizeWrites++;
+    if (input.data) { metrics.inputRequests++; metrics.inputChunks.push(input.data); metrics.sent += input.data; void onFrame(frame(input.data)); }
+    if (input.cols) { metrics.resizeWrites++; cols = input.cols; rows = input.rows; void onFrame(frame()); }
   }
   if (action === "read") throw new Error("terminal output must use push");
   return {};

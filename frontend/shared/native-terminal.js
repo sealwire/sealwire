@@ -68,33 +68,51 @@ function NativeTerminal({ threadId, transport, waitUntilIdle }) {
     let inputTimer;
     let buffered = "";
     let sequence = 0;
+    let inputPending = false;
+    let closing = false;
     const stream = crypto.randomUUID();
     let terminalId;
+    let pendingSize;
     const report = (error) => { if (!cancelled) { stopStream?.(); setError(error.message || String(error)); } };
     const write = (input) => {
       const id = terminalId;
       writes = writes.then(() => transport("input", { thread_id: threadId, terminal_id: id, ...input })).catch((error) => { if (id === terminalId) report(error); });
+      return writes;
     };
-    function flush() {
+    function flush(all = false) {
       clearTimeout(inputTimer);
-      if (!buffered || cancelled) return;
-      for (const data of buffered.match(/[\s\S]{1,4096}/gu) || []) write({ data, input_stream_id: stream, input_seq: ++sequence });
-      buffered = "";
+      if (!buffered || cancelled || (inputPending && !all)) return;
+      if (all) {
+        for (const data of buffered.match(/[\s\S]{1,4096}/gu) || []) write({ data, input_stream_id: stream, input_seq: ++sequence });
+        buffered = "";
+        return;
+      }
+      const data = buffered.match(/^[\s\S]{1,4096}/u)[0];
+      buffered = buffered.slice(data.length);
+      inputPending = true;
+      void write({ data, input_stream_id: stream, input_seq: ++sequence }).finally(() => { inputPending = false; flush(); });
     }
     controls.current.send = (data) => {
-      if (!terminalId || cancelled) return;
+      if (!terminalId || cancelled || closing) return;
+      // Standalone control keys must still enter the workflow stop handler.
+      if (/^[\x1b\x03\x04\x1a]$/.test(data)) {
+        flush(true);
+        write({ data, input_stream_id: stream, input_seq: ++sequence });
+        return;
+      }
       buffered += data;
       if (/[\r\x03\x1b]/.test(data) || buffered.length >= 4096) flush();
       else { clearTimeout(inputTimer); inputTimer = setTimeout(flush, 0); }
     };
     controls.current.close = async () => {
+      closing = true;
       try {
-        flush();
+        flush(true);
         await writes;
         await transport("close", { thread_id: threadId, terminal_id: terminalId });
         setRunning(false);
         setStatus(t("Terminal closed; session keeps running"));
-      } catch (error) { report(error); }
+      } catch (error) { closing = false; report(error); }
     };
     async function run() {
       setError("");
@@ -132,7 +150,8 @@ function NativeTerminal({ threadId, transport, waitUntilIdle }) {
           setError("");
         }
         await output.push(frame);
-        if (cancelled) return;
+        if (pendingSize === `${frame.terminal_id}:${frame.cols}:${frame.rows}`) pendingSize = null;
+        if (cancelled || closing) return;
         setExited(frame.exited);
         setStatus(frame.exited ? t("Terminal exited") : t("Live terminal"));
         if (replaced) queueMicrotask(resize);
@@ -143,27 +162,30 @@ function NativeTerminal({ threadId, transport, waitUntilIdle }) {
         if (/^\x1b\[[?>]?[\d;]*[cRn]$/.test(data)) return;
         controls.current.send(data);
       });
-      let lastSize = `${frame.cols}:${frame.rows}`;
-      function resize() {
+      let lastSize = `${terminalId}:${frame.cols}:${frame.rows}`;
+      function resize(force = false) {
         if (cancelled || !terminalId) return;
         const proposed = fit.proposeDimensions();
-        if (proposed && `${proposed.cols}:${proposed.rows}` !== lastSize) {
-          lastSize = `${proposed.cols}:${proposed.rows}`;
-          write({ cols: Math.max(20, Math.min(500, proposed.cols)), rows: Math.max(5, Math.min(200, proposed.rows)) });
+        if (proposed) {
+          const cols = Math.max(20, Math.min(500, proposed.cols)), rows = Math.max(5, Math.min(200, proposed.rows));
+          const size = `${terminalId}:${cols}:${rows}`;
+          if (size === pendingSize || (size === lastSize && !(force && (cols !== terminal.cols || rows !== terminal.rows)))) return;
+          lastSize = pendingSize = size;
+          write({ cols, rows });
         }
       }
       resize();
-      observer = new ResizeObserver(resize);
+      observer = new ResizeObserver(() => resize());
       observer.observe(mount.current);
       focusTarget = mount.current;
-      focusHandler = resize;
+      focusHandler = () => resize(true);
       focusTarget.addEventListener("focusin", focusHandler);
       controls.current.focus = () => terminal.focus();
       stopStream = transport.subscribe({ thread_id: threadId, terminal_id: terminalId }, apply, report);
     }
     void run().catch(report);
     return () => {
-      flush();
+      flush(true);
       cancelled = true;
       stopStream?.();
       output?.dispose();

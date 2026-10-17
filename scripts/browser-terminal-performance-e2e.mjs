@@ -19,20 +19,24 @@ let browser;
 try {
   await waitForHealth(origin, 30000);
   ({ browser } = await launchBrowser());
-  for (const delay of [0, 80]) {
+  for (const [delay, keyInterval] of [[0, 90], [80, 90], [80, 20]]) {
     const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`${origin}/static/${name}.html?delay=${delay}`);
     await page.getByText("Live terminal", { exact: true }).waitFor();
     await page.locator(".xterm-helper-textarea").focus();
-    await page.keyboard.type("abcdefghijklmnopqrst", { delay: 90 });
+    await page.keyboard.type("abcdefghijklmnopqrst", { delay: keyInterval });
     await page.waitForFunction(() => window.__metrics.latencies.length === 20);
     const result = await page.evaluate(() => structuredClone(window.__metrics));
     const median = percentile(result.latencies, 0.5);
-    assert.ok(median < delay + 70, `echo latency ${median}ms with ${delay}ms simulated request delay`);
+    assert.ok(median < delay * 2 + 70, `echo latency ${median}ms with ${delay}ms simulated request delay`);
+    if (keyInterval < delay) {
+      assert.ok(result.inputRequests < 12, "unacknowledged keystrokes must merge into the next request");
+    }
     assert.equal(result.resizeWrites, 1);
-    console.log(JSON.stringify({ simulatedRequestDelayMs: delay, keyEchoMedianMs: median, keyEchoP95Ms: percentile(result.latencies, 0.95), parseMedianMs: percentile(result.parseTimes, 0.5), resizeWrites: result.resizeWrites, pollRequests: result.reads, typed: result.latencies.length }));
+    console.log(JSON.stringify({ simulatedRequestDelayMs: delay, keyIntervalMs: keyInterval, inputRequests: result.inputRequests, keyEchoMedianMs: median, keyEchoP95Ms: percentile(result.latencies, 0.95), parseMedianMs: percentile(result.parseTimes, 0.5), resizeWrites: result.resizeWrites, pollRequests: result.reads, typed: result.latencies.length }));
+    assert.equal(result.sent, "abcdefghijklmnopqrst");
     if (delay === 0) {
       const elapsed = await page.evaluate(async () => {
         const start = performance.now(); await window.__burst(256 * 1024); return performance.now() - start;
@@ -44,6 +48,15 @@ try {
       console.log(shot);
     }
     assert.deepEqual(errors, []);
+    if (keyInterval < delay) {
+      await page.keyboard.type("uv", { delay: 0 });
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => window.__metrics.inputChunks.includes("\x1b"));
+      await page.keyboard.type("wxyz", { delay: 0 });
+      await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+      await page.getByText("Terminal closed; session keeps running", { exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => window.__metrics.sent), "abcdefghijklmnopqrstuv\x1bwxyz", "closing must flush every pending key in order");
+    }
     await page.close();
   }
 } finally {

@@ -85,6 +85,170 @@ fn plain_train(chunks: Vec<Message>, interval_ms: u64) -> TrainFrame {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn terminal_output_is_bounded_and_controls_overtake_its_pacing_gap() {
+    let (written, sink) = recorder();
+    let (ping_tx, ping_rx) = mpsc::channel(4);
+    let (now_tx, now_rx) = mpsc::channel(4);
+    let (train_tx, train_rx) = mpsc::channel(1);
+    let (terminal_tx, terminal_rx) = mpsc::channel(TERMINAL_QUEUE_CAPACITY);
+    let writer = tokio::spawn(drive_writer_with_signer(
+        ping_rx,
+        now_rx,
+        train_rx,
+        terminal_rx,
+        sink,
+        always_online(),
+        None,
+    ));
+    terminal_tx.send(text("terminal-0")).await.unwrap();
+    tokio::task::yield_now().await;
+    terminal_tx.send(text("terminal-1")).await.unwrap();
+    tokio::task::yield_now().await;
+    terminal_tx.try_send(text("terminal-2")).unwrap();
+    assert!(matches!(
+        terminal_tx.try_send(text("too-far-ahead")),
+        Err(mpsc::error::TrySendError::Full(_))
+    ));
+    now_tx.send(text("stop-result")).await.unwrap();
+    ping_tx.send(Message::Ping(Vec::new())).await.unwrap();
+    train_tx
+        .send(plain_train(train_of("review-", 2), 50))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    let output = written.lock().unwrap().clone();
+    assert!(output.contains(&"stop-result".to_string()));
+    assert!(output.contains(&"PING".to_string()));
+    assert!(output.contains(&"review-0".to_string()));
+    assert!(!output.contains(&"terminal-1".to_string()));
+    drop(ping_tx);
+    drop(now_tx);
+    drop(train_tx);
+    drop(terminal_tx);
+    writer.await.unwrap().unwrap();
+    let output = written.lock().unwrap().clone();
+    assert_eq!(
+        output
+            .iter()
+            .filter(|line| line.starts_with("terminal-"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        train_of_labels("terminal-", 3)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_socket_does_not_put_stop_behind_the_terminal_backlog() {
+    struct SlowSink(Arc<Mutex<Vec<(String, Instant)>>>);
+    impl FrameSink for SlowSink {
+        async fn send_frame(&mut self, message: Message) -> Result<(), String> {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            if let Message::Text(text) = message {
+                self.0.lock().unwrap().push((text, Instant::now()));
+            }
+            Ok(())
+        }
+    }
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let (_ping_tx, ping_rx) = mpsc::channel(4);
+    let (now_tx, now_rx) = mpsc::channel(4);
+    let (_train_tx, train_rx) = mpsc::channel(1);
+    let (terminal_tx, terminal_rx) = mpsc::channel(TERMINAL_QUEUE_CAPACITY);
+    let writer = tokio::spawn(drive_writer_with_signer(
+        ping_rx,
+        now_rx,
+        train_rx,
+        terminal_rx,
+        SlowSink(written.clone()),
+        always_online(),
+        None,
+    ));
+    let producer = tokio::spawn(async move {
+        for i in 0..100 {
+            if terminal_tx
+                .send(text(&format!("terminal-{i}")))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let stop_at = Instant::now();
+    now_tx.send(text("stop-result")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    let output = written.lock().unwrap();
+    assert_eq!(output[0].0, "terminal-0");
+    assert_eq!(output[1].0, "stop-result");
+    assert!(output[1].1 - stop_at < Duration::from_millis(160));
+    drop(output);
+    producer.abort();
+    writer.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_pacing_is_shared_across_producers_and_keeps_the_idle_first_frame_immediate() {
+    let (written, sink) = recorder();
+    let (_ping_tx, ping_rx) = mpsc::channel(4);
+    let (now_tx, now_rx) = mpsc::channel(4);
+    let (train_tx, train_rx) = mpsc::channel(1);
+    let (terminal_tx, terminal_rx) = mpsc::channel(TERMINAL_QUEUE_CAPACITY);
+    let writer = tokio::spawn(drive_writer_with_signer(
+        ping_rx,
+        now_rx,
+        train_rx,
+        terminal_rx,
+        sink,
+        always_online(),
+        None,
+    ));
+    let start = Instant::now();
+    let mut producers = Vec::new();
+    for view in 0..4 {
+        let tx = terminal_tx.clone();
+        producers.push(tokio::spawn(async move {
+            for i in 0..8 {
+                tx.send(text(&format!("view-{view}-{i}"))).await.unwrap();
+            }
+        }));
+    }
+    tokio::task::yield_now().await;
+    assert_eq!(written.lock().unwrap().len(), 1);
+    assert_eq!(Instant::now(), start);
+    for producer in producers {
+        producer.await.unwrap();
+    }
+    drop(terminal_tx);
+    drop(now_tx);
+    drop(train_tx);
+    writer.await.unwrap().unwrap();
+    assert_eq!(written.lock().unwrap().len(), 32);
+    assert!(Instant::now() - start >= TERMINAL_FRAME_INTERVAL * 31);
+}
+
+#[test]
+fn terminal_and_existing_stream_cadences_fit_the_default_broker_budgets() {
+    use crate::broker::remote_actions::REMOTE_ACTION_RESULT_CHUNK_PUBLISH_INTERVAL_MILLIS;
+    use crate::broker::{
+        MAX_BROKER_TEXT_FRAME_BYTES, MAX_DELTAS_PER_DRAIN, SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS,
+        TRANSCRIPT_DELTA_PUBLISH_WINDOW_MILLIS,
+    };
+    let terminal = 60_000 / TERMINAL_FRAME_INTERVAL.as_millis() as usize;
+    let train = 60_000 / REMOTE_ACTION_RESULT_CHUNK_PUBLISH_INTERVAL_MILLIS as usize;
+    let deltas = 60_000 / TRANSCRIPT_DELTA_PUBLISH_WINDOW_MILLIS as usize * MAX_DELTAS_PER_DRAIN;
+    let snapshots = 60_000 / SNAPSHOT_PUBLISH_MIN_INTERVAL_MILLIS as usize;
+    assert!(
+        terminal + train + deltas + snapshots
+            < relay_broker::DEFAULT_RELAY_PUBLISH_RATE_LIMIT_PER_MINUTE
+    );
+    assert!(
+        (terminal + train) * MAX_BROKER_TEXT_FRAME_BYTES * 2
+            <= relay_broker::DEFAULT_RELAY_PUBLISH_BYTES_PER_MINUTE
+    );
+}
+
 /// The point of the whole module: a snapshot queued while a 21-chunk reply is pacing
 /// must not wait out the reply.
 #[tokio::test(start_paused = true)]
@@ -432,7 +596,7 @@ async fn a_stalled_writer_can_be_cancelled_when_its_session_ends() {
 /// Cheap to reach, too: a replayed action id is served from cache without redoing work.
 #[tokio::test(start_paused = true)]
 async fn a_saturated_train_queue_reports_busy_instead_of_parking_the_caller() {
-    let (writer, _now_rx, _train_rx) = test_writer();
+    let (writer, _now_rx, _train_rx, _terminal_rx) = test_writer();
 
     assert_eq!(
         writer
@@ -836,10 +1000,12 @@ async fn emission_order_seals_each_recipient_without_probe_side_effects() {
     let (_ping_tx, ping_rx) = mpsc::channel(4);
     let (now_tx, now_rx) = mpsc::channel(64);
     let (train_tx, train_rx) = mpsc::channel(1);
+    let (terminal_tx, terminal_rx) = mpsc::channel(1);
     let writer = tokio::spawn(drive_writer_with_signer(
         ping_rx,
         now_rx,
         train_rx,
+        terminal_rx,
         sink,
         always_online(),
         Some(std::sync::Arc::clone(&crypto)),
@@ -869,6 +1035,19 @@ async fn emission_order_seals_each_recipient_without_probe_side_effects() {
     let second_train: Vec<Message> = (0..3)
         .map(|index| content_publish(&crypto, "phone-a", chunk_body(index, 3)))
         .collect();
+    for index in 0..3 {
+        terminal_tx
+            .send(content_publish(
+                &crypto,
+                "phone-b",
+                serde_json::json!({
+                    "kind": "encrypted_terminal_frame", "device_id": "device-b",
+                    "envelope": { "nonce": format!("term-{index}"), "ciphertext": "opaque" },
+                }),
+            ))
+            .await
+            .unwrap();
+    }
     train_tx
         .send(plain_train(second_train, 100))
         .await
@@ -890,6 +1069,7 @@ async fn emission_order_seals_each_recipient_without_probe_side_effects() {
     );
     now_tx.send(stale).await.expect("stale frame queues");
     now_tx.send(fresh).await.expect("fresh frame queues");
+    drop(terminal_tx);
     drop(now_tx);
     drop(train_tx);
     writer
@@ -952,7 +1132,7 @@ async fn emission_order_seals_each_recipient_without_probe_side_effects() {
     );
     assert_eq!(
         phone_b_nonces,
-        (1..=20).map(|nonce| nonce.to_string()).collect::<Vec<_>>()
+        (1..=23).map(|nonce| nonce.to_string()).collect::<Vec<_>>()
     );
     assert!(
         saw_fresh,
