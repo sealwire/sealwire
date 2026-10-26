@@ -503,20 +503,6 @@ fn seat_mcp_server_entry(run_id: &str) -> Value {
     })
 }
 
-/// ACP agents run in a folder of their own (OpenCode's discovery folder, Cursor's
-/// neutral or trusted one), so a script path relative to the relay would miss.
-fn absolute_script(mut entry: Value) -> Value {
-    if let Some(path) = entry["args"][0].as_str() {
-        let path = std::path::Path::new(path);
-        if path.is_relative() {
-            if let Ok(cwd) = std::env::current_dir() {
-                entry["args"][0] = json!(cwd.join(path));
-            }
-        }
-    }
-    entry
-}
-
 #[cfg(test)]
 pub(crate) fn seat_mcp_server_entry_for_test(run_id: &str) -> Value {
     seat_mcp_server_entry(run_id)
@@ -533,12 +519,12 @@ impl AcpBridge {
         let Some(token) = token else {
             return json!([]);
         };
-        json!([absolute_script(peer_mcp_server_entry(token))])
+        json!([peer_mcp_server_entry(token)])
     }
 
     /// Seat MCP for ACP: array shape, env as name/value pairs, run id only.
     async fn seat_mcp_servers(&self, run_id: &str) -> Value {
-        json!([absolute_script(seat_mcp_server_entry(run_id))])
+        json!([seat_mcp_server_entry(run_id)])
     }
 
     /// Reattach MCP: retained Task seat wins, then ordinary standalone peer,

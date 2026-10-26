@@ -56,18 +56,12 @@ impl PiBridge {
         for value in env.as_object_mut().unwrap().values_mut() {
             *value = json!(literal(value.as_str().unwrap()));
         }
-        let path = std::path::PathBuf::from(provider::sealwire_mcp_bridge_path());
-        let path = if path.is_absolute() {
-            path
-        } else {
-            std::env::current_dir().unwrap_or_default().join(path)
-        };
         (
             Some(json!({
                 "name": name,
                 "server": {
                     "command": std::env::var("CLAUDE_NODE_BINARY").unwrap_or_else(|_| "node".into()),
-                    "args": [path.to_string_lossy()],
+                    "args": [provider::sealwire_mcp_bridge_path()],
                     "env": env,
                     "exposure": "direct",
                 }

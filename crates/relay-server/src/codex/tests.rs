@@ -5461,6 +5461,24 @@ fn the_codex_mcp_config_is_the_shape_codex_actually_parses() {
     );
 }
 
+// Codex starts the bridge inside the thread's own folder, so a script path relative to
+// the relay only resolved for threads opened in this repo; elsewhere the tools vanished.
+#[test]
+fn the_codex_bridge_script_is_found_from_any_thread_folder() {
+    for config in [
+        super::peer_mcp_servers("tok-1"),
+        super::seat_mcp_servers("run-7"),
+    ] {
+        let (_, server) = config.as_object().unwrap().iter().next().unwrap();
+        let script = std::path::Path::new(server["args"][0].as_str().expect("script arg"));
+        assert!(
+            script.is_absolute() && script.is_file(),
+            "{}",
+            script.display()
+        );
+    }
+}
+
 // Probed against codex-cli 0.156.1: an on-request / workspace-write thread asks
 // `mcpServer/elicitation/request` before every call, which the relay never answers, so
 // a restricted peer's `report_back` hung. The relay gates these tools itself, and approves

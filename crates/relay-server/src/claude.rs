@@ -315,7 +315,7 @@ pub(crate) fn npm_release_claude_worker_path() -> &'static str {
     "claude-worker/worker.mjs"
 }
 
-fn default_claude_worker_path() -> String {
+pub(crate) fn default_claude_worker_path() -> String {
     // env!("CARGO_MANIFEST_DIR") is a compile-time string literal — remap-path-prefix
     // does not rewrite it. Keep it for debug and ordinary --release so local
     // developer discovery still works; exclude it only from release-npm via the

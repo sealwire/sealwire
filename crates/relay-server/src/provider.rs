@@ -350,15 +350,20 @@ pub fn relay_mcp_server_name(token: &str) -> String {
 }
 
 /// Where the sealwire MCP bridge script lives, beside the worker that is
-/// actually running. One definition: two providers resolve it, and a path rule
-/// kept in two places is a path rule that drifts.
+/// actually running. Always absolute: providers start the bridge in the session's
+/// own folder, where a path relative to the relay does not resolve.
 pub fn sealwire_mcp_bridge_path() -> String {
-    let worker = std::env::var("CLAUDE_WORKER_PATH").unwrap_or_default();
-    std::path::Path::new(&worker)
+    let worker = std::env::var("CLAUDE_WORKER_PATH")
+        .unwrap_or_else(|_| crate::claude::default_claude_worker_path());
+    let bridge = std::path::Path::new(&worker)
         .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .map(|dir| dir.join("orchestrator-mcp.mjs").display().to_string())
-        .unwrap_or_else(|| "claude-worker/orchestrator-mcp.mjs".to_string())
+        .unwrap_or(std::path::Path::new(""))
+        .join("orchestrator-mcp.mjs");
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join(bridge)
+        .display()
+        .to_string()
 }
 
 /// The relay's own URL, as the bridge subprocess must reach it.
