@@ -626,8 +626,6 @@ export function createSessionRenderer({
         viewingConversation || Boolean(activeProjectId) || Boolean(threadListUi.drawerOpen);
     }
 
-    syncThreadHistoryScroll();
-
     // One salience-ordered decision in a single tested place (status-badge.js), so
     // the provider-outage and task labels come from the shared session-status seam
     // instead of a second hardcoded copy that silently drifts. Local-only transient
@@ -756,8 +754,6 @@ export function createSessionRenderer({
     renderTranscript(session, approval);
     renderLogs(session.logs);
     syncThreadSelection();
-    syncThreadHistoryScroll();
-    restoreThreadHistoryScroll();
     if (
       viewingConversation &&
       session.active_thread_id &&
@@ -1479,11 +1475,6 @@ export function createSessionRenderer({
     const threadListUi = readThreadListUi(state.threadListStore);
     const selectedCwd = canonicalizeWorkspace(threadListUi.selectedCwd || state.selectedCwd);
     const viewedThreadId = state.viewThreadId || null;
-    const previousScrollTop =
-      appShell?.dataset.view === "conversation"
-        ? state.pendingThreadHistoryScrollTop ??
-          Math.max(state.threadHistoryScrollTop, threadsList?.scrollTop || 0)
-        : 0;
     // Read the context-menu target so React can paint the `is-context-target`
     // highlight on the matching row below. If that thread has vanished (deleted
     // out from under an open menu), close the menu — but WITHOUT re-rendering,
@@ -1710,15 +1701,6 @@ export function createSessionRenderer({
         threadReviewing: threadReviewingSet,
       })
     );
-
-    window.requestAnimationFrame(() => {
-      syncThreadHistoryScroll();
-      if (appShell?.dataset.view === "conversation" && previousScrollTop > 0) {
-        const maxScrollTop = Math.max(0, threadsList.scrollHeight - threadsList.clientHeight);
-        threadsList.scrollTop = Math.min(previousScrollTop, maxScrollTop);
-        state.threadHistoryScrollTop = threadsList.scrollTop;
-      }
-    });
   }
 
   // The sidebar's destination nav, in both of its forms.
@@ -3095,59 +3077,6 @@ export function createSessionRenderer({
     });
   }
 
-  function syncThreadHistoryScroll() {
-    if (!threadsList || !sessionHistoryDrawer || !appShell) {
-      return;
-    }
-
-    if (appShell.dataset.view !== "conversation") {
-      threadsList.style.height = "";
-      threadsList.style.maxHeight = "";
-      return;
-    }
-
-    window.requestAnimationFrame(() => {
-      const listRect = threadsList.getBoundingClientRect();
-      const drawerRect = sessionHistoryDrawer.getBoundingClientRect();
-      const availableHeight = Math.floor(drawerRect.bottom - listRect.top - 12);
-
-      if (availableHeight > 120) {
-        threadsList.style.height = `${availableHeight}px`;
-        threadsList.style.maxHeight = `${availableHeight}px`;
-      }
-    });
-  }
-
-  function restoreThreadHistoryScroll() {
-    if (!threadsList || !appShell || appShell.dataset.view !== "conversation") {
-      return;
-    }
-
-    const desiredScrollTop =
-      state.pendingThreadHistoryScrollTop ?? state.threadHistoryScrollTop ?? 0;
-    if (desiredScrollTop <= 0) {
-      return;
-    }
-
-    const applyScrollPosition = () => {
-      const maxScrollTop = Math.max(0, threadsList.scrollHeight - threadsList.clientHeight);
-      threadsList.scrollTop = Math.min(desiredScrollTop, maxScrollTop);
-      state.threadHistoryScrollTop = threadsList.scrollTop;
-    };
-
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        applyScrollPosition();
-      });
-    });
-
-    window.setTimeout(() => {
-      if (appShell?.dataset.view === "conversation") {
-        applyScrollPosition();
-      }
-    }, 160);
-  }
-
   function runViewTransition(update) {
     const startViewTransition = document.startViewTransition?.bind(document);
     if (typeof startViewTransition !== "function") {
@@ -3187,9 +3116,7 @@ export function createSessionRenderer({
     renderSessionUnavailable,
     renderThreadListMessage,
     renderThreads,
-    restoreThreadHistoryScroll,
     runViewTransition,
-    syncThreadHistoryScroll,
     syncThreadSelection,
   };
 }

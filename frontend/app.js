@@ -482,7 +482,6 @@ const state = {
   transcriptLiveEntryDetails: new Map(),
   transcriptLiveEntryThreadId: null,
   transcriptPreserveScroll: false,
-  pendingThreadHistoryScrollTop: null,
   providerModels: {},
   providers: [],
   forkDialog: {
@@ -512,11 +511,6 @@ const state = {
   teamsError: null,
   teamActionPending: null,
   teamActionError: null,
-  // When a session is started via a project overview's "New agent" button, this holds
-  // that project's id so the freshly-created thread can be auto-assigned to it. Set at
-  // "New agent" time, consumed once by the next start, and cleared by any plain
-  // new-session opener so a normal launch never inherits a stale project.
-  threadHistoryScrollTop: 0,
   // Sessions this browser archived/deleted. History entries outlive threads, so
   // back/forward can land on a `?thread=` that no longer exists; without a tombstone
   // the popstate handler would helpfully re-create a tab for a dead session.
@@ -1669,7 +1663,6 @@ const {
   renderSidebarNav,
   renderThreads,
   runViewTransition,
-  syncThreadHistoryScroll,
 } = renderer;
 
 // One post-commit projection path for every navigation source. The controller has
@@ -1708,10 +1701,6 @@ const {
   toggleTranscriptExpandKey,
   applyFileChange,
 } = controller;
-
-threadsList?.addEventListener("scroll", () => {
-  state.threadHistoryScrollTop = threadsList.scrollTop;
-});
 
 sessionHistoryDrawer?.addEventListener("toggle", () => {
   state.threadListStore.getState().setDrawerOpen(Boolean(sessionHistoryDrawer.open));
@@ -2727,7 +2716,6 @@ window.addEventListener("blur", () => {
 
 window.addEventListener("resize", () => {
   closeThreadContextMenu();
-  syncThreadHistoryScroll();
 });
 
 window.addEventListener("popstate", (event) => {

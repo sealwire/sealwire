@@ -1267,6 +1267,7 @@ input:focus, textarea:focus, select:focus {
 
 .conversation-list[data-thread-list-scroll-root] {
   overflow-y: auto;
+  overflow-anchor: none;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
@@ -4685,7 +4686,7 @@ body.sidebar-collapsed .app-shell[data-view="tasks"] #tasks-sidebar-toggle {
 
 .app-shell .sidebar-drawer[open] .sidebar-drawer-body {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   height: 100%;
   overflow: hidden;

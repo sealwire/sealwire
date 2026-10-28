@@ -302,8 +302,17 @@ function useThreadListVirtualizer(rows, keepIndex = -1) {
   const scrollTargetRef = useRef(null);
   const [, forceUpdate] = useReducer((value) => value + 1, 0);
   const virtualizerRef = useRef(null);
+  const measuredRowSizes = useRef(new Map());
   const scrollElement = findScrollElement(scrollTargetRef.current);
   const scrollMargin = measureScrollMargin(scrollTargetRef.current, scrollElement);
+  const sampleIndexes = useMemo(() => {
+    const types = new Set();
+    return rows.flatMap((row, index) => {
+      if (types.has(row.type)) return [];
+      types.add(row.type);
+      return [index];
+    });
+  }, [rows]);
 
   if (!virtualizerRef.current) {
     virtualizerRef.current = new Virtualizer({
@@ -322,6 +331,8 @@ function useThreadListVirtualizer(rows, keepIndex = -1) {
   const getItemKey = useCallback((index) => rows[index]?.key || index, [rows]);
   const estimateSize = useCallback((index) => {
     const row = rows[index];
+    const measuredSize = measuredRowSizes.current.get(row?.type);
+    if (measuredSize !== undefined) return measuredSize;
     if (row?.type === "group") {
       return 34;
     }
@@ -330,15 +341,23 @@ function useThreadListVirtualizer(rows, keepIndex = -1) {
     }
     return row?.group?.threads?.length && row.group.threads.length > 0 ? 38 : 36;
   }, [rows]);
+  const measureRowElement = useCallback((element, entry, instance) => {
+    const size = measureElement(element, entry, instance);
+    const type = element.dataset.rowType;
+    if (size > 0) {
+      measuredRowSizes.current.set(type, size);
+    }
+    return size;
+  }, []);
   const rangeExtractor = useCallback(
     (range) => {
-      const indexes = defaultRangeExtractor(range);
-      if (keepIndex < 0 || indexes.includes(keepIndex)) {
-        return indexes;
-      }
-      return [...indexes, keepIndex].sort((a, b) => a - b);
+      // Measure one row of each kind before scrolling; correcting oversized estimates
+      // at the bottom otherwise shrinks the scroll range and jumps the list upward.
+      const indexes = new Set([...defaultRangeExtractor(range), ...sampleIndexes]);
+      if (keepIndex >= 0) indexes.add(keepIndex);
+      return [...indexes].sort((a, b) => a - b);
     },
-    [keepIndex]
+    [keepIndex, sampleIndexes]
   );
 
   virtualizerRef.current.setOptions({
@@ -346,7 +365,7 @@ function useThreadListVirtualizer(rows, keepIndex = -1) {
     estimateSize,
     getItemKey,
     getScrollElement: () => findScrollElement(scrollTargetRef.current),
-    measureElement,
+    measureElement: measureRowElement,
     observeElementOffset,
     observeElementRect,
     overscan: VIRTUAL_OVERSCAN,

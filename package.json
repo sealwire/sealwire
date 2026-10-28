@@ -130,6 +130,7 @@
     "test:browser:local-projects": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-projects-e2e.mjs",
     "test:browser:local-shell-redesign": "npm run build && AGENT_PROVIDERS=fake node scripts/browser-local-shell-redesign-e2e.mjs",
     "test:browser:local-history-scroll": "npm run build && node scripts/browser-local-history-scroll-e2e.mjs",
+    "test:browser:sidebar-scroll": "node scripts/browser-sidebar-scroll-e2e.mjs",
     "test:browser:scroll-to-bottom": "npm run build && npm run build:relay && E2E_USE_BUILT_BINARIES=1 AGENT_PROVIDERS=fake node scripts/browser-scroll-to-bottom-e2e.mjs",
     "test:browser:stick-to-bottom": "npm run build && npm run build:relay && E2E_USE_BUILT_BINARIES=1 AGENT_PROVIDERS=fake node scripts/browser-stick-to-bottom-e2e.mjs",
     "test:browser:local-multi-live-follow": "npm run build && node scripts/browser-local-multi-live-follow-e2e.mjs",

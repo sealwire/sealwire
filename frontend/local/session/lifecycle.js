@@ -14,7 +14,6 @@ import {
   sendButton,
   startEffortInput,
   startPromptInput,
-  threadsList,
 } from "../dom.js";
 import {
   clearComposerError,
@@ -389,7 +388,6 @@ export function createLifecycleController(ctx) {
 
   async function resumeSession(threadId) {
     logLine(`Resuming session ${threadId}`);
-    state.pendingThreadHistoryScrollTop = threadsList?.scrollTop || state.threadHistoryScrollTop || 0;
 
     try {
       const response = await apiFetch("/api/session/resume", {
@@ -421,8 +419,6 @@ export function createLifecycleController(ctx) {
     } catch (error) {
       logLine(`Resume failed: ${error.message}`);
       return false;
-    } finally {
-      state.pendingThreadHistoryScrollTop = null;
     }
   }
 
